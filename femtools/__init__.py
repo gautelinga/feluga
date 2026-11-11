@@ -30,4 +30,4 @@
 dolfin_layout and hierarchical_transfer need numpy and h5py alone, abort, memory, swap and
 dof_reorder the standard library, ksp petsc4py.
 """
-__version__ = "2026.2.1"
+__version__ = "2026.2.2"

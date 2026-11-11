@@ -1,0 +1,63 @@
+"""`femtools.dolfinx`: assembly over unique dofs (periodic slaves folded onto masters).
+
+Against plain DOLFINx without periodicity (identical), against PᵀAP with an explicit P
+(square, rectangular and mixed forms; right-hand sides), against dolfinx_mpc (a periodic
+solve with nonzero Dirichlet data on the corners), on one rank and on three; and against
+dolfin's constrained_domain in one process (unique dofs, a periodic field, the operator).
+
+    python3 -m pytest tests/test_dolfinx_unique.py [-m mpi]
+"""
+import json
+import os
+import sys
+
+import pytest
+
+pytest.importorskip("dolfinx")
+pytestmark = [pytest.mark.dolfinx]
+
+from tests import support  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
+
+def _run(worker, tmp_path, ranks):
+    out = tmp_path / f"{worker}.{ranks}.json"
+    support.run([sys.executable, os.path.join(HERE, worker + ".py"), str(out)], ranks,
+                env={"PYTHONPATH": ROOT})
+    return json.loads(out.read_text())
+
+
+def _check_unique(r):
+    assert r["plain_matrix"] == 0.0 and r["plain_rhs"] == 0.0
+    for name in ("fold_square", "fold_rect", "fold_mixed"):
+        assert r[name] < 1e-14, name
+        assert r[name + "_mallocs"] == 0, name
+    assert r["fold_rhs"] < 1e-14
+    assert r["slaves_V"] == 49 and r["unique_dofs_V"] == 1176
+    assert r["roundtrip"] == 0.0
+    if r["vs_dolfinx_mpc"] is not None:
+        assert r["vs_dolfinx_mpc"] < 1e-12
+    assert r["nullspace"]
+
+
+def test_unique_dofs_serial(tmp_path):
+    _check_unique(_run("dolfinx_unique_worker", tmp_path, 1))
+
+
+@pytest.mark.mpi
+def test_unique_dofs_three_ranks(tmp_path):
+    serial = _run("dolfinx_unique_worker", tmp_path, 1)
+    parallel = _run("dolfinx_unique_worker", tmp_path, 3)
+    _check_unique(parallel)
+    assert parallel["solution_norm"] == pytest.approx(serial["solution_norm"], rel=1e-12)
+
+
+@pytest.mark.dolfin
+def test_same_unique_dofs_as_dolfin(tmp_path):
+    pytest.importorskip("dolfin")
+    r = _run("dolfinx_cross_worker", tmp_path, 1)
+    assert r["dofs"][0] == r["dofs"][1]
+    assert r["norm"] < 1e-14 and r["sum"] < 1e-14
+    assert r["operator"] < 1e-13

@@ -25,6 +25,7 @@
     femtools.dof_reorder  femtools-build-dof-reorder: dolfin's dof ordering, a library to preload
     femtools.abort       a command's entry point: one rank's failure ends the MPI job
     femtools.memory      freed heap handed back to the operating system
+    femtools.dolfinx     the DOLFINx side: periodic_box, unique dofs, assembly over them
 
 `import femtools` imports none of them; xdmf, compress, hdf5_rows, boundaries, facets,
 dolfin_layout and hierarchical_transfer need numpy and h5py alone, abort, memory, swap and

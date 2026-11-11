@@ -95,6 +95,20 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 - **`memory`**: hands freed heap back to the operating system, and reports what a process
   holds.
 
+### DOLFINx
+
+- **`dolfinx.periodic`**: `periodic_box`, the slave and master dofs of a periodic box on a
+  DOLFINx space (scalar, vector or mixed), paired by coordinates in parallel: the same
+  rule as `periodic.periodic_box`, without dolfinx_mpc.
+- **`dolfinx.unique`**: `UniqueDofs`, a space's unique dofs (periodic slaves folded onto
+  their masters) numbered compactly, as dolfin's `constrained_domain` numbers them; one
+  PETSc scatter moves a Function to a compact vector and folds an assembled right-hand
+  side. A solver then sees vectors without slave entries, on either backend.
+- **`dolfinx.assembly`**: matrices over unique dofs, folded during assembly through the
+  dof map and preallocated exactly (no slave rows, no product); right-hand sides with
+  lifting and Dirichlet values; the constants' null space. Each reassembly costs what a
+  plain DOLFINx one does.
+
 ## Requirements
 
 `import femtools` needs numpy and h5py only. dolfin, mpi4py and scipy are imported where

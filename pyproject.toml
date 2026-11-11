@@ -36,6 +36,7 @@ addopts = "-m 'not slow'"
 filterwarnings = ["ignore::DeprecationWarning:ffc.*"]
 markers = [
     "dolfin: needs legacy dolfin",
+    "dolfinx: needs DOLFINx",
     "mpi: spawns mpirun; run serially",
     "slow: minutes, not seconds",
 ]

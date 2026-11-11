@@ -108,6 +108,9 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   dof map and preallocated exactly (no slave rows, no product); right-hand sides with
   lifting and Dirichlet values; the constants' null space. Each reassembly costs what a
   plain DOLFINx one does.
+- **`dolfinx.mixed`**: `subfunction`, `set_subfunction`, `subspace` and
+  `AssignedVectorFunction`, as in `mixed`, for DOLFINx Functions (index copies through
+  the collapse dof maps, built once).
 
 ## Requirements
 

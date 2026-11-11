@@ -7,6 +7,8 @@
                                compact PETSc vectors
     femtools.dolfinx.assembly  matrices and right-hand sides over unique dofs, folded
                                during assembly; Dirichlet values; the constants' null space
+    femtools.dolfinx.mixed     subfunction / set_subfunction / subspace /
+                               AssignedVectorFunction, as femtools.mixed
 
 A solver algorithm built on these sees PETSc vectors and matrices over unique dofs only,
 as dolfin's constrained_domain gives it, whatever the periodicity. `import

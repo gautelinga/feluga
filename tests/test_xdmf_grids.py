@@ -143,3 +143,28 @@ def test_parse_xdmf_reads_a_single_grid_as_one_step_without_a_time(tmp_path):
     h5 = os.path.join(str(tmp_path), "sub", "m.h5")
     assert parse_xdmf(path, get_mesh_address=True) == (
         [(None, [h5, "/p0"])], [h5, "/topology"], [h5, "/coordinates"])
+
+
+def step_file(path, times):
+    """A time series with one grid per time, each holding its time as an attribute."""
+    grids_xml = "".join(
+        '<Grid Name="s" GridType="Uniform"><Time Value="{0}" />'
+        '<Attribute Name="t" Center="Node"><DataItem Format="XML">{0}</DataItem>'
+        '</Attribute></Grid>'.format(t) for t in times)
+    with open(path, "w") as f:
+        f.write('<?xml version="1.0"?><Xdmf Version="3.0"><Domain>'
+                '<Grid Name="TimeSeries" GridType="Collection" CollectionType="Temporal">'
+                + grids_xml + '</Grid></Domain></Xdmf>')
+
+
+def test_continued_series_merged(tmp_path):
+    """A restart from t = 0.2 replaces the steps from 0.2 on; a second one from 0.4."""
+    from xml.etree import ElementTree as ET
+    from femtools.xdmf import continued, merge_series
+    assert continued([[0, 1, 2, 3], [2, 2.5], [], [2.5, 4]], float) == [0, 1, 2, 2.5, 4]
+    files = [str(tmp_path / n) for n in ("a.xdmf", "b.xdmf", "c.xdmf")]
+    for f, times in zip(files, ([0., 0.1, 0.2, 0.3], [0.2, 0.3, 0.4], [0.4, 0.5])):
+        step_file(f, times)
+    merge_series(files)
+    times = [float(t.get("Value")) for t in ET.parse(files[0]).getroot().iter("Time")]
+    assert times == [0., 0.1, 0.2, 0.3, 0.4, 0.5] and os.listdir(tmp_path) == ["a.xdmf"]

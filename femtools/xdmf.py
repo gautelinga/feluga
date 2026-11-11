@@ -74,7 +74,8 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 from femtools import compress
-from femtools.hdf5_rows import collective_write
+from femtools.fast_interpolation import interpolate as fast_interpolate
+from femtools.lru import LRU
 
 # XDMF's Tetrahedron_10: four corners, then the midsides of these edges in order.
 XDMF_EDGES = ((0, 1), (1, 2), (0, 2), (0, 3), (1, 3), (2, 3))
@@ -554,6 +555,11 @@ def _pad3(values):
     return values
 
 
+# The degree of the nodal values a visualisation grid holds, by topology.
+_NODAL_DEGREE = {'PolyLine': 1, 'Triangle': 1, 'Tetrahedron': 1,
+                 'Edge_3': 2, 'Triangle_6': 2, 'Tetrahedron_10': 2}
+
+
 class XDMFFile2(object):
     """A stand-in for `dolfin.XDMFFile` that does not throw the quadratic part away.
 
@@ -767,14 +773,14 @@ class XDMFFile2(object):
             store = self._stored.get((mesh.id(), degree))
             if store is None or self.parameters['rewrite_function_mesh']:
                 group = doc.mesh_group(time is not None)
+                coords = _node_positions(mesh, info['layout'], info['coord_masks'])
                 store = (doc.slab(group + '/topology', info['cell_offset'],
                                   _int32(conn), n_cells),
-                         doc.rows(group + '/geometry', info['coord_rows'],
-                                  info['coords'], n_nodes))
+                         doc.rows(group + '/geometry', info['coord_rows'], coords, n_nodes))
                 self._stored[(mesh.id(), degree)] = store
             doc.topology(grid, conn, topology_type, ref=store[0],
                          shape=(n_cells, conn.shape[1]))
-            doc.geometry(grid, info['coords'], ref=store[1],
+            doc.geometry(grid, None, ref=store[1],
                          shape=(n_nodes, _gwidth(mesh)))
             if time is not None:
                 doc.time(grid, time)
@@ -994,15 +1000,16 @@ class XDMFFile2(object):
                                         df.XDMFFile.Encoding.HDF5, bool(append))
 
     def read_checkpoint(self, u, function_name, counter=-1):
-        """Reads dolfin's checkpoint, or a quadratic grid written here.
+        """Reads dolfin's checkpoint, or a time series of nodal values written here.
 
         dolfin's reader knows only its own checkpoint format. If the file instead
-        holds `Tetrahedron_10` or `Triangle_6` visualisation grids -- which dolfin
-        cannot read at all -- the field is rebuilt from the nodes, onto an
-        unconstrained space, and then interpolated onto whatever space `u` lives
-        in. Going through the
-        unconstrained space is what makes it safe for a periodic one, where matching
-        dof coordinates does not line up node for node.
+        holds visualisation grids -- P1 (`Triangle`, `Tetrahedron`, `PolyLine`) or P2
+        (`Triangle_6`, `Tetrahedron_10`, `Edge_3`), the field at the nodes, which
+        dolfin cannot read at all -- the field is rebuilt from the nodes onto an
+        unconstrained space of the grid's degree, and then interpolated onto
+        whatever space `u` lives in, of any degree (fast_interpolation). Going
+        through the unconstrained space is what makes it safe for a periodic one,
+        where matching dof coordinates does not line up node for node.
 
         `counter` defaults to -1 -- the last stored step -- because that is dolfin's
         default; a drop-in defaulting to the first step would hand back the wrong
@@ -1010,14 +1017,15 @@ class XDMFFile2(object):
         """
         import dolfin as df
         grids = _scan(self.path)
-        if any(g['topology'] in ('Tetrahedron_10', 'Triangle_6', 'Edge_3')
-               for g in grids):
-            return self._read_quadratic(u, function_name, counter, grids)
+        if any(g['topology'] in _NODAL_DEGREE and
+               (_NODAL_DEGREE[g['topology']] == 2
+                or g['centers'].get(function_name) == 'Node') for g in grids):
+            return self._read_nodal(u, function_name, counter, grids)
         comm = self.comm if self.comm is not None else df.MPI.comm_world
         with df.XDMFFile(comm, self.path) as f:
             f.read_checkpoint(u, function_name, counter)
 
-    def _read_quadratic(self, u, name, counter, grids):
+    def _read_nodal(self, u, name, counter, grids):
         import dolfin as df
         picked = [g for g in grids if name in g['attributes']]
         if not picked:
@@ -1030,29 +1038,19 @@ class XDMFFile2(object):
         grid = picked[counter]
 
         V = u.function_space()
-        element = V.ufl_element()
-        degree = element.degree()
+        degree = _NODAL_DEGREE[grid['topology']]
         width = int(np.prod(u.value_shape())) if len(u.value_shape()) else 1
         mesh = V.mesh()
-        cell = mesh.ufl_cell()
-        # The detour through an unconstrained space is what makes this safe for a
-        # *periodic* one, where matching dof coordinates is not. But when the caller's space is already
-        # that unconstrained space there is nothing to detour around, and building a
-        # second copy of it to interpolate out of is pure cost -- 13.9 s against
-        # 6.6 s for the real packing's P2 velocity, for a bit-identical vector.
-        # `_is_plain` is the writer's own test, and it is exact rather than a
-        # heuristic: a periodic space is strictly smaller than the plain one.
+        # The nodes are read into an unconstrained space and interpolated onto V,
+        # which is right for a periodic V too, where matching dof coordinates is
+        # not. When V is that unconstrained space they are read into it directly.
         if _is_plain(V, mesh, degree, width):
             _scatter_nodes(u, V, self.path, grid, name, width, degree)
             return u
-        if width > 1:
-            plain = df.FunctionSpace(mesh, df.VectorElement(
-                'Lagrange', cell, degree, dim=width))
-        else:
-            plain = df.FunctionSpace(mesh, df.FiniteElement('Lagrange', cell, degree))
+        plain = _plain_space(mesh, degree, width)
         target = df.Function(plain)
         _scatter_nodes(target, plain, self.path, grid, name, width, degree)
-        u.assign(df.interpolate(target, V))
+        fast_interpolate(target, V, out=u)
         return u
 
     # -- read ------------------------------------------------------------------
@@ -1323,7 +1321,7 @@ def _entity_topology(mesh, dim, per_cell):
     return XDMF_TOPOLOGY[(cellname, per_cell)]
 
 
-_PLAIN_SPACES = {}
+_PLAIN_SPACES = LRU(16)
 
 
 def scatter_vertex_values(f, per_vertex, width=1):
@@ -1688,25 +1686,25 @@ def _function_nodes_distributed(functions, cache=None):
     spaces alone is kept in `cache` (`_node_layout`, `_owned_nodes`), so a step of a
     time series costs its values.
     """
-    import dolfin as df
     cache = {} if cache is None else cache
     mesh, degree, widths = _check_functions(functions)
     layout = _node_layout(mesh, degree, cache)
     fields = []
-    coord_rows = coords = None
+    coord_rows = coord_masks = None
     for index, (func, width) in enumerate(zip(functions, widths)):
         source = func if _is_plain(func.function_space(), mesh, degree, width) \
-            else df.interpolate(func, _plain_space(mesh, degree, width))
+            else fast_interpolate(func, _plain_space(mesh, degree, width))
         rows, masks, takes = _owned_nodes(source.function_space(), mesh, degree,
                                           width, layout, cache)
         local = source.vector().get_local()
         values = [local[t] for t in takes]
         fields.append((func.name() if func.name() else 'f{}'.format(index), rows,
                        np.column_stack(values) if len(values) > 1 else values[0]))
-        if coords is None:
-            coord_rows, coords = rows, _node_positions(mesh, layout, masks)
+        if coord_rows is None:
+            coord_rows, coord_masks = rows, masks
     return {'n_nodes': layout['n_nodes'], 'n_cells': layout['n_cells'],
-            'degree': degree, 'mesh': mesh, 'coord_rows': coord_rows, 'coords': coords,
+            'degree': degree, 'mesh': mesh, 'layout': layout,
+            'coord_rows': coord_rows, 'coord_masks': coord_masks,
             'conn': layout['conn'], 'cell_offset': layout['cell_offset'],
             'fields': fields}
 
@@ -1896,6 +1894,39 @@ def grids(path):
                  attributes={n: h5(i, n) for n, i in g['attributes'].items()},
                  centers=g['centers'])
             for g in _scan(path)]
+
+
+def continued(series, time):
+    """Per-file lists of steps (each starting with its earliest), in the order the
+    files were written, merged into one: a later list replaces the steps from its
+    first time on, as a run restarted from a checkpoint continues the one before it,
+    whose steps after the checkpoint belong to an abandoned history. `time(step)`
+    gives a step's time."""
+    steps = []
+    for later in (s for s in series if s):
+        t0 = time(later[0])
+        steps = [s for s in steps if time(s) < t0 - 1e-9 * max(1., abs(t0))] + list(later)
+    return steps
+
+
+def merge_series(files):
+    """Merge XDMF time series, given in the order they were written, into the first
+    file: each file's steps replace the steps before it from its first time on
+    (`continued`). The other .xdmf files are deleted; the .h5 files they refer to,
+    which the merged series refers to, are kept. The files must refer to their HDF5
+    data by paths that are valid from the first file, as files in one folder do."""
+    ET.register_namespace('xi', XI)
+    trees = [ET.parse(f) for f in files]
+    collections = [tree.getroot().find('Domain').find('Grid') for tree in trees]
+    steps = [[g for g in c if g.tag == 'Grid'] for c in collections]
+    merged = continued(steps, lambda g: float(g.find('Time').get('Value')))
+    for g in list(collections[0]):
+        collections[0].remove(g)
+    for g in merged:
+        collections[0].append(g)
+    trees[0].write(files[0], xml_declaration=True)
+    for f in files[1:]:
+        os.remove(f)
 
 
 def parse_xdmf(xml_file, get_mesh_address=False):

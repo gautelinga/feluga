@@ -904,9 +904,20 @@ def _runs(comm, rows, n):
 
 def _place(rows, values, lo, hi):
     """`(block, bad)`: rows lo..hi-1 filled from `(rows, values)`; bad when a row is
-    missing or two copies differ."""
-    block = np.zeros((hi - lo,) + values.shape[1:], dtype=values.dtype)
-    if hi - lo == 0:
+    missing or two copies differ. Rows that are each row once, the usual case, are
+    placed without sorting."""
+    n = hi - lo
+    if n and len(rows) == n:
+        r = rows - lo
+        if r.min() >= 0 and r.max() < n:
+            seen = np.zeros(n, bool)
+            seen[r] = True
+            if seen.all():
+                block = np.empty((n,) + values.shape[1:], dtype=values.dtype)
+                block[r] = values
+                return block, False
+    block = np.zeros((n,) + values.shape[1:], dtype=values.dtype)
+    if n == 0:
         return block, len(rows) > 0
     order = np.argsort(rows, kind="stable")
     r, v = rows[order] - lo, values[order]

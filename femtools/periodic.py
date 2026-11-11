@@ -2,6 +2,7 @@
 
     PeriodicBox(upper, tol, periodic, lower)    a SubDomain identifying opposite faces
     periodic_box(upper, tol, periodic, lower)   the same pairing, compiled
+    periodic_box_from_bounds({axis: (lo, hi)})  that box, from the periodic axes' bounds
     faces_congruent(mesh, L, axes, lower=...)   whether identified faces carry the same nodes
     extent(mesh)                                the mesh's bounding box, over its ranks
     box_lower(mesh, axes, lower)                a box's lower corner, checked against the mesh
@@ -200,6 +201,15 @@ def periodic_box(upper, tol=df.DOLFIN_EPS_LARGE, periodic=None, lower=None, map_
                                    float(tol if map_tol is None else map_tol))
     box.lower, box.upper, box.periodic, box.tol = lower, upper, periodic, float(tol)
     return box
+
+
+def periodic_box_from_bounds(bounds, tol=1e-10, map_tol=1e-10):
+    """`periodic_box` for the axes in `bounds`, which maps each periodic axis to its
+    (lower, upper) bounds: {0: (0, Lx)} is periodic in x alone. The default `tol` is
+    above the rounding of mesh generators (gmsh leaves points ~1e-14 off a face),
+    `map_tol` dolfin's default for a SubDomain."""
+    lower, upper = ([bounds[i][k] if i in bounds else 0. for i in range(3)] for k in (0, 1))
+    return periodic_box(upper, tol, [i in bounds for i in range(3)], lower, map_tol=map_tol)
 
 
 def xyz(a):

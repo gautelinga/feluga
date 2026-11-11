@@ -203,9 +203,10 @@ def test_runs_are_recognised_only_when_they_tile_the_rows():
 
 
 def test_place_is_what_it_was():
-    """`_place` compares only the repeats and counts distinct rows from the sort: the same
-    block and verdict as comparing every neighbour and `np.unique`, on rows given once,
-    repeated, missing, repeated with other bits, and out of range."""
+    """`_place` compares only the repeats and counts distinct rows from the sort, and
+    places rows given once each without one: the same block and verdict as comparing
+    every neighbour and `np.unique`, on rows given once, shuffled, repeated, missing,
+    repeated with other bits, and out of range."""
     from femtools.hdf5_rows import _place, as_rows
 
     def before(rows, values, lo, hi):
@@ -230,7 +231,11 @@ def test_place_is_what_it_was():
     rng = np.random.default_rng(4)
     a = rng.random((50, 3))
     cases = [np.arange(10, 30), np.r_[np.arange(10, 30), [12, 12, 29]], np.arange(11, 30),
-             np.r_[np.arange(10, 30), [40]], np.zeros(0, np.int64)]
+             np.r_[np.arange(10, 30), [40]], np.zeros(0, np.int64),
+             # as many rows as the block: each once (placed without a sort), one
+             # repeated in place of another, one out of range
+             rng.permutation(np.arange(10, 30)), np.r_[np.arange(10, 29), [12]],
+             np.r_[np.arange(11, 30), [40]]]
     for rows in cases:
         for lo, hi in ((10, 30), (0, 0)):
             got, want = _place(rows, a[rows], lo, hi), before(rows, a[rows], lo, hi)

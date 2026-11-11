@@ -713,6 +713,65 @@ def test_read_quadratic_back(cell):
 
 
 @CELLS
+def test_read_linear_series_back(cell):
+    """a P1 time series (vertex values) reads back: into P1 exactly, into P2 as the
+    P1 field it is, into a periodic P1; dolfin cannot read it at all. The field is
+    linear and periodic in x[0], so every space holds it exactly."""
+    mesh = unit_mesh(3, cell)
+    P1 = df.FunctionSpace(mesh, 'CG', 1)
+    lin = df.interpolate(df.Expression('1 + 2*x[1]', degree=1), P1)
+    lin.rename('p', 'p')
+    with XDMFFile2(df.MPI.comm_world, tmp('rt1.xdmf')) as f:
+        f.write(lin, 0.0)
+    for V in (P1, df.FunctionSpace(mesh, 'CG', 2),
+              df.FunctionSpace(mesh, 'CG', 1, constrained_domain=periodic_x())):
+        back = df.Function(V)
+        with XDMFFile2(df.MPI.comm_world, tmp('rt1.xdmf')) as f:
+            f.read_checkpoint(back, 'p', 0)
+        assert_close(back.vector().get_local(), df.interpolate(lin, V).vector().get_local(),
+                     1e-12, 'P1 series into {}'.format(V.ufl_element()))
+    failed = False
+    try:
+        with df.XDMFFile(df.MPI.comm_world, tmp('rt1.xdmf')) as f:
+            f.read_checkpoint(df.Function(P1), 'p', 0)
+    except Exception:
+        failed = True
+    assert failed, 'dolfin read a P1 time series, so this path is unnecessary'
+    print('P1 series into P1, P2 and a periodic P1, exact')
+
+
+@CELLS
+def test_read_quadratic_into_linear(cell):
+    """a quadratic grid reads into a P1 space: the field at the vertices"""
+    mesh = unit_mesh(3, cell)
+    u = quadratic_field(mesh)
+    with XDMFFile2(df.MPI.comm_world, tmp('rt21.xdmf')) as f:
+        f.write(u)
+    P1 = df.FunctionSpace(mesh, 'CG', 1)
+    back = df.Function(P1)
+    with XDMFFile2(df.MPI.comm_world, tmp('rt21.xdmf')) as f:
+        f.read_checkpoint(back, 'u', 0)
+    assert_close(back.vector().get_local(), df.interpolate(u, P1).vector().get_local(),
+                 1e-12, 'P2 series into P1')
+    print('P2 series into P1, exact at the vertices')
+
+
+def test_linear_checkpoint_read_by_dolfin():
+    """a P1 checkpoint (dolfin's format, cell-wise data) is read by dolfin"""
+    mesh = unit_mesh(3)
+    P1 = df.FunctionSpace(mesh, 'CG', 1)
+    lin = df.interpolate(df.Expression('1 + 2*x[0] - x[1]', degree=1), P1)
+    with XDMFFile2(df.MPI.comm_world, tmp('chk1.xdmf')) as f:
+        f.write_checkpoint(lin, 'p', 0.0)
+    back = df.Function(P1)
+    with XDMFFile2(df.MPI.comm_world, tmp('chk1.xdmf')) as f:
+        f.read_checkpoint(back, 'p', 0)
+    assert_close(back.vector().get_local(), lin.vector().get_local(), 0.0,
+                 'P1 checkpoint round trip')
+    print('bit-exact')
+
+
+@CELLS
 def test_read_vector_back(cell):
     """a quadratic vector reads back"""
     mesh = unit_mesh(2, cell)

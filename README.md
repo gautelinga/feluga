@@ -14,6 +14,8 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   every dataset.
 - **`xdmf.grids`, `xdmf.parse_xdmf`**: where every step's HDF5 arrays are, in one reader;
   `parse_xdmf` keeps the interface of partractools' function of that name.
+- **`xdmf.merge_series`**: the time series of a run and of the restarts that continued
+  it, merged into one, each restart's steps replacing those after its checkpoint.
 - **`xdmfread`**: reads datasets with their gzip chunks inflated on a thread pool, whole or
   a chunk-row at a time. h5py inflates on one thread, which takes hours at billions of cells.
 - **`compress`, `hdf5_rows`**: compressed datasets, and rows of them read, written and
@@ -34,7 +36,10 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 ### Periodic meshes and refinement
 
 - **`periodic`**: `PeriodicBox` and the compiled `periodic_box`, the `constrained_domain` of
-  a 2D or 3D periodic box with any lower corner; `faces_congruent` checks identified faces.
+  a 2D or 3D periodic box with any lower corner (`periodic_box_from_bounds` from each
+  periodic axis's bounds); `faces_congruent` checks identified faces.
+- **`box`**: `Faces`, the boundary on given planes of a box, and `mark_walls`, every
+  boundary facet off the box's faces (the walls of the obstacles inside it), compiled.
 - **`periodic_partition`**: reads a mesh in blocks and partitions it with ParMETIS so that
   dolfin's parallel periodic dofmap pairs every face entity, which dolfin's own partition
   does not guarantee.
@@ -43,6 +48,18 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   periodic pairing.
 - **`hierarchical_transfer`**: P1 and P2 fields moved to a refined mesh through ancestor
   cells, with no point search.
+- **`fast_interpolation`**: `interpolate`, `dolfin.interpolate` between Lagrange spaces on
+  one mesh (any degrees and value shapes, a mixed or vector Function's component,
+  periodic, parallel) as one sparse product with a transfer matrix built once: 0.3 ms
+  where dolfin takes 0.7 s for P2 onto P1 on a 197k-cell 3D mesh.
+- **`fast_assembly`**: `assemble`, `dolfin.assemble` for a form object assembled again and
+  again (every time step), compiled into a dolfin Form once instead of on every call;
+  `assemble_matrix`, a constant matrix (a mass matrix, say) assembled once per form and
+  Dirichlet conditions and shared.
+- **`fast_bc`**: `apply`, `DirichletBC.apply` on a vector with the constrained dofs found
+  once instead of on every call: 0.05 ms where dolfin takes 6.5 ms on 118k P2 dofs. A
+  Constant or a Function value is followed as it changes; an Expression, a condition on
+  a component of a space and a matrix are left to dolfin.
 
 ### Point evaluation and gradients
 
@@ -52,6 +69,20 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 - **`gradient`**: the weighted gradient matrix, a P1 field's derivative at the nodes as one
   matrix-vector product. From Mikael Mortensen's fenicstools, unchanged in what it computes.
 
+### Solvers and mixed spaces
+
+- **`ksp`**: a PETSc Krylov solver set up from options under its own prefix, dolfin's
+  names for methods and preconditioners translated, with a check that PETSc built the
+  method and preconditioner asked for (a name it does not take is otherwise ignored, and
+  the solver runs with its default); `scoped`, options set for one solve and the database
+  restored after it; BoomerAMG settings that make 3D Poisson solves several times faster.
+- **`nullspace`**: `constant_nullspace`, the constants on a space or on one component of
+  a mixed space, attached to a matrix as its null space (set through the component's
+  dofmap: setting `Function(W).sub(1).vector()` sets every component).
+- **`mixed`**: `subfunction` and `set_subfunction`, a component of a mixed Function read
+  and set through its collapsed space, with the space and assigners built once;
+  `AssignedVectorFunction`, a vector Function filled from scalar components.
+
 ### Running at scale
 
 - **`dof_reorder`, `femtools-build-dof-reorder`**: dolfin's dof reordering with a sparser
@@ -59,6 +90,8 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   dolfin's own at large sizes.
 - **`abort`**: `run(main)`, so an exception on one MPI rank ends the job instead of
   hanging it.
+- **`swap`**: a folder (a checkpoint, a result) written aside, swapped in by renaming,
+  and put back by `recover` after a kill between the renames: never a mix of two.
 - **`memory`**: hands freed heap back to the operating system, and reports what a process
   holds.
 

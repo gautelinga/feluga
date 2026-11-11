@@ -14,12 +14,20 @@
     femtools.plaza_periodic  Plaza refinement that bisects identified faces alike
     femtools.refine_periodic  that refinement with the congruence guard; Dorfler threshold
     femtools.hierarchical_transfer  fields carried onto a refined mesh through its parent map
+    femtools.fast_interpolation  dolfin.interpolate between Lagrange spaces as a sparse product
+    femtools.fast_assembly  dolfin.assemble for a form assembled again and again, compiled once
+    femtools.fast_bc     DirichletBC.apply on a vector, the constrained dofs found once
+    femtools.ksp         PETSc Krylov solvers set up from options under a prefix, and checked
+    femtools.nullspace   the constants on a space, or on a mixed space's component, as a null space
+    femtools.mixed       components of mixed Functions on their own spaces; vectors from scalars
+    femtools.box         the faces of a box, and the walls of the obstacles inside it
+    femtools.swap        a folder written whole, then swapped in by renaming
     femtools.dof_reorder  femtools-build-dof-reorder: dolfin's dof ordering, a library to preload
     femtools.abort       a command's entry point: one rank's failure ends the MPI job
     femtools.memory      freed heap handed back to the operating system
 
 `import femtools` imports none of them; xdmf, compress, hdf5_rows, boundaries, facets,
-dolfin_layout and hierarchical_transfer need numpy and h5py alone, abort, memory and
-dof_reorder the standard library.
+dolfin_layout and hierarchical_transfer need numpy and h5py alone, abort, memory, swap and
+dof_reorder the standard library, ksp petsc4py.
 """
 __version__ = "2026.2.1"

@@ -157,14 +157,16 @@ def _brute_dual(cells):
     return pairs
 
 
-def test_the_dual_graph_is_every_shared_face():
+@pytest.mark.parametrize("n", [(4, 3, 2), (12, 10, 8)])
+def test_the_dual_graph_is_every_shared_face(n):
     """`dual_graph_of` on one rank -- the local pairing and the exchange both run -- is
-    the brute-force dual graph, edge for edge."""
+    the brute-force dual graph, edge for edge; the larger mesh's faces take the radix
+    sort, the smaller's std::sort."""
     import dolfin as df
     import numpy as np
     from mpi4py import MPI
     from femtools.periodic_partition import dual_graph_of
-    mesh = df.UnitCubeMesh(MPI.COMM_SELF, 4, 3, 2)
+    mesh = df.UnitCubeMesh(MPI.COMM_SELF, *n)
     cells = np.asarray(mesh.cells(), np.int64)
     rows, cols, offset = dual_graph_of(cells, MPI.COMM_SELF)
     assert offset == 0

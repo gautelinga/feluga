@@ -479,6 +479,38 @@ static inline std::uint64_t mix(std::uint64_t x)
   return x ^ (x >> 31);
 }
 
+// `a` sorted as std::sort sorts it, when the second members are distinct and ascending:
+// a stable radix sort on the first, 16 bits a pass, the four histograms counted in one
+// sweep.
+static void radix_sort(std::vector<std::pair<std::uint64_t, std::int64_t>>& a)
+{
+  const std::size_t n = a.size();
+  if (n < 4096)
+  {
+    std::sort(a.begin(), a.end());
+    return;
+  }
+  std::vector<std::size_t> count(4 << 16, 0);
+  for (const auto& p : a)
+    for (int d = 0; d < 4; ++d)
+      ++count[(d << 16) + ((p.first >> (16 * d)) & 0xffff)];
+  std::vector<std::pair<std::uint64_t, std::int64_t>> b(n);
+  for (int d = 0; d < 4; ++d)
+  {
+    std::size_t* c = &count[d << 16];
+    std::size_t sum = 0;
+    for (std::size_t k = 0; k < (1 << 16); ++k)
+    {
+      const std::size_t m = c[k];
+      c[k] = sum;
+      sum += m;
+    }
+    for (const auto& p : a)
+      b[c[(p.first >> (16 * d)) & 0xffff]++] = p;
+    a.swap(b);
+  }
+}
+
 // The rank's own half of the dual graph: its faces (sorted global vertex ids) keyed by a
 // 64-bit hash and sorted, faces with equal keys compared by their vertices. Returns
 // (rows, cols) for the pairs within the rank -- rows local, cols offset + local -- and
@@ -512,7 +544,7 @@ py::tuple local_dual(Eigen::Ref<const IMat> cells, std::int64_t offset)
     for (int j = 1; j < nf; ++j) k = mix(k ^ t[j]);
     key[f] = {k, f};
   }
-  std::sort(key.begin(), key.end());
+  radix_sort(key);
   std::vector<std::int64_t> rows, cols, lone_t, lone_c;
   rows.reserve(4 * n); cols.reserve(4 * n);
   for (std::size_t a = 0; a < key.size();)

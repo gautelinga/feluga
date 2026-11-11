@@ -59,11 +59,31 @@ def first_incident_cell(cells, n_vertices):
 
 def barycentric_from_vertices(v, points):
     """Barycentric coordinates of each point in the tetrahedron whose four vertex
-    coordinates are given as `v`, shape (n, 4, 3). Batched 3x3 solves, no search."""
+    coordinates are given as `v`, shape (n, 4, 3), no search. Each 3x3 system
+    [e1 e2 e3] lam = p - v0 is solved by Cramer's rule: the rows of the inverse are
+    the cross products of the other two edges over the volume, e1 . (e2 x e3)."""
     v0 = v[:, 0]
-    T = np.stack([v[:, k] - v0 for k in (1, 2, 3)], axis=2)
-    lam123 = np.linalg.solve(T, (np.asarray(points) - v0)[:, :, None])[:, :, 0]
-    return np.column_stack([1.0 - lam123.sum(axis=1), lam123])
+    e1, e2, e3 = (v[:, k] - v0 for k in (1, 2, 3))
+    r = np.asarray(points) - v0
+    c23, c31, c12 = _cross(e2, e3), _cross(e3, e1), _cross(e1, e2)
+    det = np.einsum("ij,ij->i", e1, c23)
+    if not det.all():
+        raise np.linalg.LinAlgError("barycentric_from_vertices: a degenerate tetrahedron")
+    lam = np.empty((len(v0), 4))
+    lam[:, 1] = np.einsum("ij,ij->i", c23, r) / det
+    lam[:, 2] = np.einsum("ij,ij->i", c31, r) / det
+    lam[:, 3] = np.einsum("ij,ij->i", c12, r) / det
+    lam[:, 0] = 1.0 - lam[:, 1] - lam[:, 2] - lam[:, 3]
+    return lam
+
+
+def _cross(a, b):
+    """Row-wise cross product of two (n, 3) arrays (1.6x faster than np.cross)."""
+    out = np.empty_like(a)
+    out[:, 0] = a[:, 1] * b[:, 2] - a[:, 2] * b[:, 1]
+    out[:, 1] = a[:, 2] * b[:, 0] - a[:, 0] * b[:, 2]
+    out[:, 2] = a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]
+    return out
 
 
 # Points are evaluated in blocks of this many. Every routine below is a per-row gather
@@ -71,17 +91,17 @@ def barycentric_from_vertices(v, points):
 # what blocking bounds is the *transient*, and the transient is what runs out. Evaluating
 # a whole mesh at once expands the source's per-cell rows to one row per point
 # (`nodal[conn10[cell_rows]]` is (n, 10, 3) for the velocity, 240 bytes a point) and lays
-# the barycentric solve, the basis and the einsum on top of that.
+# the barycentric coordinates, the basis and the einsum on top of that.
 #
 # Measured, P2 velocity at 3M points over a 200k-cell source, peak RSS of the whole
-# process (the floor -- sources, points and result -- is 295 MB):
+# process (the floor -- sources, points and result -- is about 283 MB):
 #
 #   chunk     whole      1M      500k     250k     100k      50k      25k
-#   time     3.98 s   3.60 s   3.65 s   2.92 s   2.64 s   2.77 s   2.68 s
-#   peak     1398 M    663 M    468 M    373 M    305 M    296 M    296 M
+#   time     1.90 s   2.00 s   2.05 s   2.01 s   1.85 s   1.94 s   2.09 s
+#   peak     1363 M    676 M    455 M    360 M    305 M    284 M    279 M
 #
-# So blocking is smaller *and* faster -- the working set fits in cache -- and 100k is
-# where the memory reaches its floor at the best time. Below that nothing more is bought.
+# So blocking costs nothing in time, and 100k is where the memory comes within a few
+# percent of its floor. Below that nothing more is bought.
 # This matters here and not elsewhere because it is the one evaluation whose point count
 # is the *refined* mesh's: `DistributedCellSource` goes to some trouble to keep the row
 # fetch bounded by the source mesh, and expanding to per-point in one array immediately

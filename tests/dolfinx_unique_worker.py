@@ -1,6 +1,7 @@
 """Worker for tests/test_dolfinx_unique.py: assembly over unique dofs checked against
-plain DOLFINx, against PᵀAP with an explicit P, and against dolfinx_mpc. Writes the
-measured differences as JSON (rank 0).
+plain DOLFINx, against PᵀAP with an explicit P (preallocated exactly, also where forms
+share or differ in their pattern), and a periodic solve with Dirichlet data through the
+backend's DirichletBC against dolfinx_mpc. Writes the differences as JSON (rank 0).
 
     [mpirun -n k] python3 tests/dolfinx_unique_worker.py out.json
 """
@@ -53,20 +54,24 @@ def explicit_P(U):
     return P
 
 
-def plain_matrix(a, bcs=(), diag=1.0):
-    A = petsc.assemble_matrix(a, bcs=list(bcs), diag=diag)
+def plain_matrix(a):
+    A = petsc.assemble_matrix(a)
     A.assemble()
     return A
 
 
-def plain_vector(L, a=None, bcs=()):
+def plain_vector(L):
     b = petsc.assemble_vector(L)
-    if bcs:
-        petsc.apply_lifting(b, [a], bcs=[list(bcs)])
     b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
-    if bcs:
-        petsc.set_bc(b, list(bcs))
     return b
+
+
+def exact(K):
+    """Whether K's preallocation was exact: no entry added beyond it, none left unused.
+    (DOLFINx's assembly drops an entry beyond it silently, which only a comparison of
+    the values shows.)"""
+    info = K.getInfo()
+    return bool(comm.allreduce(int(info["mallocs"]) + int(info["nz_unneeded"])) == 0)
 
 
 V = fem.functionspace(msh, ("Lagrange", 2))
@@ -97,11 +102,11 @@ bc = fem.dirichletbc(gw, fem.locate_dofs_topological(V, tdim - 1, walls))
 # 1. without periodicity: identical to plain DOLFINx
 U0 = UniqueDofs(V)
 K = create_matrix(a_V, U0)
-assemble_matrix(K, a_V, [bc])
-res["plain_matrix"] = rel(K, plain_matrix(a_V, [bc]))
+assemble_matrix(K, a_V)
+res["plain_matrix"] = rel(K, plain_matrix(a_V))
 b = U0.create_vector()
-assemble_vector(b, L_V, U0, a=a_V, bcs=[bc])
-res["plain_rhs"] = rel(b, plain_vector(L_V, a_V, [bc]))
+assemble_vector(b, L_V, U0)
+res["plain_rhs"] = rel(b, plain_vector(L_V))
 
 # 2. periodic in x: folded = PᵀAP with an explicit P (square, rectangular, mixed)
 UV = UniqueDofs(V, *periodic_box(V, periodic=(True, False)))
@@ -113,7 +118,7 @@ for name, a, R, C, Pr, Pc in (("fold_square", a_V, UV, UV, PV, PV),
                               ("fold_mixed", a_W, UW, UW, PW, PW)):
     K = create_matrix(a, R, C)
     assemble_matrix(K, a)
-    res[name + "_mallocs"] = comm.allreduce(int(K.getInfo()["mallocs"]))
+    res[name + "_exact"] = exact(K)
     A = plain_matrix(a)
     ref = Pr.transposeMatMult(A.matMult(Pc))
     res[name] = rel(K, ref)
@@ -126,24 +131,52 @@ res["fold_rhs"] = rel(b, ref)
 res["unique_dofs_V"] = UV.n_global
 res["slaves_V"] = V.dofmap.index_map.size_global - UV.n_global
 
-# 3. periodic solve with nonzero wall data (corners on both walls and periodic faces)
-K = create_matrix(a_V, UV)
-assemble_matrix(K, a_V, [bc])
-b = UV.create_vector()
-assemble_vector(b, L_V, UV, a=a_V, bcs=[bc])
+# 2b. the preallocation shared by forms over the same entities, and not by forms over
+# others: interior facets (wider), a subdomain of the cells (narrower)
+cells = np.arange(msh.topology.index_map(tdim).size_local, dtype=np.int32)
+mid = mesh.compute_midpoints(msh, tdim, cells)
+half = mesh.meshtags(msh, tdim, cells, np.where(mid[:, 1] < LY / 2, 1, 2).astype(np.int32))
+dx_half = ufl.Measure("dx", domain=msh, subdomain_data=half)
+jumps = ufl.inner(ufl.jump(ufl.grad(u)), ufl.jump(ufl.grad(v))) * ufl.dS
+for name, form in (("same_cells", 2.0 * u * v * ufl.dx + ufl.inner(ufl.grad(u), ufl.grad(v))
+                    * ufl.dx),
+                   ("interior_facets", u * v * ufl.dx + jumps),
+                   ("cell_subdomain", u * v * dx_half(1))):
+    a = fem.form(form)
+    K = create_matrix(a, UV)
+    assemble_matrix(K, a)
+    res["share_" + name + "_exact"] = exact(K)
+    res["share_" + name] = rel(K, PV.transposeMatMult(plain_matrix(a).matMult(PV)))
+
+# 3. periodic solve with nonzero wall data (corners on both walls and periodic faces),
+# the conditions applied by the backend's DirichletBC
+from femtools.backend import dolfinx as B  # noqa: E402
+
+Vb = B.FunctionSpace(msh, "CG", 2, constrained_domain=B.PeriodicBox({0: (0, LX)}))
+Ub = B.unique_dofs(Vb)
+markers = B.BoundaryMarkers(msh)
+markers.mark(lambda X: np.isclose(X[1], 0) | np.isclose(X[1], LY), 2)
+gb = B.Function(Vb)
+gb.interpolate(lambda X: np.sin(2 * np.pi * X[0]) * (1 + X[1]) + 2.0)
+bcb = B.DirichletBC(Vb, gb, markers, 2)
+ub, vb = ufl.TrialFunction(Vb), ufl.TestFunction(Vb)
+Kb = B.assemble(kappa * ufl.inner(ufl.grad(ub), ufl.grad(vb)) * ufl.dx
+                + ufl.dot(beta, ufl.grad(ub)) * vb * ufl.dx + ub * vb * ufl.dx)
+bb = B.assemble(f * vb * ufl.dx)
+bcb.apply(Kb, bb)
 ksp = PETSc.KSP().create(comm)
-ksp.setOperators(K)
+ksp.setOperators(Kb.mat())
 ksp.setType("preonly")
 ksp.getPC().setType("lu")
 ksp.getPC().setFactorSolverType("mumps")
-xr = UV.create_vector()
-ksp.solve(b, xr)
-u_red = UV.prolong(xr, fem.Function(V))
-n_own = V.dofmap.index_map.size_local
+u_red = B.Function(Vb)
+ksp.solve(bb.vec(), u_red.vector().vec())
+u_red.sync()
+n_own = Vb.dofmap.index_map.size_local
 res["solution_norm"] = float(np.sqrt(comm.allreduce(float(np.sum(u_red.x.array[:n_own] ** 2)))))
 # periodic: every slave equals its master
-back = UV.restrict(u_red, UV.create_vector())
-res["roundtrip"] = rel(back, xr)
+back = Ub.restrict(u_red, Ub.create_vector())
+res["roundtrip"] = rel(back, u_red.vector().vec())
 try:
     import dolfinx_mpc
 
@@ -176,9 +209,11 @@ try:
     u_m.x.array[:n_own] = x_m.getArray(readonly=True)[:n_own]
     u_m.x.scatter_forward()
     mpc.backsubstitution(u_m)
-    d = u_red.x.array[:n_own] - u_m.x.array[:n_own]
+    on_b = fem.Function(Vb)
+    fem.Function.interpolate(on_b, u_m)
+    d = u_red.x.array[:n_own] - on_b.x.array[:n_own]
     res["vs_dolfinx_mpc"] = float(np.sqrt(comm.allreduce(float(np.sum(d ** 2))))
-                                  / np.sqrt(comm.allreduce(float(np.sum(u_m.x.array[:n_own] ** 2)))))
+                                  / np.sqrt(comm.allreduce(float(np.sum(on_b.x.array[:n_own] ** 2)))))
 except ImportError:
     res["vs_dolfinx_mpc"] = None
 
@@ -198,7 +233,7 @@ from femtools.dolfinx.periodic import flat_collapse_map  # noqa: E402
 UWi = UniqueDofs(W, *periodic_box(W, periodic=(True, False)), interleave=True)
 K = create_matrix(a_W, UWi)
 assemble_matrix(K, a_W)
-res["fold_mixed_interleaved_mallocs"] = comm.allreduce(int(K.getInfo()["mallocs"]))
+res["fold_mixed_interleaved_exact"] = exact(K)
 res["fold_mixed_interleaved"] = rel(K, explicit_P(UWi).transposeMatMult(
     plain_matrix(a_W).matMult(explicit_P(UWi))))
 n_loc = W.dofmap.index_map.size_local + W.dofmap.index_map.num_ghosts

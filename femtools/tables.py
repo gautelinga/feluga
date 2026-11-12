@@ -33,7 +33,8 @@ numpy at import; dolfin or DOLFINx where a mesh or space of theirs is passed.
 import numpy as np
 
 
-def _is_dolfinx(obj):
+def is_dolfinx(obj):
+    """Whether `obj` is a DOLFINx mesh or space (else dolfin's)."""
     try:
         import dolfinx
     except ImportError:
@@ -63,7 +64,7 @@ def space_tables(space):
     plain DOLFINx one with its UniqueDofs as `(V, U)`. Collective (dolfin's integer type is agreed over the ranks)."""
     V, U = space if isinstance(space, tuple) else (space, None)
     t = SpaceTables()
-    if _is_dolfinx(V):
+    if is_dolfinx(V):
         _dolfinx_space(t, V, U)
     else:
         _dolfin_space(t, V)
@@ -151,7 +152,7 @@ class FacetTables:
 def facet_tables(mesh):
     """The local topology of a dolfin or DOLFINx mesh (FacetTables)."""
     f = FacetTables()
-    if _is_dolfinx(mesh):
+    if is_dolfinx(mesh):
         import dolfinx.mesh as dm
         top = mesh.topology
         d = top.dim

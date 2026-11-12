@@ -2,19 +2,20 @@
 dolfin and DOLFINx alike: the dual mesh's (a field solved on the fine mesh, another on
 the coarse one).
 
-    fine, ancestors = refine_uniformly(mesh, passes, box, axes)
+    fine, ancestors = refine_uniformly(mesh, passes, upper, axes)
     nest = Nested(mesh, fine, ancestors, passes)
     P = nest.prolongation(Vc, Vf)               # fine = P coarse: exact (nested spaces)
-    R = nest.injection(Vf, Vc, component=0)     # coarse = R fine: the fine field's values
-                                                # at the coarse nodes, exact
+    R = nest.injection(Vf, Vc, fine_component=0)   # coarse = R fine: the fine field's
+                                                   # values at the coarse nodes, exact
     lattice = nest.lattice(Vf)                  # a fine field by (coarse cell, point)
     lattice.write(path, "phig", x); lattice.read(path, "phig", x)
     fine_values = nest.facet_values(coarse_values)   # facet markers on the fine mesh
 
 The matrices are petsc4py Mats over the spaces' vectors: dolfin's global dofs, or on
 DOLFINx a space's unique dofs as its `UniqueDofs` numbers them (a
-femtools.backend.dolfinx space knows them; pass `(V, U)` for a plain DOLFINx one). Periodic spaces need nothing more: every cell's dofs are its own, a slave's being
-its master's.
+femtools.backend.dolfinx space knows them; pass `(V, U)` for a plain DOLFINx one).
+Periodic spaces need nothing more: every cell's dofs are its own, a slave's being its
+master's.
 
 A uniform refinement puts every node of a fine Lagrange space of degree q, after k
 passes, on the lattice of barycentric multi-indices of denominator N = q 2^k of its
@@ -26,24 +27,23 @@ femtools' checkpoints order them -- so a fine field is written by coarse cell an
 back on any number of ranks and on either backend, the fine mesh being made anew from
 the coarse one.
 
-Built on `femtools.hierarchical_transfer` (ancestors composed over passes, barycentric
-coordinates, the Lagrange basis) and on `femtools.tables` (a cell's vertices and dofs in
-UFC's order, as both backends' checkpoints write them).
-The children must stay on their parent's rank (`redistribute=False`, as
+Built on `femtools.ufc` (barycentric coordinates, the Lagrange nodes and basis) and on
+`femtools.tables` (a cell's vertices and dofs in UFC's order, as both backends'
+checkpoints write them). The children must stay on their parent's rank (`redistribute=False`, as
 `refine_uniformly` refines), so every matrix is built from local cells alone.
 """
 import numpy as np
 
-from femtools.hierarchical_transfer import (
-    barycentric_simplex, compose, ufc_basis, ufc_nodes)
-from femtools.tables import _is_dolfinx
+from femtools.hierarchical_transfer import compose
+from femtools.tables import is_dolfinx
+from femtools.ufc import barycentric_simplex, ufc_basis, ufc_nodes
 
 
 def _split(space):
     return space if isinstance(space, tuple) else (space, None)
 
 
-def _Tables(space):
+def _tables(space):
     """A space's tables (femtools.tables.space_tables), its dofs as int64."""
     from femtools.tables import space_tables
     t = space_tables(space)
@@ -52,12 +52,17 @@ def _Tables(space):
 
 
 def _owned_rows(rows, cols, vals, owned):
-    """The entries of this rank's own rows, each (row, column) once."""
-    keep = (rows >= owned[0]) & (rows < owned[1])
+    """The entries of this rank's own rows, each (row, column) once (its first), ordered
+    by row and column."""
+    lo, hi = owned
+    keep = (rows >= lo) & (rows < hi)
     rows, cols, vals = rows[keep], cols[keep], vals[keep]
     if len(rows):
-        key = np.stack([rows, cols], axis=1)
-        _, first = np.unique(key, axis=0, return_index=True)
+        width = int(cols.max()) + 1
+        if (hi - lo) * width < 2 ** 63:     # (row, column) packed into one int64
+            _, first = np.unique((rows - lo) * width + cols, return_index=True)
+        else:
+            _, first = np.unique(np.stack([rows, cols], axis=1), axis=0, return_index=True)
         rows, cols, vals = rows[first], cols[first], vals[first]
     return rows, cols, vals
 
@@ -73,15 +78,13 @@ def _check_rows(comm, rows, owned, what):
 
 
 def _mat(comm, rows, cols, vals, row_layout, col_layout):
-    """A petsc4py AIJ matrix from this rank's own rows' entries."""
+    """A petsc4py AIJ matrix from this rank's own rows' entries, ordered by row and
+    column (as `_owned_rows` gives them)."""
     from petsc4py import PETSc
     (rlo, rhi), n_rows = row_layout
     (clo, chi), n_cols = col_layout
-    order = np.lexsort((cols, rows))
-    rows, cols, vals = rows[order], cols[order], vals[order]
     indptr = np.zeros(rhi - rlo + 1, dtype=PETSc.IntType)
-    np.add.at(indptr, rows - rlo + 1, 1)
-    np.cumsum(indptr, out=indptr)
+    np.cumsum(np.bincount(rows - rlo, minlength=rhi - rlo), out=indptr[1:])
     A = PETSc.Mat().create(comm=comm)
     A.setSizes(((rhi - rlo, n_rows), (chi - clo, n_cols)))
     A.setType(PETSc.Mat.Type.AIJ)
@@ -92,51 +95,40 @@ def _mat(comm, rows, cols, vals, row_layout, col_layout):
     return A
 
 
-def refine_uniformly(mesh, passes, box, axes, lower=None):
+def refine_uniformly(mesh, passes, upper, axes, lower=None):
     """`mesh` refined uniformly `passes` times by femtools' periodic Plaza (the faces
-    identified along `axes` of the box with upper corner `box` bisected alike, and
+    identified along `axes` of the box from `lower` to `upper` bisected alike, and
     checked), the children kept on their parent's rank. Returns `(fine, ancestors)`,
     `ancestors` each fine cell's ancestor among `mesh`'s local cells. The same cells on
     either backend and any number of ranks. Collective."""
-    if _is_dolfinx(mesh):
-        from femtools.dolfinx.refine import refine_congruent
-        tdim = mesh.topology.dim
-        n_own = mesh.topology.index_map(tdim).size_local
-        ancestors = np.arange(n_own, dtype=np.int64)
+    if is_dolfinx(mesh):
+        from femtools.dolfinx.periodic import box_extent
+        from femtools.dolfinx.refine import refine_congruent, refine_periodic
+
+        def all_cells(m):
+            return np.ones(m.topology.index_map(m.topology.dim).size_local, bool)
+        n_cells = mesh.topology.index_map(mesh.topology.dim).size_local
     else:
         import dolfin as df
+        from femtools.periodic import extent as box_extent
+        from femtools.plaza_periodic import refine_periodic
         from femtools.refine_periodic import refine_congruent
-        ancestors = np.arange(mesh.num_cells(), dtype=np.int64)
+
+        def all_cells(m):
+            return df.MeshFunction("bool", m, m.topology().dim(), True)
+        n_cells = mesh.num_cells()
     fine = mesh
+    ancestors = np.arange(n_cells, dtype=np.int64)
     for _ in range(passes):
-        if _is_dolfinx(fine):
-            n_own = fine.topology.index_map(fine.topology.dim).size_local
-            markers = np.ones(n_own, bool)
-        else:
-            markers = df.MeshFunction("bool", fine, fine.topology().dim(), True)
         if axes:
-            fine, _, parent = refine_congruent(fine, markers, box, axes, redistribute=False,
-                                               lower=lower)
-        else:
-            fine, parent = _refine_plain(fine, markers)
+            fine, _, parent = refine_congruent(fine, all_cells(fine), upper, axes,
+                                               redistribute=False, lower=lower)
+        else:   # periodic Plaza with no axes is plain Plaza
+            lo, hi = box_extent(fine)
+            fine, _, parent = refine_periodic(fine, all_cells(fine), hi, [],
+                                              redistribute=False, lower=lo)
         ancestors = compose(ancestors, np.asarray(parent, dtype=np.int64))
     return fine, ancestors
-
-
-def _refine_plain(mesh, markers):
-    """A refinement with no periodic faces, children on their parent's rank, and the
-    parent map: periodic Plaza with no axes is plain Plaza."""
-    if _is_dolfinx(mesh):
-        from femtools.dolfinx.refine import refine_periodic
-        from femtools.dolfinx.periodic import box_extent
-        lo, hi = box_extent(mesh)
-        fine, _, parent = refine_periodic(mesh, markers, hi, [], redistribute=False, lower=lo)
-    else:
-        from femtools.periodic import extent
-        from femtools.plaza_periodic import refine_periodic
-        lo, hi = extent(mesh)
-        fine, _, parent = refine_periodic(mesh, markers, hi, [], redistribute=False, lower=lo)
-    return fine, parent
 
 
 class Nested:
@@ -181,7 +173,7 @@ class Nested:
         """The matrix P, fine vector = P coarse vector: each fine node's value from the
         coarse field in its ancestor cell, exact for a coarse field the fine space holds
         (fine degree at least the coarse one)."""
-        tc, tf = _Tables(coarse_space), _Tables(fine_space)
+        tc, tf = _tables(coarse_space), _tables(fine_space)
         cdofs, cdeg = tc.component(coarse_component)
         fdofs, fdeg = tf.component(fine_component)
         lam = self._fine_nodes(tf, tc, fdeg)                     # (nf, nnf, d+1)
@@ -198,7 +190,7 @@ class Nested:
         """The matrix R, coarse vector = R fine vector: the fine field at each coarse
         node, a node of the fine space too (the coarse degree must divide the fine
         degree times 2^passes)."""
-        tc, tf = _Tables(coarse_space), _Tables(fine_space)
+        tc, tf = _tables(coarse_space), _tables(fine_space)
         cdofs, cdeg = tc.component(coarse_component)
         fdofs, fdeg = tf.component(fine_component)
         N = fdeg * 2 ** self.passes
@@ -272,8 +264,8 @@ class Lattice:
     either backend, for the same coarse mesh (femtools' checkpoints number it alike)."""
 
     def __init__(self, nest, fine_space):
-        tf = _Tables(fine_space)
-        tc = _Tables(_coarse_space_like(nest.coarse, fine_space))
+        tf = _tables(fine_space)
+        tc = _tables(_coarse_space_like(nest.coarse, fine_space))
         self.comm, self.owned, self.gc = tf.comm, tf.owned, tc.gc
         self._scatter = None
         self.passes = nest.passes
@@ -358,7 +350,7 @@ class Lattice:
 def _coarse_space_like(coarse, fine_space):
     """A P1 space on the coarse mesh, for its cells' tables (no dofs are used)."""
     V, U = _split(fine_space)
-    if _is_dolfinx(V):
+    if is_dolfinx(V):
         from dolfinx import fem
         from femtools.dolfinx.unique import UniqueDofs
         P1 = fem.functionspace(coarse, ("Lagrange", 1))

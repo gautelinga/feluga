@@ -154,8 +154,8 @@ def route(comm, dest, *arrays):
 
 def rank_order(dest, size):
     """`np.argsort(dest, kind="stable")` for rank numbers 0..size-1, the same permutation:
-    sorted as 16-bit integers when they fit, which numpy radix-sorts, many times faster
-    than its stable sort of 64-bit ones (every `route` sorts its rows by rank)."""
+    sorted as 16-bit integers when they fit, which numpy radix-sorts, cheaper than its
+    stable sort of 64-bit ones (every `route` sorts its rows by rank)."""
     dest = np.asarray(dest)
     if size <= np.iinfo(np.int16).max + 1:
         dest = dest.astype(np.int16)
@@ -184,8 +184,7 @@ def to_owners(comm, edges, index, *values):
 def as_rows(a):
     """`a` as rows, `(len(a), the rest flattened)`: `reshape(len(a), -1)`, also for a rank
     holding no rows, where numpy cannot infer the -1 and raises -- on that rank alone,
-    before the collective the others then wait in (2026-10-16: the pairing check at 32
-    ranks, a rank touching no periodic face)."""
+    before the collective the others then wait in."""
     a = np.asarray(a)
     return a.reshape(len(a), int(np.prod(a.shape[1:], dtype=np.int64)))
 
@@ -194,8 +193,8 @@ def rank_of(rows, size):
     """The rank each row of integers (any size) meets at, out of `size`: the same row on
     every rank to the same rank, rows spread evenly. The one routing hash for `route`'s
     destinations. Not an identity: two rows may meet at one rank, which compares the rows
-    themselves. (The join's conformity check borrowed the slab identities' `rung0` for
-    this and raised past its 40 and 21 bits at h0.012, 2026-10-16.)"""
+    themselves. Rows of any width and value range are hashed whole (no bit packing to
+    overflow)."""
     rows = as_rows(rows).astype(np.int64).view(np.uint64)
     h = np.zeros(len(rows), np.uint64)
     with np.errstate(over="ignore"):
@@ -264,8 +263,8 @@ def fetch_rows(path, dataset, wanted, comm=None, n=None):
     """Rows `wanted` (global indices) of `path:dataset`, in that order.
 
     Duplicates and any ordering are allowed; the rows come back aligned with `wanted`.
-    Serial, or with one rank, this is a whole read and an index -- measured 200x faster
-    than an h5py fancy selection and, at one rank, no worse in memory since there is
+    Serial, or with one rank, this is a whole read and an index -- far cheaper than an
+    h5py fancy selection and, at one rank, no worse in memory since there is
     nobody to share the array with. The bounds check is the same either way: a negative
     index would otherwise wrap to a real row serially and raise under MPI, and an
     asymmetry like that outlives the refactor that introduced it.
@@ -535,8 +534,8 @@ def match_nodes(comm, coords, values, x, tol, lower):
 def unique_inverse(values):
     """`np.unique(values, return_inverse=True)`, the same two arrays, for the 1-D int64
     arrays of row and vertex ids the readers deduplicate: value and position packed into
-    one int64 and sorted once, a plain sort being several times faster than the argsort
-    `np.unique` makes (1.44 -> 0.34 s for 21M ids). Anything else (another dtype or
+    one int64 and sorted once, a plain sort being cheaper than the argsort `np.unique`
+    makes. Anything else (another dtype or
     shape, negative values, or values too large to pack) goes to `np.unique`."""
     a = np.asarray(values)
     n = a.size

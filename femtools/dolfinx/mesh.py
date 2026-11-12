@@ -52,25 +52,17 @@ def write_mesh(path, mesh, name="mesh", mode="w"):
     (femtools.dolfin_layout.write_mesh): `coordinates` by original vertex index,
     `topology` the own cells rank after rank (each cell's vertices in increasing order,
     as dolfin orders them), `cell_indices` their original indices. Collective."""
-    from femtools.dolfin_layout import _offsets
-    from femtools.hdf5_rows import write_ordered
-    comm = mesh.comm
+    from femtools.dolfin_layout import write_mesh_rows
     tdim, gdim = mesh.topology.dim, mesh.geometry.dim
     gmap = mesh.geometry.index_map()
     gv = np.asarray(mesh.geometry.input_global_indices, dtype=np.int64)
     n_own_x = gmap.size_local
-    own = mesh.topology.index_map(tdim).size_local
-    cells = np.sort(gv[mesh.geometry.dofmaps[0][:own]], axis=1)
-    first, partition = _offsets(comm, own)
-    rows = first + np.arange(own, dtype=np.int64)
-    n_c = mesh.topology.index_map(tdim).size_global
-    cellname = {2: "triangle", 3: "tetrahedron"}[tdim]
-    write_ordered(path, name + "/coordinates", gv[:n_own_x], mesh.geometry.x[:n_own_x, :gdim],
-                  gmap.size_global, comm, mode=mode)
-    write_ordered(path, name + "/topology", rows, cells, n_c, comm,
-                  attrs={"celltype": np.bytes_(cellname), "partition": partition})
-    write_ordered(path, name + "/cell_indices", rows,
-                  np.asarray(mesh.topology.original_cell_index[:own], dtype=np.int64), n_c, comm)
+    cmap = mesh.topology.index_map(tdim)
+    own = cmap.size_local
+    write_mesh_rows(path, name, mesh.comm, gv[:n_own_x], mesh.geometry.x[:n_own_x, :gdim],
+                    gmap.size_global, np.sort(gv[mesh.geometry.dofmaps[0][:own]], axis=1),
+                    np.asarray(mesh.topology.original_cell_index[:own], dtype=np.int64),
+                    cmap.size_global, {2: "triangle", 3: "tetrahedron"}[tdim], mode)
 
 
 def write_boundary_facets(path, mesh, values):
@@ -79,33 +71,15 @@ def write_boundary_facets(path, mesh, values):
     (`values`, one per local facet), their vertices numbered as the mesh's original
     vertices. Collective; returns `(facets, points)` counts."""
     import dolfinx.mesh
-    from femtools import boundaries, hdf5_rows
+    from femtools import boundaries
+    from femtools.dolfinx.boundary_markers import local_facets
     comm = mesh.comm if mesh.comm.size > 1 else None
     tdim = mesh.topology.dim
-    mesh.topology.create_entities(tdim - 1)
-    mesh.topology.create_connectivity(tdim - 1, tdim)
-    exterior = dolfinx.mesh.exterior_facet_indices(mesh.topology)
+    _, exterior = local_facets(mesh)
     n_own_f = mesh.topology.index_map(tdim - 1).size_local
     values = np.asarray(values)
     keep = exterior[(exterior < n_own_f) & (values[exterior] != 0)].astype(np.int32)
-    nodes = dolfinx.mesh.entities_to_geometry(mesh, tdim - 1, keep).reshape(len(keep), -1)
-    gv = np.asarray(mesh.geometry.input_global_indices, dtype=np.int64)
-    used, inverse = np.unique(nodes, return_inverse=True)
-    glob = gv[used]
-    x = mesh.geometry.x[used, :mesh.geometry.dim]
-    if comm is None:
-        order = np.argsort(glob)
-        points, index = x[order], np.empty(len(glob), np.int64)
-        index[order] = np.arange(len(glob))
-    else:
-        # each vertex once, at the rank whose block of original indices holds it
-        n_vertices = mesh.geometry.index_map().size_global
-        edges = hdf5_rows.block_edges(n_vertices, comm.Get_size())
-        routed = hdf5_rows.route(comm, hdf5_rows.owner_of(edges, glob, comm), glob, x)
-        got, got_x = routed.received
-        mine, first, where = np.unique(got, return_index=True, return_inverse=True)
-        points = got_x[first]
-        start = comm.exscan(len(mine)) or 0
-        (index,) = hdf5_rows.reply(comm, routed, start + where.astype(np.int64))
-    return boundaries.write(path, points, index[inverse].reshape(nodes.shape),
-                            values[keep].astype(np.int64), comm)
+    nodes = dolfinx.mesh.entities_to_geometry(mesh, tdim - 1, keep).reshape(len(keep), tdim)
+    return boundaries.write_exterior(
+        path, nodes, mesh.geometry.input_global_indices, mesh.geometry.x[:, :mesh.geometry.dim],
+        values[keep], mesh.geometry.index_map().size_global, comm)

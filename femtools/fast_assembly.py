@@ -9,9 +9,7 @@ dolfin.assemble turns a UFL form into a dolfin Form on every call: it computes t
 form's signature and looks the generated code up in the JIT cache before it
 assembles. Here that is done once per form object, which is kept, and later calls
 go straight to dolfin's Assembler. The form's coefficients are read at every call,
-so a Function changed in place is assembled with its new values. On a P2 velocity
-space with 33k cells this saves 3.6 ms of 16 ms for a viscous term with two
-coefficients, less for simpler forms.
+so a Function changed in place is assembled with its new values.
 
 The saving needs the same form object each time: a form built in the call, as in
 assemble(mu * inner(grad(u), grad(v)) * dx), is a new object every time, and is
@@ -59,18 +57,24 @@ MATRIX_CAPACITY = 64
 _MATRICES = LRU(MATRIX_CAPACITY)
 
 
-def assemble_matrix(form, bcs=()):
-    """The matrix of the bilinear `form` with the DirichletBCs `bcs` applied,
-    assembled on the first call for an equal form and the same conditions and
-    returned again on later ones (while among the MATRIX_CAPACITY most recently
-    used)."""
+def constant_matrix(form, bcs, assemble, cache=_MATRICES):
+    """The matrix of the bilinear `form` (`assemble(form)`, either backend's) with the
+    Dirichlet conditions `bcs` applied, made on the first call for an equal form and the
+    same conditions and returned again on later ones (while among the `cache`'s most
+    recently used)."""
     key = (form, tuple(bcs))
-    A = _MATRICES.get(key)
+    A = cache.get(key)
     if A is None:
         if len(form.arguments()) != 2:
             raise ValueError("assemble_matrix takes a bilinear form")
         A = assemble(form)
         for bc in bcs:
             bc.apply(A)
-        _MATRICES[key] = A
+        cache[key] = A
     return A
+
+
+def assemble_matrix(form, bcs=()):
+    """The matrix of the bilinear `form` with the DirichletBCs `bcs` applied, assembled
+    once per equal form and conditions (`constant_matrix`)."""
+    return constant_matrix(form, bcs, assemble)

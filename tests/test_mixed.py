@@ -38,6 +38,20 @@ def test_built_once():
     assert subspace(W, 0) is subspace(W, 0) and subfunction(q, 0) is subfunction(q, 0)
 
 
+def test_subfunction_into_own_function():
+    """`out`: a Function of one's own, not the shared one a later call overwrites."""
+    W = mixed()
+    q = df.Function(W)
+    set_subfunction(q, 0, df.Expression("x[0]", degree=1))
+    mine = df.Function(subspace(W, 0))
+    assert subfunction(q, 0, out=mine) is mine and mine is not subfunction(q, 0)
+    set_subfunction(q, 0, df.Expression("2*x[0]", degree=1))
+    subfunction(q, 0)
+    assert abs(mine(0.5, 0.5) - 0.5) < 1e-12
+    with pytest.raises(ValueError):
+        subfunction(q, 0, out=df.Function(df.FunctionSpace(W.mesh(), "P", 2)))
+
+
 def test_assigned_vector_function():
     mesh = df.UnitSquareMesh(6, 6)
     V = df.FunctionSpace(mesh, "P", 2,

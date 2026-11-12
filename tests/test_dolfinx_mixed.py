@@ -42,6 +42,22 @@ def test_set_and_get_components():
     assert np.allclose(subfunction(q, 1).x.array, ref1.x.array, atol=1e-14)
 
 
+def test_subfunction_into_own_function():
+    """`out`: a Function of one's own, not the shared one a later call overwrites."""
+    msh, W = _mixed()
+    q = fem.Function(W)
+    set_subfunction(q, 0, lambda x: x[0])
+    mine = fem.Function(subspace(W, 0))
+    assert subfunction(q, 0, out=mine) is mine and mine is not subfunction(q, 0)
+    set_subfunction(q, 0, lambda x: 2 * x[0])
+    subfunction(q, 0)
+    ref = fem.Function(subspace(W, 0))
+    ref.interpolate(lambda x: x[0])
+    assert np.allclose(mine.x.array, ref.x.array, atol=1e-14)
+    with pytest.raises(ValueError):
+        subfunction(q, 0, out=fem.Function(fem.functionspace(msh, ("Lagrange", 2))))
+
+
 def test_assigned_vector_function():
     msh = mesh.create_unit_square(MPI.COMM_WORLD, 6, 6)
     V = fem.functionspace(msh, ("Lagrange", 2))

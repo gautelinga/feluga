@@ -8,6 +8,8 @@
     eval_through_chain, eval_p2_through_chain    a source at a refined mesh's P1 or P2 nodes
     transfer_p1_field(old, values, new, parent)  a P1 field onto its one-pass refinement
     as_p1_function, as_p2_function               node values as a Function, ghost-guarded
+    barycentric_simplex, ufc_nodes, ufc_basis    triangles and tetrahedra, in UFC's dof order
+                                                 (femtools.nested_transfer builds on them)
 
 `femtools.plaza_periodic.refine_periodic` returns the parent-cell map, and composing those
 maps across passes gives every cell's ancestor in the original mesh. Evaluation is then
@@ -368,6 +370,68 @@ class DistributedCellSource:
         return _in_blocks(len(points),
                           lambda sl: evaluate(xyz[inverse[sl]], nodal[inverse[sl]],
                                               points[sl]))
+
+
+# --- triangles and tetrahedra in UFC's dof order -------------------------------------
+#
+# What femtools.nested_transfer needs, for both backends' dof tables (dolfin's own, and
+# DOLFINx's put in dolfin's order by femtools.dolfinx.checkpoint): a cell's vertices,
+# then for degree 2 its edges, edge i of a triangle opposite vertex i and a tetrahedron's
+# in UFC's order -- not the XDMF order of P2_EDGE_PAIRS above.
+
+UFC_EDGES = {2: ((1, 2), (0, 2), (0, 1)),
+             3: ((2, 3), (1, 3), (1, 2), (0, 3), (0, 2), (0, 1))}
+
+
+def barycentric_simplex(vertices, points):
+    """Barycentric coordinates of each point in its triangle or tetrahedron: `vertices`
+    (n, d+1, d), `points` (n, d), d = 2 or 3 (the tetrahedron's is
+    `barycentric_from_vertices`). Returns (n, d+1)."""
+    vertices, points = np.asarray(vertices, float), np.asarray(points, float)
+    d = vertices.shape[2]
+    if d == 3:
+        return barycentric_from_vertices(vertices, points)
+    if d != 2 or vertices.shape[1] != 3:
+        raise ValueError("barycentric_simplex: triangles in 2D or tetrahedra in 3D")
+    v0 = vertices[:, 0]
+    e1, e2 = vertices[:, 1] - v0, vertices[:, 2] - v0
+    r = points - v0
+    det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    if not det.all():
+        raise np.linalg.LinAlgError("barycentric_simplex: a degenerate triangle")
+    lam = np.empty((len(v0), 3))
+    lam[:, 1] = (r[:, 0] * e2[:, 1] - r[:, 1] * e2[:, 0]) / det
+    lam[:, 2] = (e1[:, 0] * r[:, 1] - e1[:, 1] * r[:, 0]) / det
+    lam[:, 0] = 1.0 - lam[:, 1] - lam[:, 2]
+    return lam
+
+
+def ufc_nodes(lam_vertices, degree):
+    """The barycentric coordinates of a Lagrange element's nodes, in UFC's order, from
+    those of its cell's vertices: `lam_vertices` (n, d+1, m), m coordinates each (in
+    another simplex, say). Returns (n, n_nodes, m)."""
+    lam_vertices = np.asarray(lam_vertices)
+    if degree == 1:
+        return lam_vertices
+    if degree != 2:
+        raise NotImplementedError("ufc_nodes: degree 1 or 2")
+    d = lam_vertices.shape[1] - 1
+    edges = [0.5 * (lam_vertices[:, a] + lam_vertices[:, b]) for a, b in UFC_EDGES[d]]
+    return np.concatenate([lam_vertices, np.stack(edges, axis=1)], axis=1)
+
+
+def ufc_basis(lam, degree):
+    """The Lagrange basis of degree 1 or 2 at barycentric `lam` (..., d+1), in UFC's
+    order: shape (..., n_nodes)."""
+    lam = np.asarray(lam)
+    if degree == 1:
+        return lam
+    if degree != 2:
+        raise NotImplementedError("ufc_basis: degree 1 or 2")
+    d = lam.shape[-1] - 1
+    vertex = lam * (2.0 * lam - 1.0)
+    edge = [4.0 * lam[..., a] * lam[..., b] for a, b in UFC_EDGES[d]]
+    return np.concatenate([vertex, np.stack(edge, axis=-1)], axis=-1)
 
 
 # --- the thin dolfin-facing layer -------------------------------------------------

@@ -29,6 +29,8 @@ include = ["femtools*"]
 # compiled by cppimport on import of femtools.probes or femtools.gradient, not before;
 # cpp/dof_reorder_star.cpp by femtools-build-dof-reorder
 femtools = ["cpp/*.cpp", "cpp/*.h"]
+# built with CMake on first use of femtools.dolfinx.refine
+"femtools.dolfinx" = ["cpp/*.cpp", "cpp/CMakeLists.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

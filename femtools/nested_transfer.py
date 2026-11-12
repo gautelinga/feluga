@@ -325,6 +325,7 @@ class Lattice:
         tf = _Tables(fine_space)
         tc = _Tables(_coarse_space_like(nest.coarse, fine_space))
         self.comm, self.owned, self.gc = tf.comm, tf.owned, tc.gc
+        self.passes = nest.passes
         self.n_cells = self.comm.allreduce(int(tc.gc.max()) + 1 if len(tc.gc) else 0,
                                            op=_mpi_max())
         d = tc.x.shape[2]
@@ -376,13 +377,28 @@ class Lattice:
         a[self.dof[own] - lo] = rows[self.cell_of[own], self.slot[own]]
         x.assemble()
 
-    def write(self, path, name, x, mode="a"):
+    def write(self, path, name, x, mode="a", attrs=None):
+        """Dataset `name` of `path`: the fine vector `x`, a row a coarse cell (`attrs`
+        on it; `passes` and `width` always). Collective."""
         from femtools.hdf5_rows import write_ordered
+        attrs = dict(attrs or {}, passes=self.passes, width=self.width)
         write_ordered(path, name, self.gc.astype(np.int64), self.gather(x), self.n_cells,
-                      self.comm, mode=mode)
+                      self.comm, mode=mode, attrs=attrs)
 
     def read(self, path, name, x):
+        """The fine vector `x`'s own entries from dataset `name` of `path`, which must
+        have been written for as many passes and as wide rows. Collective."""
         from femtools.hdf5_rows import fetch_rows
+        found = None
+        if self.comm.rank == 0:
+            import h5py
+            with h5py.File(path, "r") as h5:
+                a = h5[name].attrs
+                found = (int(a.get("passes", -1)), int(a.get("width", -1)))
+        found = self.comm.bcast(found, root=0)
+        if found != (self.passes, self.width):
+            raise ValueError("{}:{}: a fine field of {} passes and rows of {}, not {} and {}"
+                             .format(path, name, found[0], found[1], self.passes, self.width))
         self.scatter(fetch_rows(path, name, self.gc.astype(np.int64), self.comm), x)
 
 

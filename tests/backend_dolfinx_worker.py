@@ -22,6 +22,32 @@ def main(out):
     u.x.scatter_forward()
     r["array"] = L.assemble(u * L.dx)
     r["n_unique"] = u.vector().size()
+    # ... on a mixed space's component view, and by interpolating a Function
+    W = L.FunctionSpace(mesh, L.MixedElement([L.FiniteElement("CG", mesh.ufl_cell(), 1)] * 2))
+    q = L.Function(W)
+    q.sub(1).interpolate(lambda x: 4 + 0 * x[0])
+    r["sub"] = L.assemble(L.split(q)[1] * L.dx)
+    w = L.Function(V)
+    w.interpolate(u)
+    r["function"] = L.assemble(w * L.dx)
+    # sync copies the compact vector into DOLFINx's array only after it changed
+    calls = []
+    prolong = w._unique.prolong
+    w._unique.prolong = lambda c, f: calls.append(1) or prolong(c, f)
+    w.vector()[:] = 1.0
+    w.sync()
+    w.sync()
+    r["syncs"] = len(calls)
+    w.vector().axpy(1.0, w.vector())
+    w.sync()
+    r["syncs_after_write"] = len(calls) - r["syncs"]
+    # facets marked after a measure was made count in its integrals
+    marks = L.BoundaryMarkers(mesh, 0)
+    ds = L.Measure("ds", domain=mesh, subdomain_data=marks)
+    one = L.Constant(1.0, mesh)
+    r["ds_before"] = L.assemble(one * ds(2))
+    L.Faces(1, 0.0).mark(marks, 2)
+    r["ds_after"] = L.assemble(one * ds(2))
     # a Dirichlet condition on periodic slaves constrains their masters on any ranks
     m = L.BoundaryMarkers(mesh, 0)
     m.mark(lambda x: (np.abs(x[1]) < 1e-10) & (x[0] > 0.5 - 1e-10), 2)

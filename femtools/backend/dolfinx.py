@@ -1528,10 +1528,9 @@ def read_series_step(path, name, counter, u):
     return u.restrict()
 
 
-def read_vector_series_step(path, name, counter, components, constrained_domain=None):
+def read_vector_series_step(path, name, counter, components):
     """Step `counter` of the vector field `name` of an XDMF time series into the scalar
-    Functions `components` (on one space, its element and periodicity the vector's;
-    constrained_domain is dolfin's argument, the space has it here)."""
+    Functions `components`, all on one space."""
     _into_components(components, lambda u: read_series_step(path, name, counter, u))
 
 

@@ -1,7 +1,9 @@
 """`femtools.backend.dolfinx`: dolfin's object API on DOLFINx. A Function's DOLFINx writes
-reach its compact vector, a Dirichlet condition on periodic slaves constrains their
-masters on any number of ranks, and a periodic Poisson solve through dolfin's names
-gives the exact quadratic -- on one rank and on three.
+(also on a component view, and by interpolation) reach its compact vector, sync copies
+only after a change, facets marked after a measure was made count, a Dirichlet
+condition on periodic slaves constrains their masters on any number of ranks, and a
+periodic Poisson solve through dolfin's names gives the exact quadratic -- on one rank
+and on three.
 
     python3 -m pytest tests/test_backend_dolfinx.py [-m mpi]
 """
@@ -29,6 +31,9 @@ def _run(tmp_path, ranks):
 
 def _check(r):
     assert r["interpolate"] == pytest.approx(1.0) and r["array"] == pytest.approx(2.0)
+    assert r["sub"] == pytest.approx(4.0) and r["function"] == pytest.approx(2.0)
+    assert (r["syncs"], r["syncs_after_write"]) == (1, 1)
+    assert r["ds_before"] == 0.0 and r["ds_after"] == pytest.approx(1.0)
     assert r["n_unique"] == 72              # 81 nodes, the 9 on x = 1 slaves
     assert r["bc_rows"] == 5                # y = 0, x >= 1/2: 5 masters
     assert r["poisson"] < 1e-3

@@ -166,11 +166,11 @@ void enforce_rules_periodic(ParallelRefinement& p_ref, const Mesh& mesh,
                             const std::vector<unsigned int>& long_edge,
                             const femtools_plaza::Exchange& exchange)
 {
-  const MPI_Comm comm = mesh.mpi_comm();
-  std::size_t update_count = 1;
-  while (update_count != 0)
+  auto is_marked = [&](std::int64_t e) { return p_ref.is_marked(e); };
+  auto mark = [&](std::int64_t e) { p_ref.mark(e); };
+  femtools_plaza::fixed_point(mesh.mpi_comm(), [&]() -> std::int64_t
   {
-    update_count = 0;
+    std::int64_t n = 0;
     p_ref.update_logical_edgefunction();
     for (FaceIterator f(mesh); !f.end(); ++f)
     {
@@ -179,12 +179,10 @@ void enforce_rules_periodic(ParallelRefinement& p_ref, const Mesh& mesh,
       bool any_marked = false;
       for (EdgeIterator e(*f); !e.end(); ++e)
         any_marked |= p_ref.is_marked(e->index());
-      if (any_marked) { p_ref.mark(long_e); ++update_count; }
+      if (any_marked) { p_ref.mark(long_e); ++n; }
     }
-    for (auto e : exchange.incoming([&](std::int32_t i) { return p_ref.is_marked(i); }))
-      if (!p_ref.is_marked(e)) { p_ref.mark(e); ++update_count; }
-    update_count = dolfin::MPI::sum(comm, update_count);
-  }
+    return n + femtools_plaza::partner_marks(exchange, is_marked, mark);
+  });
 }
 
 // The edges no refinement may bisect, from `seeds` (a slab's inlet edges, say),
@@ -198,24 +196,31 @@ void freeze_closure(ParallelRefinement& f_ref, const Mesh& mesh,
                     const std::vector<unsigned int>& long_edge,
                     const femtools_plaza::Exchange& exchange)
 {
-  const MPI_Comm comm = mesh.mpi_comm();
   for (auto e : seeds) f_ref.mark(e);
-  std::size_t update_count = 1;
-  while (update_count != 0)
+  const MeshConnectivity& f2e = mesh.topology()(2, 1);
+  auto face_edge = [&](std::int64_t f, int k) -> std::size_t { return f2e(f)[k]; };
+  auto in = [&](std::int64_t e) { return f_ref.is_marked(e); };
+  auto put = [&](std::int64_t e) { f_ref.mark(e); };
+  femtools_plaza::fixed_point(mesh.mpi_comm(), [&]() -> std::int64_t
   {
-    update_count = 0;
     f_ref.update_logical_edgefunction();
-    for (FaceIterator f(mesh); !f.end(); ++f)
-    {
-      if (!f_ref.is_marked(long_edge[f->index()])) continue;
-      for (EdgeIterator e(*f); !e.end(); ++e)
-        if (!f_ref.is_marked(e->index())) { f_ref.mark(e->index()); ++update_count; }
-    }
-    for (auto e : exchange.incoming([&](std::int32_t i) { return f_ref.is_marked(i); }))
-      if (!f_ref.is_marked(e)) { f_ref.mark(e); ++update_count; }
-    update_count = dolfin::MPI::sum(comm, update_count);
-  }
+    return femtools_plaza::close_under_long_edges(mesh.num_faces(), face_edge, long_edge,
+                                                  in, put)
+           + femtools_plaza::partner_marks(exchange, in, put);
+  });
 }
+
+// A cell's local edges and faces, as femtools_plaza's loops take them (a face is the
+// cell itself in 2D)
+struct CellEntities
+{
+  const Mesh& mesh;
+  const std::size_t tdim;
+  std::size_t edge(std::int64_t c, int i) const
+  { return mesh.topology()(tdim, 1)(c)[i]; }
+  std::size_t face(std::int64_t c, int k) const
+  { return tdim == 2 ? c : mesh.topology()(tdim, 2)(c)[k]; }
+};
 
 // dolfin's do_refine, minus parent-cell/parent-facet bookkeeping, dispatching to the
 // parallel assembly (redistribute) rather than build_local when running on more than
@@ -234,16 +239,22 @@ void do_refine(Mesh& new_mesh, const Mesh& mesh, ParallelRefinement& p_ref,
     = *(p_ref.edge_to_new_vertex());
 
   std::vector<std::size_t> indices(num_cell_vertices + num_cell_edges);
-  std::vector<std::size_t> marked_edge_list;
+  std::vector<bool> markers;
+  std::vector<std::size_t> longest_edge;
   std::vector<std::size_t> simplex_set;
+  const CellEntities ce{mesh, tdim};
+  auto cell_edge = [&](std::int64_t c, int i) { return ce.edge(c, i); };
+  auto cell_face = [&](std::int64_t c, int k) { return ce.face(c, k); };
+  auto marked = [&](std::size_t e) { return p_ref.is_marked(e); };
 
   for (CellIterator cell(mesh); !cell.end(); ++cell)
   {
     std::size_t j = 0;
     for (VertexIterator v(*cell); !v.end(); ++v) indices[j++] = v->global_index();
 
-    marked_edge_list = p_ref.marked_edge_list(*cell);
-    if (marked_edge_list.size() == 0)
+    if (!femtools_plaza::cell_split_input<std::size_t>(cell->index(), tdim, cell_edge,
+                                                       cell_face, long_edge, marked,
+                                                       markers, longest_edge))
     {
       p_ref.new_cell(*cell);
       parent_cell.push_back(cell->index());
@@ -251,20 +262,9 @@ void do_refine(Mesh& new_mesh, const Mesh& mesh, ParallelRefinement& p_ref,
     else
     {
       indices.resize(num_cell_vertices + num_cell_edges);
-      std::vector<bool> markers(num_cell_edges, false);
-      for (auto &p : marked_edge_list)
-      {
-        markers[p] = true;
-        const std::size_t edge_index = cell->entities(1)[p];
-        auto it = new_vertex_map.find(edge_index);
-        indices[num_cell_vertices + p] = it->second;
-      }
-      std::vector<std::size_t> longest_edge;
-      for (FaceIterator f(*cell); !f.end(); ++f)
-        longest_edge.push_back(long_edge[f->index()]);
-      for (auto &p : longest_edge)
-        for (EdgeIterator ej(*cell); !ej.end(); ++ej)
-          if (p == ej->index()) { p = ej.pos(); break; }
+      for (std::size_t p = 0; p < num_cell_edges; ++p)
+        if (markers[p])
+          indices[num_cell_vertices + p] = new_vertex_map.find(cell->entities(1)[p])->second;
 
       PlazaRefinementND::get_simplices(simplex_set, markers, longest_edge, tdim,
                                      tdim == 2 && uniform[cell->index()]);
@@ -301,26 +301,21 @@ std::pair<std::size_t, std::size_t> count_children(const Mesh& mesh, ParallelRef
                                                    const std::vector<bool>& uniform)
 {
   const std::size_t tdim = mesh.topology().dim();
-  const std::size_t num_cell_edges = tdim*3 - 3;
   const std::size_t num_cell_vertices = tdim + 1;
   std::vector<std::size_t> simplex_set;
-  std::size_t n = 0;
-  for (CellIterator cell(mesh); !cell.end(); ++cell)
-  {
-    const std::vector<std::size_t> marked_edge_list = p_ref.marked_edge_list(*cell);
-    if (marked_edge_list.size() == 0) { ++n; continue; }
-    std::vector<bool> markers(num_cell_edges, false);
-    for (auto &p : marked_edge_list) markers[p] = true;
-    std::vector<std::size_t> longest_edge;
-    for (FaceIterator f(*cell); !f.end(); ++f)
-      longest_edge.push_back(long_edge[f->index()]);
-    for (auto &p : longest_edge)
-      for (EdgeIterator ej(*cell); !ej.end(); ++ej)
-        if (p == ej->index()) { p = ej.pos(); break; }
-    PlazaRefinementND::get_simplices(simplex_set, markers, longest_edge, tdim,
-                                     tdim == 2 && uniform[cell->index()]);
-    n += simplex_set.size() / num_cell_vertices;
-  }
+  const CellEntities ce{mesh, tdim};
+  const std::int64_t n = femtools_plaza::count_children<std::size_t>(
+      mesh.num_cells(), tdim,
+      [&](std::int64_t c, int i) { return ce.edge(c, i); },
+      [&](std::int64_t c, int k) { return ce.face(c, k); }, long_edge,
+      [&](std::size_t e) { return p_ref.is_marked(e); },
+      [&](std::int64_t c, const std::vector<bool>& markers,
+          const std::vector<std::size_t>& longest) -> std::int64_t
+      {
+        PlazaRefinementND::get_simplices(simplex_set, markers, longest, tdim,
+                                         tdim == 2 && uniform[c]);
+        return simplex_set.size() / num_cell_vertices;
+      });
   return std::make_pair(dolfin::MPI::sum(mesh.mpi_comm(), n),
                         dolfin::MPI::max(mesh.mpi_comm(), n));
 }

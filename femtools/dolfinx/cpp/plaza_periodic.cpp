@@ -166,25 +166,21 @@ Partners periodic_partners(const mesh::Mesh<T>& mesh, const std::vector<double>&
   return femtools_plaza::pair<2>(mesh.comm(), ids, x, box);
 }
 
-// Marks from the partners: each local edge whose partner is marked is marked; returns
-// how many this marked (owned ones; their ghosts follow through
-// update_logical_edgefunction, whose sends are collected in `for_update`).
-std::int64_t exchange_partner_marks(const femtools_plaza::Exchange& exchange,
-                                    std::span<std::int8_t> marks,
-                                    const graph::AdjacencyList<int>& edge_ranks,
-                                    std::vector<std::vector<std::int32_t>>& for_update)
+// Edge marks as femtools_plaza's loops take them: `in(e)`, and `put(e)`, which marks
+// an edge and collects its sharing ranks' updates for update_logical_edgefunction
+struct Marks
 {
-  std::int64_t changed = 0;
-  for (std::int32_t e : exchange.incoming([&](std::int32_t i) { return marks[i] != 0; }))
-    if (!marks[e])
-    {
-      marks[e] = true;
-      ++changed;
-      for (int r : edge_ranks.links(e))
-        for_update[r].push_back(e);
-    }
-  return changed;
-}
+  std::vector<std::int8_t>& marks;
+  const graph::AdjacencyList<int>& edge_ranks;
+  std::vector<std::vector<std::int32_t>>& upd;
+  bool in(std::int32_t e) const { return marks[e] != 0; }
+  void put(std::int32_t e)
+  {
+    marks[e] = 1;
+    for (int r : edge_ranks.links(e))
+      upd[r].push_back(e);
+  }
+};
 
 } // namespace
 // The refinement (see the header). `cells`: local cells to refine (each marks its
@@ -256,6 +252,13 @@ refine_periodic(const mesh::Mesh<T>& mesh, std::span<const std::int32_t> cells,
   auto f_to_e = topology->connectivity(2, 1);
   auto c_to_f = topology->connectivity(tdim, 2);
 
+  auto sync = [&](std::vector<std::vector<std::int32_t>>& upd, std::vector<std::int8_t>& m)
+  {
+    refinement::update_logical_edgefunction(ncomm, upd, m, *map_e);
+    for (auto& u : upd)
+      u.clear();
+  };
+
   // frozen edges, closed under the longest-edge rule, shared edges and partners
   std::vector<std::int8_t> fz(ne, 0);
   const bool freezing = allmax(comm, (std::int64_t)frozen.size()) > 0;
@@ -263,41 +266,28 @@ refine_periodic(const mesh::Mesh<T>& mesh, std::span<const std::int32_t> cells,
   if (freezing)
   {
     std::vector<std::vector<std::int32_t>> upd(ranks.size());
+    Marks F{fz, edge_ranks, upd};
+    auto in = [&F](std::int32_t e) { return F.in(e); };
+    auto put = [&F](std::int32_t e) { F.put(e); };
     for (auto e : frozen)
       if (!fz[e])
-      {
-        fz[e] = 1;
-        for (int r : edge_ranks.links(e))
-          upd[r].push_back(e);
-      }
-    std::int64_t changed = 1;
-    while (changed != 0)
+        put(e);
+    femtools_plaza::fixed_point(comm, [&]() -> std::int64_t
     {
-      refinement::update_logical_edgefunction(ncomm, upd, fz, *map_e);
-      for (auto& u : upd)
-        u.clear();
-      changed = 0;
-      for (std::int32_t f = 0; f < f_to_e->num_nodes(); ++f)
-        if (fz[long_edge[f]])
-          for (auto e : f_to_e->links(f))
-            if (!fz[e])
-            {
-              fz[e] = 1;
-              ++changed;
-              for (int r : edge_ranks.links(e))
-                upd[r].push_back(e);
-            }
-      changed += exchange_partner_marks(exchange, fz, edge_ranks, upd);
-      refinement::update_logical_edgefunction(ncomm, upd, fz, *map_e);
-      for (auto& u : upd)
-        u.clear();
-      changed = allsum(comm, changed);
-    }
+      sync(upd, fz);
+      std::int64_t n = femtools_plaza::close_under_long_edges(
+          f_to_e->num_nodes(), [&](std::int64_t f, int k) { return f_to_e->links(f)[k]; },
+          long_edge, in, put);
+      n += femtools_plaza::partner_marks(exchange, in, put);
+      sync(upd, fz);
+      return n;
+    });
   }
 
   // the marking: the edges of the marked cells (less those holding a frozen edge)
   std::vector<std::int8_t> marked(ne, 0);
   std::vector<std::vector<std::int32_t>> upd(ranks.size());
+  Marks M{marked, edge_ranks, upd};
   const std::int32_t n_cells = topology->index_map(tdim)->size_local();
   std::vector<std::int8_t> holds(n_cells, 0);
   if (freezing)
@@ -315,26 +305,23 @@ refine_periodic(const mesh::Mesh<T>& mesh, std::span<const std::int32_t> cells,
       continue;
     }
     for (auto e : c_to_e->links(c))
-      if (!marked[e])
-      {
-        marked[e] = 1;
-        for (int r : edge_ranks.links(e))
-          upd[r].push_back(e);
-      }
+      if (!M.in(e))
+        M.put(e);
   }
   refinement::update_logical_edgefunction(ncomm, upd, marked, *map_e);
 
   // DOLFINx's rules and the periodic partners, to a joint fixed point
-  std::int64_t changed = 1;
-  while (changed != 0)
+  femtools_plaza::fixed_point(comm, [&]() -> std::int64_t
   {
     refinement::plaza::impl::enforce_rules(ncomm, edge_ranks, marked, *topology, long_edge);
     for (auto& u : upd)
       u.clear();
-    changed = exchange_partner_marks(exchange, marked, edge_ranks, upd);
+    const std::int64_t n = femtools_plaza::partner_marks(
+        exchange, [&M](std::int32_t e) { return M.in(e); },
+        [&M](std::int32_t e) { M.put(e); });
     refinement::update_logical_edgefunction(ncomm, upd, marked, *map_e);
-    changed = allsum(comm, changed);
-  }
+    return n;
+  });
 
   if (freezing)
   {
@@ -357,37 +344,19 @@ refine_periodic(const mesh::Mesh<T>& mesh, std::span<const std::int32_t> cells,
     const int nce = 3 * tdim - 3, ncv = tdim + 1;
     std::vector<std::int64_t> indices(ncv + nce);
     std::iota(indices.begin(), indices.end(), 0);
-    std::int64_t n = 0;
-    for (std::int32_t c = 0; c < n_cells; ++c)
-    {
-      auto edges = c_to_e->links(c);
-      bool any = false;
-      for (std::size_t ei = 0; ei < edges.size(); ++ei)
-      {
-        indices[ncv + ei] = marked[edges[ei]] ? ncv + ei : -1;
-        any |= marked[edges[ei]];
-      }
-      if (!any)
-      {
-        ++n;
-        continue;
-      }
-      std::vector<std::int32_t> le;
-      for (auto f : c_to_f->links(c))
-      {
-        std::int32_t p = long_edge[f];
-        for (std::size_t ej = 0; ej < edges.size(); ++ej)
-          if (p == edges[ej])
-          {
-            p = ej;
-            break;
-          }
-        le.push_back(p);
-      }
-      const bool uniform = (tdim == 2) ? edge_ratio_ok[c] : false;
-      auto [set, sz] = refinement::plaza::impl::get_simplices(indices, le, tdim, uniform);
-      n += sz / ncv;
-    }
+    const std::int64_t n = femtools_plaza::count_children<std::int32_t>(
+        n_cells, tdim, [&](std::int64_t c, int i) { return c_to_e->links(c)[i]; },
+        [&](std::int64_t c, int k) { return c_to_f->links(c)[k]; }, long_edge,
+        [&](std::int32_t e) { return marked[e] != 0; },
+        [&](std::int64_t c, const std::vector<bool>& markers,
+            const std::vector<std::int32_t>& le) -> std::int64_t
+        {
+          for (int ei = 0; ei < nce; ++ei)
+            indices[ncv + ei] = markers[ei] ? ncv + ei : -1;
+          const bool uniform = (tdim == 2) ? edge_ratio_ok[c] : false;
+          auto [set, sz] = refinement::plaza::impl::get_simplices(indices, le, tdim, uniform);
+          return sz / ncv;
+        });
     n_children = allsum(comm, n);
     n_rank = allmax(comm, n);
     if ((max_cells > 0 and n_children > max_cells)

@@ -686,6 +686,43 @@ The way twoasis writes its series, and the way it reads them back.
     print('{} steps of {} nodes, one mesh, exact both ways'.format(len(times), len(nodes)))
 
 
+def test_periodic_write_lets_go_on_close():
+    """a periodic field's unconstrained space and its transfer are the file's, kept
+    across its steps and let go of when it closes
+
+    Held module-wide, they outlived every file: a Stokes tensor solve writing each
+    direction between its solves carried them into the next solves, and at 224 M dofs
+    that took the job past its node's memory (stokes-beadpack, 2026-11-12).
+    """
+    from femtools import fast_interpolation
+    mesh = unit_mesh(4, 'triangle')
+    V = df.VectorFunctionSpace(mesh, 'CG', 2, constrained_domain=periodic_x())
+    u = df.Function(V)
+    u.rename('u', 'u')
+    u.interpolate(df.Expression(PERIODIC_VELOCITY, t=0.0, degree=4))
+    before = set(fast_interpolation._TRANSFERS)
+    f = XDMFFile2(df.MPI.comm_world, tmp('letgo.xdmf'))
+    f.write(u, 0.0)
+    plain = [v for k, v in f._nodes.items() if k[:1] == ('plain',)]
+    assert len(plain) == 1, 'no unconstrained space kept for the file'
+    made = set(fast_interpolation._TRANSFERS) - before
+    assert made, 'no transfer made onto the unconstrained space'
+    f.write(u, 1.0)
+    assert [v for k, v in f._nodes.items() if k[:1] == ('plain',)] == plain, \
+        'a second step built its space again'
+    assert set(fast_interpolation._TRANSFERS) - before == made, \
+        'a second step built its transfer again'
+    f.close()
+    assert not f._nodes, 'the file still holds its spaces after close'
+    assert not set(fast_interpolation._TRANSFERS) & made, 'its transfers outlived the file'
+    # and what it wrote is still the field
+    back = df.Function(V)
+    with XDMFFile2(df.MPI.comm_world, tmp('letgo.xdmf')) as g:
+        g.read_checkpoint(back, 'u', 0)
+    assert_close(back.vector().get_local(), u.vector().get_local(), 1e-14, 'read back')
+    print('one space and {} transfer(s) for two steps, none after close'.format(len(made)))
+
+
 # -- reading back -----------------------------------------------------------------
 
 @CELLS

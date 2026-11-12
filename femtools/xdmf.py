@@ -75,7 +75,6 @@ import numpy as np
 
 from femtools import compress
 from femtools.fast_interpolation import interpolate as fast_interpolate
-from femtools.lru import LRU
 
 # XDMF's Tetrahedron_10: four corners, then the midsides of these edges in order.
 XDMF_EDGES = ((0, 1), (1, 2), (0, 2), (0, 3), (1, 3), (2, 3))
@@ -623,6 +622,7 @@ class XDMFFile2(object):
         if self._doc is not None:
             self._doc.close()
             self._doc = None
+        _release_plain(self._nodes)
         if self._delegate is not None:
             self._delegate.close()
             self._delegate = None
@@ -1047,7 +1047,7 @@ class XDMFFile2(object):
         if _is_plain(V, mesh, degree, width):
             _scatter_nodes(u, V, self.path, grid, name, width, degree)
             return u
-        plain = _plain_space(mesh, degree, width)
+        plain = _plain_space(mesh, degree, width, self._nodes)
         target = df.Function(plain)
         _scatter_nodes(target, plain, self.path, grid, name, width, degree)
         fast_interpolate(target, V, out=u)
@@ -1321,9 +1321,6 @@ def _entity_topology(mesh, dim, per_cell):
     return XDMF_TOPOLOGY[(cellname, per_cell)]
 
 
-_PLAIN_SPACES = LRU(16)
-
-
 def scatter_vertex_values(f, per_vertex, width=1):
     """Per-vertex values into a Function's owned dofs, ghosts left to `apply`.
 
@@ -1347,23 +1344,40 @@ def scatter_vertex_values(f, per_vertex, width=1):
     return f
 
 
-def _plain_space(mesh, degree, width):
-    """An unconstrained Lagrange space, built once per mesh, degree and width.
+def _plain_space(mesh, degree, width, cache):
+    """An unconstrained Lagrange space, built once per mesh, degree and width and kept in
+    `cache`, which is a file's (`XDMFFile2._nodes`) and goes when the file closes.
 
     Building one is not cheap -- 48 ms for a P2 space on 48k cells, which was more
     than half the cost of writing a field -- and a time series would otherwise build
-    an identical one for every step.
+    an identical one for every step. Kept in a module-wide cache instead, the space
+    and its transfer from a periodic one (`fast_interpolation`) outlived every file:
+    at 224 M dofs on 128 ranks they sat beside the next Stokes solves and took the
+    job past its node's memory (stokes-beadpack, 2026-11-12).
     """
     import dolfin as df
-    key = (mesh.id(), degree, width)
-    space = _PLAIN_SPACES.get(key)
+    key = ('plain', mesh.id(), degree, width)
+    space = cache.get(key)
     if space is None:
         cell = mesh.ufl_cell()
         element = (df.VectorElement('Lagrange', cell, degree, dim=width) if width > 1
                    else df.FiniteElement('Lagrange', cell, degree))
         space = df.FunctionSpace(mesh, element)
-        _PLAIN_SPACES[key] = space
+        cache[key] = space
     return space
+
+
+def _release_plain(cache):
+    """Let go of what `cache` holds -- its unconstrained spaces, the transfers onto and
+    from them, the node layouts -- and hand the heap back."""
+    from femtools import fast_interpolation
+    from femtools.memory import drop
+    held = [v for k, v in cache.items() if isinstance(k, tuple) and k[:1] == ('plain',)]
+    for space in held:
+        fast_interpolation.forget(space)
+    cache.clear()
+    if held:
+        drop()
 
 
 def _is_plain(V, mesh, degree, width):
@@ -1686,14 +1700,15 @@ def _function_nodes_distributed(functions, cache=None):
     spaces alone is kept in `cache` (`_node_layout`, `_owned_nodes`), so a step of a
     time series costs its values.
     """
-    cache = {} if cache is None else cache
+    own = cache is None             # a cache of this call's own: let go of before returning
+    cache = {} if own else cache
     mesh, degree, widths = _check_functions(functions)
     layout = _node_layout(mesh, degree, cache)
     fields = []
     coord_rows = coord_masks = None
     for index, (func, width) in enumerate(zip(functions, widths)):
         source = func if _is_plain(func.function_space(), mesh, degree, width) \
-            else fast_interpolate(func, _plain_space(mesh, degree, width))
+            else fast_interpolate(func, _plain_space(mesh, degree, width, cache))
         rows, masks, takes = _owned_nodes(source.function_space(), mesh, degree,
                                           width, layout, cache)
         local = source.vector().get_local()
@@ -1702,6 +1717,8 @@ def _function_nodes_distributed(functions, cache=None):
                        np.column_stack(values) if len(values) > 1 else values[0]))
         if coord_rows is None:
             coord_rows, coord_masks = rows, masks
+    if own:
+        _release_plain(cache)
     return {'n_nodes': layout['n_nodes'], 'n_cells': layout['n_cells'],
             'degree': degree, 'mesh': mesh, 'layout': layout,
             'coord_rows': coord_rows, 'coord_masks': coord_masks,

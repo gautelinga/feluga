@@ -40,6 +40,9 @@ def _check_unique(r):
     if r["vs_dolfinx_mpc"] is not None:
         assert r["vs_dolfinx_mpc"] < 1e-12
     assert r["nullspace"]
+    assert r["interleaved"]
+    assert r["fold_mixed_interleaved"] < 1e-14 and r["fold_mixed_interleaved_mallocs"] == 0
+    assert r["interleaved_roundtrip"] == 0.0
 
 
 def test_unique_dofs_serial(tmp_path):

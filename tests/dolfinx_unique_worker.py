@@ -191,6 +191,34 @@ assemble_matrix(K, a_lap)
 ns = constant_nullspace(UQn)
 res["nullspace"] = bool(ns.test(K))
 
+# 5. interleaved numbering of a mixed space: the components at a node one after the
+# other, the same operator up to the permutation, values through restrict and prolong
+from femtools.dolfinx.periodic import flat_collapse_map  # noqa: E402
+
+UWi = UniqueDofs(W, *periodic_box(W, periodic=(True, False)), interleave=True)
+K = create_matrix(a_W, UWi)
+assemble_matrix(K, a_W)
+res["fold_mixed_interleaved_mallocs"] = comm.allreduce(int(K.getInfo()["mallocs"]))
+res["fold_mixed_interleaved"] = rel(K, explicit_P(UWi).transposeMatMult(
+    plain_matrix(a_W).matMult(explicit_P(UWi))))
+n_loc = W.dofmap.index_map.size_local + W.dofmap.index_map.num_ghosts
+comp, X = np.zeros(n_loc, dtype=int), np.zeros((n_loc, 3))
+for i in range(2):
+    Wi, parent = W.sub(i).collapse()
+    parent = flat_collapse_map(parent)
+    comp[parent] = i
+    X[parent] = Wi.tabulate_dof_coordinates()
+own = UWi.owned_unique
+pairs_ok = (len(own) % 2 == 0 and np.all(comp[own] == np.arange(len(own)) % 2)
+            and np.allclose(X[own[0::2]], X[own[1::2]]))
+res["interleaved"] = bool(comm.allreduce(int(not pairs_ok)) == 0)
+w = fem.Function(W)
+w.sub(0).interpolate(lambda X: np.sin(2 * np.pi * X[0]) + X[1])
+w.sub(1).interpolate(lambda X: np.cos(2 * np.pi * X[0]) * X[1])
+c = UWi.restrict(w, UWi.create_vector())
+c2 = UWi.restrict(UWi.prolong(c, fem.Function(W)), UWi.create_vector())
+res["interleaved_roundtrip"] = rel(c2, c)
+
 if comm.rank == 0:
     with open(sys.argv[1], "w") as fh:
         json.dump(res, fh)

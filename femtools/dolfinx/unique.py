@@ -24,12 +24,40 @@ numbered dof by dof (their dofmap block size is 1), blocked spaces block by bloc
 import numpy as np
 
 
+def _node_keys(V, n_local):
+    """Sort keys that put the components of a mixed space at a node next to each other:
+    component i of the node of component 0's dof d gets n_sub*d + i. The components'
+    cell dofmaps pair them (the same local dof of the same cell is at the same node).
+    Spaces that are not mixed, or whose components differ, keep their order."""
+    n_sub = V.element.num_sub_elements
+    keys = np.arange(n_local, dtype=np.int64)
+    if n_sub == 0 or V.dofmap.index_map_bs != 1:
+        return keys
+    elements = [V.sub(i).ufl_element() for i in range(n_sub)]
+    if any(e != elements[0] for e in elements[1:]):
+        return keys
+    first = V.sub(0).dofmap.list.ravel().astype(np.int64)
+    keys = np.full(n_local, -1, dtype=np.int64)
+    for i in range(n_sub):
+        keys[V.sub(i).dofmap.list.ravel()] = n_sub * first + i
+    missing = keys < 0  # dofs on no cell (none in a Lagrange space): keep them last
+    keys[missing] = n_sub * n_local + np.flatnonzero(missing)
+    return keys
+
+
 class UniqueDofs:
     """The unique dofs of `V`, given periodic `slaves` (local dof indices, owned and
     ghost) and `masters` (their masters' global dof indices), e.g. from
-    `femtools.dolfinx.periodic.periodic_box`. With neither, the space's own dofs."""
+    `femtools.dolfinx.periodic.periodic_box`. With neither, the space's own dofs.
 
-    def __init__(self, V, slaves=None, masters=None):
+    The compact numbering keeps the space's order of the unique dofs, except with
+    `interleave` on a mixed space whose components share one element: then the
+    components at a node are numbered one after the other, as dolfin numbers a mixed
+    space (DOLFINx numbers each component's dofs of a cell in a run). Incomplete
+    factorizations such as ILU(0), which depend on the order, then work as on dolfin.
+    """
+
+    def __init__(self, V, slaves=None, masters=None, interleave=False):
         from petsc4py import PETSc
 
         self.V = V
@@ -47,6 +75,9 @@ class UniqueDofs:
         is_slave = np.zeros(n_loc, dtype=bool)
         is_slave[slaves] = True
         owned_unique = np.flatnonzero(~is_slave[:n_own])
+        if interleave:
+            owned_unique = owned_unique[np.argsort(_node_keys(V, n_loc)[owned_unique],
+                                                   kind="stable")]
         n_unique = len(owned_unique)
         start = self.comm.exscan(n_unique) or 0
         n_global = self.comm.allreduce(n_unique)

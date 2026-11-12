@@ -110,7 +110,39 @@ def read_dolfin(folder, out):
             json.dump(res, fh)
 
 
+def read_dolfinx(folder, out):
+    """DOLFINx reads every step of both backends' series (femtools.dolfinx.xdmf_read) into
+    its own spaces, the periodic ones included (UniqueDofs: restricted values compared)."""
+    from dolfinx import fem, mesh as dmesh
+    from mpi4py import MPI
+    from femtools.dolfinx.periodic import periodic_box
+    from femtools.dolfinx.unique import UniqueDofs
+    from femtools.dolfinx.xdmf_read import read_nodal
+    comm = MPI.COMM_WORLD
+    msh = dmesh.create_rectangle(comm, [[0, 0], [LX, LY]], [NX, NY], dmesh.CellType.triangle,
+                                 diagonal=dmesh.DiagonalType.right)
+    res = {}
+    for name, (degree, vector, periodic) in FIELDS.items():
+        V = fem.functionspace(msh, ("Lagrange", degree, (2,)) if vector else ("Lagrange", degree))
+        U = UniqueDofs(V, *periodic_box(V, periodic=(True, False))) if periodic else UniqueDofs(V)
+        X = V.tabulate_dof_coordinates()[U.owned_unique // V.dofmap.index_map_bs]
+        comp = U.owned_unique % V.dofmap.index_map_bs
+        base = np.where(comp == 0, f(X[:, 0], X[:, 1]), g(X[:, 0], X[:, 1]))
+        errs = []
+        for prefix in ("x_", "d_"):
+            for k in range(len(TIMES)):
+                u = fem.Function(V)
+                read_nodal(os.path.join(folder, prefix + name + ".xdmf"), name, k, u)
+                d = np.abs(u.x.array[U.owned_unique] - (1 + k) * base)
+                errs.append(comm.allreduce(float(d.max()) if d.size else 0.0, op=MPI.MAX))
+        res[name] = max(errs)
+    if comm.rank == 0:
+        with open(out, "w") as fh:
+            json.dump(res, fh)
+
+
 if __name__ == "__main__":
     mode, folder = sys.argv[1:3]
     {"write-dolfinx": lambda: write_dolfinx(folder), "write-dolfin": lambda: write_dolfin(folder),
-     "read-dolfin": lambda: read_dolfin(folder, sys.argv[3])}[mode]()
+     "read-dolfin": lambda: read_dolfin(folder, sys.argv[3]),
+     "read-dolfinx": lambda: read_dolfinx(folder, sys.argv[3])}[mode]()

@@ -129,6 +129,9 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   layout -- the same XML word for word, quadratic cells for P2, the mesh stored once,
   every rank writing its own rows -- so `grids`, `merge_series` and
   `XDMFFile2.read_checkpoint` treat both backends' series alike.
+- **`dolfinx.xdmf_read`**: `read_nodal`, a step of such a series, written by either backend,
+  into a DOLFINx Function of any degree and periodicity (nodes matched by position on a
+  plain space of the file's degree, then interpolated): `read_checkpoint`'s counterpart.
 
 ## Requirements
 

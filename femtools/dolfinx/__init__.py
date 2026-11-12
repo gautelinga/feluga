@@ -19,6 +19,8 @@
                                cached, evaluated where DOLFINx interpolates
     femtools.dolfinx.xdmf      XDMFSeries: time series in femtools.xdmf.XDMFFile2's layout
                                (quadratic grids kept), the same files as dolfin's
+    femtools.dolfinx.xdmf_read read_nodal: a step of such a series (either backend's) into
+                               a DOLFINx Function, nodes matched by position
 
 A solver algorithm built on these sees PETSc vectors and matrices over unique dofs only,
 as dolfin's constrained_domain gives it, whatever the periodicity. `import

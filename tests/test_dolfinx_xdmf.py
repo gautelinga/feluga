@@ -48,3 +48,15 @@ def test_series_serial(tmp_path):
 @pytest.mark.mpi
 def test_series_three_ranks(tmp_path):
     _check(tmp_path, 3)
+
+
+@pytest.mark.parametrize("ranks", [1, 3])
+def test_read_on_dolfinx(tmp_path, ranks):
+    """DOLFINx reads every step of both backends' series (written on three ranks and by
+    dolfin) into its own spaces, periodic ones included, to round-off."""
+    pytest.importorskip("dolfin")
+    _run("write-dolfinx", tmp_path, 3)
+    _run("write-dolfin", tmp_path, 1)
+    res = _run("read-dolfinx", tmp_path, ranks, tmp_path / "res.json")
+    for name in FIELDS:
+        assert res[name] < 1e-13, name

@@ -9,6 +9,7 @@ the coarse one).
                                                 # at the coarse nodes, exact
     lattice = nest.lattice(Vf)                  # a fine field by (coarse cell, point)
     lattice.write(path, "phig", x); lattice.read(path, "phig", x)
+    fine_values = nest.facet_values(coarse_values)   # facet markers on the fine mesh
 
 The matrices are petsc4py Mats over the spaces' vectors: dolfin's global dofs, or on
 DOLFINx a space's unique dofs as its `UniqueDofs` numbers them (pass `(V, U)` for a
@@ -223,6 +224,36 @@ class Nested:
         """A fine space's dofs by (coarse cell, lattice point), every component of it:
         `Lattice`."""
         return Lattice(self, fine_space)
+
+    def facet_values(self, coarse_values, default=0):
+        """Facet markers carried to the fine mesh: `coarse_values` per local facet of the
+        coarse mesh (owned and ghost, its local numbering) -> the same per local facet of
+        the fine mesh: a fine facet of an owned fine cell that lies in a facet of the
+        ancestor cell takes that facet's value, the others `default`. Exact: a fine
+        facet's vertices have barycentric coordinate 0 for the ancestor's vertex opposite
+        the facet it lies in."""
+        from femtools.tables import facet_tables
+        c, f = facet_tables(self.coarse), facet_tables(self.fine)
+        coarse_values = np.asarray(coarse_values)
+        d = c.x.shape[1]
+        anc = self.ancestors
+        K = c.x[c.cell_vertices[anc]]                          # (nf, d+1, d)
+        # the coarse facet opposite each vertex of each coarse cell
+        opposite = np.empty(c.cell_facets.shape, dtype=np.int64)
+        for j in range(d + 1):
+            for k in range(d + 1):
+                facet = c.cell_facets[:, k]
+                holds = (c.facet_vertices[facet] == c.cell_vertices[:, j][:, None]).any(axis=1)
+                opposite[~holds, j] = facet[~holds]
+        values = np.full(len(f.facet_vertices), default, dtype=coarse_values.dtype)
+        for k in range(d + 1):
+            facet = f.cell_facets[:, k]                         # (nf,) fine facets
+            lam = np.stack([barycentric_simplex(K, f.x[f.facet_vertices[facet][:, i]])
+                            for i in range(d)], axis=1)         # (nf, d, d+1)
+            on = np.abs(lam).max(axis=1) < 1e-8                 # (nf, d+1): in facet j
+            cell, j = np.nonzero(on)
+            values[facet[cell]] = coarse_values[opposite[anc[cell], j]]
+        return values
 
 
 def lattice_points(d, N):

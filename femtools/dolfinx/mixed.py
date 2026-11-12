@@ -49,6 +49,11 @@ def subspace(W, i):
     return _component(W, i).space
 
 
+def component_map(W, i):
+    """The local dofs of W of component i, in the order of subspace(W, i)'s."""
+    return _component(W, i).map
+
+
 def subfunction(q, i, out=None):
     """Component i of the mixed Function q, copied into a Function on its collapsed
     space: `out` if given, else the component's shared Function -- the same one, with

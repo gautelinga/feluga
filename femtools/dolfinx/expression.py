@@ -71,35 +71,43 @@ def _source(codes, names):
 
 
 def _compile(source, comm):
-    """The loaded library of `source`, compiled once (by rank 0 of comm) and cached."""
+    """The loaded library of `source`, compiled once (by rank 0 of comm) and cached. A
+    failure on rank 0 -- code that does not compile, no compiler, a cache folder it may
+    not write -- raises on every rank (femtools.jit)."""
+    from femtools.jit import on_every_rank, on_rank0
     cxx = os.environ.get("CXX", "c++")
     key = hashlib.sha1((source + "\0" + cxx + " " + " ".join(FLAGS)).encode()).hexdigest()
     if key in _LIBRARIES:
         return _LIBRARIES[key]
-    path = os.path.join(_cache_dir(), "expr_" + key + ".so")
-    error = None
-    if comm is None or comm.rank == 0:
-        if not os.path.exists(path):
-            d = _cache_dir()
-            with tempfile.TemporaryDirectory(dir=d) as tmp:
-                src = os.path.join(tmp, "expr.cpp")
-                lib = os.path.join(tmp, "expr.so")
-                with open(src, "w") as f:
-                    f.write(source)
-                proc = subprocess.run([cxx] + FLAGS + [src, "-o", lib],
-                                      capture_output=True, text=True)
-                if proc.returncode:
-                    error = proc.stderr.strip() or proc.stdout.strip()
-                else:
-                    os.replace(lib, path)       # atomic: no rank loads a partial file
-    if comm is not None:
-        error = comm.bcast(error, root=0)
-    if error is not None:
-        raise ValueError("CompiledExpression: the C++ code does not compile:\n" + error)
-    lib = ctypes.CDLL(path)
-    lib.eval.restype = None
-    lib.eval.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_long,
-                         ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)]
+
+    def build():
+        d = _cache_dir()
+        path = os.path.join(d, "expr_" + key + ".so")
+        if os.path.exists(path):
+            return path
+        with tempfile.TemporaryDirectory(dir=d) as tmp:
+            src = os.path.join(tmp, "expr.cpp")
+            lib = os.path.join(tmp, "expr.so")
+            with open(src, "w") as f:
+                f.write(source)
+            proc = subprocess.run([cxx] + FLAGS + [src, "-o", lib],
+                                  capture_output=True, text=True)
+            if proc.returncode:
+                raise ValueError("the C++ code does not compile:\n"
+                                 + (proc.stderr.strip() or proc.stdout.strip()))
+            os.replace(lib, path)       # atomic: no rank loads a partial file
+        return path
+
+    path = on_rank0(comm, build, "CompiledExpression")
+
+    def load():
+        lib = ctypes.CDLL(path)
+        lib.eval.restype = None
+        lib.eval.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_long,
+                             ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)]
+        return lib
+
+    lib = on_every_rank(comm, load, "CompiledExpression: loading " + path, wait_for=path)
     _LIBRARIES[key] = lib
     return lib
 

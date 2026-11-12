@@ -2,7 +2,9 @@
 backends and the numbers of ranks.
 
 dolfin writes on one rank, DOLFINx reads on three; DOLFINx writes on three, dolfin reads
-on one and DOLFINx on two. Scalar P1 and P2, mixed P2xP2 and P2xP1, a P2 vector, periodic in
+on one and DOLFINx on two. dolfin also reads through the reader DOLFINx uses
+(femtools.tables.read_values, femtools.dolfin_layout.read_function): both backends' files,
+on one rank and on two. Scalar P1 and P2, mixed P2xP2 and P2xP1, a P2 vector, periodic in
 x, and P2 without periodicity; every value read equals the field at the reader's own dof.
 
     python3 -m pytest tests/test_dolfinx_checkpoint.py -m "dolfinx and dolfin"
@@ -57,3 +59,17 @@ def test_dolfinx_written_on_three_ranks(tmp_path):
     _check(_run("read-dolfin", tmp_path, 1, tmp_path / "d1.json"))
     _check(_run("read-dolfinx", tmp_path, 2, tmp_path / "x2.json"))
     _check(_run("read-dolfinx", tmp_path, 1, tmp_path / "x1.json"))
+
+
+@pytest.mark.mpi
+def test_one_reader_on_dolfin(tmp_path):
+    """femtools.dolfin_layout.read_function (the reader DOLFINx uses) on dolfin: a file
+    dolfin wrote, read on two ranks, and one DOLFINx wrote on three, on one and two."""
+    pytest.importorskip("dolfin")
+    (tmp_path / "d").mkdir()
+    (tmp_path / "x").mkdir()
+    _run("write-dolfin", tmp_path / "d", 1)
+    _check(_run("read-dolfin-tables", tmp_path / "d", 2, tmp_path / "dt2.json"))
+    _run("write-dolfinx", tmp_path / "x", 3)
+    _check(_run("read-dolfin-tables", tmp_path / "x", 1, tmp_path / "xt1.json"))
+    _check(_run("read-dolfin-tables", tmp_path / "x", 2, tmp_path / "xt2.json"))

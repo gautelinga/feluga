@@ -5,6 +5,7 @@ compressed (`compress`; dolfin's own writer has no compression).
     write_function(path, u, "u")           # <name>/vector_0, cell_dofs, x_cell_dofs, cells
     write_dofs(path, V, "V")               # <name>/cell_dofs, x_cell_dofs, cells, once
     write_function(path, u, "u", dofs=("tables.h5", "V"))   # vector_0, the tables linked
+    read_function(path, u, "u")            # any number of ranks, either backend's file
     write_mesh_arrays(path, x, cells)      # the mesh from arrays, serially, without dolfin
 
 The same datasets, dtypes, values and attributes as dolfin writes on the same partition
@@ -62,22 +63,21 @@ def write_mesh(path, mesh, name="mesh", mode="w"):
 
 def _dof_tables(V):
     """`(gc, dofs)`: this rank's own cells' global ids (uint64), and their global dofs, a
-    row a cell, in the dofmap's integer type."""
-    from femtools.periodic import cell_dofs
-    mesh = V.mesh()
-    comm = mesh.mpi_comm()
-    tdim = mesh.topology().dim()
-    own = mesh.topology().ghost_offset(tdim)
-    dm = V.dofmap()
-    to_global = np.asarray(dm.tabulate_local_to_global_dofs(), dtype=np.int64)
-    # every cell has the element's dofs (Lagrange and mixed spaces of them): one compiled
-    # call for all, not a pybind call a cell
-    n = V.element().space_dimension()
-    per_cell = cell_dofs(dm, np.arange(own), n) if own else np.zeros((0, n), np.int64)
-    # the dofmap's integer type, from a rank that has a cell
-    dtype = next(t for t in comm.allgather(dm.cell_dofs(0).dtype.str if own else None) if t)
-    gc = np.asarray(mesh.topology().global_indices(tdim), dtype=np.uint64)[:own]
-    return gc, to_global[per_cell].astype(dtype)
+    row a cell, in the dofmap's integer type (femtools.tables)."""
+    from femtools.tables import space_tables
+    t = space_tables(V)
+    return t.gc, t.dofs
+
+
+def read_function(path, u, name):
+    """u from the Function `name` in path (dolfin's layout, by either backend, on any
+    number of ranks): femtools.tables.read_values, the reader DOLFINx's checkpoints use
+    too. Collective."""
+    from femtools.tables import read_values, space_tables
+    x = u.vector()
+    x.set_local(read_values(path, name, space_tables(u.function_space())))
+    x.apply("insert")
+    return u
 
 
 def _mix(x):

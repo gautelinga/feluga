@@ -4,6 +4,7 @@ by one backend and read by the other (or the same), each run on its own number o
     [mpirun -n k] python3 tests/dolfinx_checkpoint_worker.py write-dolfin  DIR
     [mpirun -n k] python3 tests/dolfinx_checkpoint_worker.py write-dolfinx DIR
     [mpirun -n k] python3 tests/dolfinx_checkpoint_worker.py read-dolfin   DIR out.json
+    [mpirun -n k] python3 tests/dolfinx_checkpoint_worker.py read-dolfin-tables DIR out.json
     [mpirun -n k] python3 tests/dolfinx_checkpoint_worker.py read-dolfinx  DIR out.json
 
 The fields are analytic and periodic in x; a reader compares what it read with them at
@@ -95,12 +96,17 @@ def main(mode, folder, out=None):
         from femtools.dolfin_layout import write_function
         for name, (V, u) in dolfin_spaces().items():
             write_function(os.path.join(folder, name + ".h5"), u, "u", mode="w")
-    elif mode == "read-dolfin":
+    elif mode in ("read-dolfin", "read-dolfin-tables"):
         import dolfin as df
+        from femtools.dolfin_layout import read_function
         for name, (V, exact) in dolfin_spaces().items():
             u = df.Function(V)
-            with df.HDF5File(V.mesh().mpi_comm(), os.path.join(folder, name + ".h5"), "r") as h:
-                h.read(u, "u")
+            path = os.path.join(folder, name + ".h5")
+            if mode == "read-dolfin-tables":      # femtools.tables.read_values
+                read_function(path, u, "u")
+            else:                                 # dolfin's own reader
+                with df.HDF5File(V.mesh().mpi_comm(), path, "r") as h:
+                    h.read(u, "u")
             d = np.abs(u.vector().get_local() - exact.vector().get_local())
             res[name] = float(V.mesh().mpi_comm().allreduce(d.max() if d.size else 0.0,
                                                            op=__import__("mpi4py").MPI.MAX))

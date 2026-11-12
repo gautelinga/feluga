@@ -85,6 +85,18 @@ def _dof_coordinates(V):
 _TABLES = {}
 
 
+def ufc_vertices(mesh):
+    """This rank's own cells' geometry nodes (their vertices, the mesh being affine) in
+    dolfin's (UFC's) order: by increasing input global index. (n, tdim+1)."""
+    tdim = mesh.topology.dim
+    if tdim not in EDGES or mesh.geometry.cmap.degree != 1:
+        raise NotImplementedError("dolfin layout: affine triangles and tetrahedra only")
+    n = mesh.topology.index_map(tdim).size_local
+    G = mesh.geometry.dofmaps[0][:n]
+    gv = np.asarray(mesh.geometry.input_global_indices, dtype=np.int64)
+    return np.take_along_axis(G, np.argsort(gv[G], axis=1, kind="stable"), axis=1)
+
+
 def dolfin_cell_dofs(V):
     """`(gc, D)`: this rank's own cells' global ids (uint64), and for each cell V's local
     dofs in dolfin's order (unrolled for a vector space), a row a cell. Built once per
@@ -94,13 +106,8 @@ def dolfin_cell_dofs(V):
         return _TABLES[key][1]
     mesh = V.mesh
     tdim = mesh.topology.dim
-    if tdim not in EDGES or mesh.geometry.cmap.degree != 1:
-        raise NotImplementedError("dolfin layout: affine triangles and tetrahedra only")
     n = mesh.topology.index_map(tdim).size_local
-    G = mesh.geometry.dofmaps[0][:n]
-    gv = np.asarray(mesh.geometry.input_global_indices, dtype=np.int64)
-    G = np.take_along_axis(G, np.argsort(gv[G], axis=1, kind="stable"), axis=1)
-    vertices = mesh.geometry.x[G]                            # (n, tdim+1, 3), dolfin's order
+    vertices = mesh.geometry.x[ufc_vertices(mesh)]           # (n, tdim+1, 3), dolfin's order
     edges = np.stack([0.5 * (vertices[:, a] + vertices[:, b]) for a, b in EDGES[tdim]], axis=1)
     X = _dof_coordinates(V)
     lo, hi = mesh.geometry.x.min(axis=0), mesh.geometry.x.max(axis=0)
@@ -125,10 +132,9 @@ def dolfin_cell_dofs(V):
 
 
 def _global_tables(V, U):
-    gc, D = dolfin_cell_dofs(V)
-    dofs = U.compact[D]
-    dtype = np.int32 if U.n_global < 2**31 else np.int64   # dolfin's int32 when it fits
-    return gc, dofs.astype(dtype)
+    from femtools.tables import space_tables
+    t = space_tables((V, U))
+    return t.gc, t.dofs
 
 
 def _n_cells(V):
@@ -211,34 +217,7 @@ def _check_linked(path, dofs, V, U, comm):
 def read_function(path, name, V, U):
     """The Function `name` in path (dolfin's layout, written by dolfin or by
     write_function, on any number of processes) on V: this rank's unique values,
-    numbered by U. Collective."""
-    import h5py
-    from femtools.hdf5_rows import agreed, fetch_rows, rows_of_labels
-    comm = V.mesh.comm
-    found = None
-    if comm.rank == 0:
-        with h5py.File(path, "r") as h5:
-            a = h5[name].attrs
-            found = bytes(a["signature"]).decode() if "signature" in a else None
-    found = comm.bcast(found, root=0)
-    if found is not None and found != signature(V):
-        raise ValueError("{}:{} holds {}, not {}".format(path, name, found, signature(V)))
-    gc, D = dolfin_cell_dofs(V)
-    n, k = D.shape
-    rows = rows_of_labels(path, name + "/cells", gc.astype(np.int64), comm)
-    starts = fetch_rows(path, name + "/x_cell_dofs", rows, comm).astype(np.int64)
-    ends = fetch_rows(path, name + "/x_cell_dofs", rows + 1, comm).astype(np.int64)
-    if agreed(comm, bool(np.any(ends - starts != k))):
-        raise ValueError("{}:{} has another number of dofs a cell than {}".format(
-            path, name, signature(V)))
-    flat = (starts[:, None] + np.arange(k)).reshape(-1)
-    file_dofs = fetch_rows(path, name + "/cell_dofs", flat, comm).astype(np.int64)
-    vals = fetch_rows(path, name + "/vector_0", file_dofs, comm)
-    imap = V.dofmap.index_map
-    full = np.full((imap.size_local + imap.num_ghosts) * V.dofmap.index_map_bs, np.nan)
-    full[D.reshape(-1)] = vals
-    out = full[U.owned_unique]
-    if agreed(comm, bool(np.any(np.isnan(out)))):
-        raise RuntimeError("{}:{}: some unique dofs are in none of this rank's cells".format(
-            path, name))
-    return out
+    numbered by U (femtools.tables.read_values, which dolfin's reader is too).
+    Collective."""
+    from femtools.tables import read_values, space_tables
+    return read_values(path, name, space_tables((V, U)))

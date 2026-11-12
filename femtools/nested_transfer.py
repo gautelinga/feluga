@@ -26,8 +26,8 @@ back on any number of ranks and on either backend, the fine mesh being made anew
 the coarse one.
 
 Built on `femtools.hierarchical_transfer` (ancestors composed over passes, barycentric
-coordinates, the Lagrange basis) and on the dof tables both backends' checkpoints write
-(`femtools.dolfin_layout`, `femtools.dolfinx.checkpoint`): a cell's dofs in UFC's order.
+coordinates, the Lagrange basis) and on `femtools.tables` (a cell's vertices and dofs in
+UFC's order, as both backends' checkpoints write them).
 The children must stay on their parent's rank (`redistribute=False`, as
 `refine_uniformly` refines), so every matrix is built from local cells alone.
 """
@@ -35,104 +35,19 @@ import numpy as np
 
 from femtools.hierarchical_transfer import (
     barycentric_simplex, compose, ufc_basis, ufc_nodes)
-
-
-def _is_dolfinx(obj):
-    try:
-        import dolfinx
-    except ImportError:
-        return False
-    return isinstance(obj, (dolfinx.mesh.Mesh, dolfinx.fem.FunctionSpace))
+from femtools.tables import _is_dolfinx
 
 
 def _split(space):
     return space if isinstance(space, tuple) else (space, None)
 
 
-def _n_nodes(d, degree):
-    return d + 1 if degree == 1 else (d + 1) * (d + 2) // 2
-
-
-class _Tables:
-    """A space's cells as both backends' checkpoints see them: this rank's own cells,
-    each with its global id (`gc`), its vertices (`x`, UFC's order) and their global ids
-    (`vgid`), its dofs in UFC's order as global vector indices (`dofs`), a block of
-    columns a component (`components`: (first column, count, degree)); the vector's
-    owned range and size; the communicator (mpi4py)."""
-
-    def __init__(self, space):
-        V, U = _split(space)
-        if _is_dolfinx(V):
-            self._dolfinx(V, U)
-        else:
-            self._dolfin(V)
-        d = self.x.shape[2]
-        if self.x.shape[1] != d + 1:
-            raise NotImplementedError("nested_transfer: triangles and tetrahedra only")
-
-    def _dolfin(self, V):
-        from femtools.dolfin_layout import _dof_tables
-        mesh = V.mesh()
-        d = mesh.topology().dim()
-        if mesh.geometry().dim() != d:
-            raise NotImplementedError("nested_transfer: a mesh of its own dimension")
-        self.gc, dofs = _dof_tables(V)
-        own = len(self.gc)
-        cells = mesh.cells()[:own]
-        self.x = mesh.coordinates()[cells]
-        self.vgid = np.asarray(mesh.topology().global_indices(0), dtype=np.int64)[cells]
-        self.dofs = np.asarray(dofs, dtype=np.int64)
-        self.owned = tuple(int(v) for v in V.dofmap().ownership_range())
-        self.n_global = int(V.dim())
-        subs = [V.sub(i) for i in range(V.num_sub_spaces())] or [V]
-        self.components, first = [], 0
-        for S in subs:
-            degree = int(S.ufl_element().degree())
-            n = _n_nodes(d, degree)
-            self.components.append((first, n, degree))
-            first += n
-        self.comm = mesh.mpi_comm()
-
-    def _dolfinx(self, V, U):
-        from femtools.dolfinx.checkpoint import (
-            _blocked, _components, _global_tables, _lagrange_degree)
-        if U is None:
-            raise ValueError("nested_transfer: a DOLFINx space comes with its UniqueDofs, "
-                             "as (V, U)")
-        if _blocked(V):
-            raise NotImplementedError("nested_transfer: scalar or mixed spaces, not blocked")
-        mesh = V.mesh
-        d = mesh.topology.dim
-        if mesh.geometry.dim != d:
-            raise NotImplementedError("nested_transfer: a mesh of its own dimension")
-        self.gc, dofs = _global_tables(V, U)
-        n = len(self.gc)
-        # the vertices in the order the tables put the dofs in (dolfin_cell_dofs): by
-        # their input global index
-        G = mesh.geometry.dofmaps[0][:n]
-        gv = np.asarray(mesh.geometry.input_global_indices, dtype=np.int64)
-        G = np.take_along_axis(G, np.argsort(gv[G], axis=1, kind="stable"), axis=1)
-        self.x = mesh.geometry.x[G][:, :, :d]
-        self.vgid = gv[G]
-        self.dofs = np.asarray(dofs, dtype=np.int64)
-        self.owned = tuple(int(v) for v in U.owned_range)
-        self.n_global = int(U.n_global)
-        self.components, first = [], 0
-        for S in _components(V):
-            degree = _lagrange_degree(S)
-            k = _n_nodes(d, degree)
-            self.components.append((first, k, degree))
-            first += k
-        self.comm = mesh.comm
-
-    def component(self, i):
-        """(dofs of component i, its degree); i None for a space of one component."""
-        if i is None:
-            if len(self.components) != 1:
-                raise ValueError("nested_transfer: a mixed space needs its component")
-            i = 0
-        first, n, degree = self.components[i]
-        return self.dofs[:, first:first + n], degree
+def _Tables(space):
+    """A space's tables (femtools.tables.space_tables), its dofs as int64."""
+    from femtools.tables import space_tables
+    t = space_tables(space)
+    t.dofs = np.asarray(t.dofs, dtype=np.int64)
+    return t
 
 
 def _owned_rows(rows, cols, vals, owned):

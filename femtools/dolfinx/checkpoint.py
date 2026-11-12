@@ -29,7 +29,7 @@ and `vector_0`.
 import numpy as np
 
 from femtools.dolfin_layout import SpaceLayout, write_dofs_of, write_values_of
-from femtools.dolfinx.cells import dolfin_cell_dofs, signature, ufc_vertices  # noqa: F401
+from femtools.dolfinx.cells import signature
 from femtools.lru import WeakCache
 
 _FINGERPRINTS = WeakCache()

@@ -85,9 +85,8 @@ def faces_congruent_arrays(comm, x, e, L, axes, tol=1e-9, exempt=None, lower=Non
     x = xyz(x) - lower
     # only the nodes on an identified plane are compared, or looked up among the exempt
     # positions: those are taken first, the vertices then the edges in their own order,
-    # each midpoint's coordinate along an axis computed as the whole midpoint would be,
-    # so every comparison below sees the rows it saw when every node was built and
-    # matched
+    # each midpoint computed whole, so the comparisons see the same rows as they would
+    # with every node built
     on_v = on_planes(x, np.zeros(3), L, axes, tol)
     pts, keep = x[on_v], [np.nonzero(on_v)[0]]
     n_nodes = len(x)

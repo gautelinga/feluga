@@ -30,8 +30,7 @@ import dolfin as df
 import numpy as np
 
 # the backend-free half, re-exported
-from femtools.periodic_core import (  # noqa: F401
-    _at_positions, _compare_sides, _faces_congruent_exempt, on_planes, xyz)
+from femtools.periodic_core import on_planes, xyz  # noqa: F401
 
 PERIODIC_BOX_SOURCE = r"""
 class CppPeriodicBox : public SubDomain

@@ -14,7 +14,8 @@
 //    periodic pair and on every rank, which DOLFINx's tie-break on global vertex
 //    indices is not.
 //  - the propagation: DOLFINx's enforce_rules alternated with an exchange over
-//    periodic partner edges (one axis at a time, as plaza_periodic pairs them) to a
+//    periodic partner edges (every axis paired in one round, as plaza_periodic pairs
+//    them) to a
 //    joint fixed point, so a face is bisected exactly when its partner is.
 //  - frozen edges (never bisected, closed under the longest-edge rule, shared edges
 //    and partners) and a count of the children before refining, both from
@@ -60,7 +61,21 @@
 #include <dolfinx/refinement/refine.h>
 #include <dolfinx/refinement/utils.h>
 
+#include <dolfinx/common/version.h>
+
 #include "plaza_periodic_rules.h"
+
+// Upgrading DOLFINx: this calls internals with no stability promise --
+// refinement::plaza::impl::{enforce_rules, compute_refinement, get_simplices} and
+// refinement::update_logical_edgefunction -- and its child count copies
+// compute_refinement's loop over cells. On a new version, compare their signatures and
+// that loop (dolfinx/refinement/plaza.h) with the calls here, run
+// tests/test_dolfinx_refine.py and tests/test_plaza_periodic.py on 1 and 3 ranks, and
+// only then admit the version below. femtools/dolfinx/refine.py names the installed
+// version when the build fails.
+#if !(DOLFINX_VERSION_MAJOR == 0 && DOLFINX_VERSION_MINOR == 11)
+#error "femtools plaza_periodic.cpp is checked against DOLFINx 0.11 only: it calls refinement::plaza::impl internals (see the comment above this line)"
+#endif
 
 namespace nb = nanobind;
 using namespace dolfinx;

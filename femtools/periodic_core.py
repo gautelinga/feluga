@@ -3,6 +3,7 @@ dolfin modules (`femtools.periodic`, `femtools.plaza_periodic`) and the DOLFINx 
 (`femtools.dolfinx.refine`).
 
     faces_congruent_arrays(comm, x, e, L, axes, tol, exempt, lower)
+    box_scale(lower, upper)                the length the tolerances are relative to
     lower_corner(extent, axes, lower)      the box's lower corner (`periodic.box_lower`)
     on_planes(x, lower, upper, axes, tol)  which points lie on an identified plane
     xyz(a)                                 padded to three components
@@ -10,8 +11,31 @@ dolfin modules (`femtools.periodic`, `femtools.plaza_periodic`) and the DOLFINx 
 
 Every face node goes by its rounded position to the rank its key hashes to, where the two
 sides are deduplicated and compared; only counts are reduced, so no rank holds a face.
+
+Tolerances. Every tolerance a periodic box is judged with is relative: a number times
+`box_scale(lower, upper)`, the box's largest extent or its corners' largest coordinate,
+whichever is larger -- so a unit box at the origin takes the number as it is, and a box
+far from the origin, whose coordinates carry their own rounding (one ulp at 1e6 is
+1.2e-10), keeps its pairs. The numbers, by what they judge:
+
+    1e-10  the refinement's pairing of face edges and its ties (`refine_periodic`'s tol)
+    1e-9   the congruence check (`faces_congruent`, `congruent`; TOL)
+    1e-8   DOLFINx's dof pairing (`femtools.dolfinx.periodic.periodic_box`)
+
+dolfin's own SubDomains (`femtools.periodic.PeriodicBox`, `periodic_box`) keep dolfin's
+absolute convention, which dolfin's `constrained_domain` applies.
 """
 import numpy as np
+
+
+def box_scale(lower, upper):
+    """The length a periodic box's tolerances are relative to (see the module's
+    docstring): the largest of its extents and of its corners' coordinates' magnitudes;
+    1 for a degenerate box."""
+    lower, upper = xyz(lower), xyz(upper)
+    scale = float(max(np.max(np.abs(upper - lower)), np.max(np.abs(lower)),
+                      np.max(np.abs(upper))))
+    return scale if scale > 0 else 1.0
 
 
 def xyz(a):
@@ -42,10 +66,12 @@ def faces_congruent_arrays(comm, x, e, L, axes, tol=1e-9, exempt=None, lower=Non
     """`femtools.periodic.faces_congruent` on arrays: `x` the local vertices'
     positions (ghosts included), `e` the local edges as vertex pairs (None: vertices
     only), `L` and `lower` the box's corners, `exempt` a bool per vertex then per
-    edge or an (m, 3) array of positions. Returns `(ok, axis, n_lo, n_hi)`. Collective."""
+    edge or an (m, 3) array of positions, `tol` relative to the box (`box_scale`).
+    Returns `(ok, axis, n_lo, n_hi)`. Collective."""
     edges = e is not None
     # the box moved to the origin, in three components
     lower = xyz(lower)
+    tol = tol * box_scale(lower, L)
     L = xyz(L) - lower
     x = xyz(x) - lower
     # only the nodes on an identified plane are compared, or looked up among the exempt
@@ -92,35 +118,74 @@ def on_planes(x, lower, upper, axes, tol):
     return on
 
 
+# how far (in units of tol) a node's position may lie from its partner's for the two
+# to be found by the keys they share: a node also goes under every rounding of its
+# position moved by up to this, so two nodes closer than this never miss each other on
+# a rounding boundary (refined partners differ by ~1e-16 of the box)
+NEAR = 0.01
+
+
+def near_keys(y, delta=NEAR):
+    """`(keys, index)`: every integer rounding of the rows of `y` (positions over tol)
+    moved by up to `delta` in each coordinate -- one row a point, more where a
+    coordinate lies within `delta` of a rounding boundary -- and the point each is of.
+    Two points within `2 delta` of each other share a key, and one of them's
+    `np.round` is among the other's keys."""
+    y = np.asarray(y, float).reshape(-1, 3)
+    lo, hi = np.round(y - delta).astype(np.int64), np.round(y + delta).astype(np.int64)
+    keys, index = lo, np.arange(len(y))
+    for d in range(3):
+        m = lo[index, d] != hi[index, d]
+        extra = keys[m].copy()
+        extra[:, d] = hi[index[m], d]
+        keys, index = np.vstack([keys, extra]), np.r_[index, index[m]]
+    return keys, index
+
+
 def _compare_sides(comm, lo, hi, a, L, tol, ex_lo=None, ex_hi=None):
     """`(n_lo, n_hi, bad_lo, bad_hi)` over every rank: the distinct nodes on each side of
     axis `a` (`hi` taken back by L[a]), and those of each with no partner on the other
-    side and not exempt. Each node goes by its rounded position to the rank its key
-    hashes to, which deduplicates and compares; the counts are summed. Collective."""
+    side and not exempt. A node is its rounded position (ghosted copies agree); it goes
+    under each of its `near_keys` to the rank the key hashes to, where the sides meet,
+    then with what it met to the rank of its rounded position, which deduplicates and
+    counts. Only counts are reduced. Collective."""
     from mpi4py import MPI
-    from femtools.hdf5_rows import find_rows, rank_of, route
+    from femtools.hdf5_rows import rank_of, reply, route
     hi = np.array(hi, float).reshape(-1, 3)
     hi[:, a] -= L[a]
-    keys = np.round(np.vstack([np.reshape(lo, (-1, 3)), hi]) / tol).astype(np.int64)
+    y = np.vstack([np.reshape(lo, (-1, 3)), hi]) / tol
+    node = np.round(y).astype(np.int64)
     side = np.r_[np.zeros(len(lo), np.int64), np.ones(len(hi), np.int64)]
-    ex = np.zeros(len(keys), np.int64) if ex_lo is None else \
+    ex = np.zeros(len(node), np.int64) if ex_lo is None else \
         np.r_[np.asarray(ex_lo, np.int64), np.asarray(ex_hi, np.int64)]
-    keys, side, ex = route(comm, rank_of(keys, comm.Get_size()), keys, side, ex).received
+    # 1. the sides meet under each near key: a key met by both matches its nodes
+    keys, of = near_keys(y)
+    routed = route(comm, rank_of(keys, comm.Get_size()), keys, side[of])
+    k, s = routed.received
+    met = np.zeros(len(k), np.int64)
+    if len(k):
+        _, inv = np.unique(k, axis=0, return_inverse=True)
+        inv = inv.reshape(-1)
+        both = np.zeros((inv.max() + 1, 2), bool)
+        both[inv, s] = True
+        met = both[inv, 1 - s].astype(np.int64)
+    (met,) = reply(comm, routed, met)
+    matched = np.zeros(len(node), np.int64)
+    np.maximum.at(matched, of, met)
+    # 2. each node, with whether it matched, to the rank of its rounded position
+    node, side, ex, matched = route(comm, rank_of(node, comm.Get_size()), node, side, ex,
+                                    matched).received
     out = np.zeros(4, np.int64)
-    sides = []
     for j in (0, 1):
         m = side == j
-        if m.any():
-            u, inv = np.unique(keys[m], axis=0, return_inverse=True)
-            ex_u = np.zeros(len(u), bool)
-            ex_u[inv.reshape(-1)[ex[m] > 0]] = True     # a ghosted copy carries the flag
-        else:
-            u, ex_u = np.zeros((0, 3), np.int64), np.zeros(0, bool)
-        sides.append((u, ex_u))
+        if not m.any():
+            continue
+        u, inv = np.unique(node[m], axis=0, return_inverse=True)
+        inv = inv.reshape(-1)
+        ok = np.zeros(len(u), bool)        # a copy that matched, or that is exempt
+        ok[inv[(matched[m] > 0) | (ex[m] > 0)]] = True
         out[j] = len(u)
-    for j in (0, 1):
-        (u, ex_u), (other, _) = sides[j], sides[1 - j]
-        out[2 + j] = np.count_nonzero((find_rows(u, other) < 0) & ~ex_u)
+        out[2 + j] = np.count_nonzero(~ok)
     out = comm.allreduce(out, op=MPI.SUM)
     return tuple(int(v) for v in out)
 
@@ -141,12 +206,16 @@ def _faces_congruent_exempt(comm, x, exempt, L, axes, tol):
 
 
 def _at_positions(pts, where, tol):
-    """Which of `pts` lie at one of the positions `where`, to `tol`."""
+    """Which of `pts` lie at one of the positions `where`, to `tol` (and never miss one
+    on a rounding boundary: `near_keys`)."""
     if not len(pts) or not len(where):
         return np.zeros(len(pts), bool)
     from femtools.hdf5_rows import find_rows, unique_rows
-    return find_rows(np.round(pts / tol).astype(np.int64),
-                     unique_rows(np.round(where / tol).astype(np.int64))) >= 0
+    keys, of = near_keys(np.asarray(pts) / tol, 2 * NEAR)
+    hit = find_rows(keys, unique_rows(np.round(np.asarray(where) / tol).astype(np.int64))) >= 0
+    out = np.zeros(len(pts), bool)
+    out[of[hit]] = True
+    return out
 
 
 class TooManyCells(Exception):

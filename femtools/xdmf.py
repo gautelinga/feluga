@@ -10,6 +10,9 @@ which ParaView renders once "Nonlinear Subdivision Level" is turned up; this wri
 those. Their nodes are the mesh's vertices, then one per edge at its midpoint -- the
 nodes of the unconstrained P2 space, so a periodic field is written on the whole
 mesh, both sides of the period included, each node with the field's value there.
+That value is read off the field's own dofmap, the dof its space gives the vertex or
+edge (a slave's is its master's): writing builds no other space and interpolates
+nothing.
 
 A grid's coordinates are the mesh's: `GeometryType="XY"`, two columns, for a 2D mesh and
 `XYZ` for a 3D one, as dolfin writes them, so a 2D mesh reads back 2D. A 2D vector is
@@ -747,8 +750,8 @@ class XDMFFile2(object):
     # -- functions -------------------------------------------------------------
 
     def _write_functions(self, functions, time, encoding, tags=()):
-        """The functions onto one node set, every rank writing the nodes its dofmap owns
-        and its own cells (`XdmfDocument.rows`): nothing is gathered.
+        """The functions onto one node set, every rank writing the nodes whose vertices
+        and edges it owns and its own cells (`XdmfDocument.rows`): nothing is gathered.
 
         Every rank runs every line: the XML is built on all of them and thrown away on
         all but rank zero, which costs nothing and keeps the dataset counters --
@@ -1348,12 +1351,18 @@ def _plain_space(mesh, degree, width, cache):
     """An unconstrained Lagrange space, built once per mesh, degree and width and kept in
     `cache`, which is a file's (`XDMFFile2._nodes`) and goes when the file closes.
 
-    Building one is not cheap -- 48 ms for a P2 space on 48k cells, which was more
-    than half the cost of writing a field -- and a time series would otherwise build
-    an identical one for every step. Kept in a module-wide cache instead, the space
-    and its transfer from a periodic one (`fast_interpolation`) outlived every file:
-    at 224 M dofs on 128 ranks they sat beside the next Stokes solves and took the
-    job past its node's memory (stokes-beadpack, 2026-11-12).
+    Only reading needs one now (`_read_nodal`): the file's nodes are matched to its
+    distinct dof coordinates and the field interpolated from it onto the caller's
+    space. Writing reads a field's own dofs (`_node_dofs`) and builds none -- it used
+    to interpolate every field not already of this kind onto one, and the transfer's
+    point-search trees took a 611 M-dof periodic Stokes write past its nodes' memory
+    (`_function_nodes_distributed`).
+
+    Building one is not cheap -- 48 ms for a P2 space on 48k cells -- and a series read
+    step by step would otherwise build an identical one for every step. Kept in a
+    module-wide cache instead, the space and its transfers (`fast_interpolation`)
+    outlived every file: at 224 M dofs on 128 ranks they sat beside the next Stokes
+    solves and took the job past its node's memory (stokes-beadpack, 2026-11-12).
     """
     import dolfin as df
     key = ('plain', mesh.id(), degree, width)
@@ -1369,14 +1378,20 @@ def _plain_space(mesh, degree, width, cache):
 
 def _release_plain(cache):
     """Let go of what `cache` holds -- its unconstrained spaces, the transfers onto and
-    from them, the node layouts -- and hand the heap back."""
+    from them, the node layouts and node dofs -- and hand the heap back.
+
+    The heap goes back whenever the file held anything, not only spaces: a write's
+    own transients (the dofmap's entity lists, the compressed chunks) otherwise stay
+    resident once dolfin is imported (`femtools.memory`) -- 153 MiB of the 618 a
+    serial write of the 1.36 M-dof bead pack field left behind."""
     from femtools import fast_interpolation
     from femtools.memory import drop
     held = [v for k, v in cache.items() if isinstance(k, tuple) and k[:1] == ('plain',)]
     for space in held:
         fast_interpolation.forget(space)
+    anything = bool(cache)
     cache.clear()
-    if held:
+    if anything:
         drop()
 
 
@@ -1385,8 +1400,9 @@ def _is_plain(V, mesh, degree, width):
 
     A periodic space identifies its slave dofs with masters, so it is strictly
     smaller than the unconstrained one; comparing the dimensions is therefore an
-    exact test and not a heuristic. When it holds, the field can be read straight out
-    of its own dofs and neither a new space nor an interpolation is needed.
+    exact test and not a heuristic. When it holds, a file's nodes can be read straight
+    into the field's own dofs (`_read_nodal`) and neither a new space nor an
+    interpolation is needed.
     """
     element = V.ufl_element()
     if element.family() not in ('Lagrange', 'P', 'CG') or element.degree() != degree:
@@ -1524,9 +1540,11 @@ def _entity_dofs(dofmap, mesh, dim):
 def owned_entities(mesh, dim):
     """Which of this rank's entities of `dim` it is the one responsible for writing.
 
-    Where there is a dofmap to ask, ownership comes from that (see
-    `_function_nodes_distributed`). A Mesh or a MeshFunction has no dofs, so the rule
-    is the lowest rank among those sharing the entity, read off
+    It decides a Function's nodes as well as a Mesh's or a MeshFunction's entities
+    (`_node_layout`): a periodic space gives a slave entity its master's dof, so dof
+    ownership cannot say who writes the nodes on both sides of the period, and the
+    value is read from the vector's ghosts where the dof is another rank's
+    (`_node_dofs`). The rule is the lowest rank among those sharing the entity, read off
     `mesh.topology().shared_entities(dim)`. It needs no communication -- each rank
     already knows who else holds the entity -- and it partitions exactly: measured on
     a 6x6x6 cube over three ranks, 143 + 120 + 80 = 343 vertices and
@@ -1593,9 +1611,11 @@ def _owned_cells(mesh):
 def _node_layout(mesh, degree, cache):
     """What a write of a degree-`degree` field on `mesh` needs of its topology, the
     same every step: the owned cells' global node numbers in XDMF's order, the
-    vertices' and edges' global ids and the edges' ends, the counts, and the cells'
-    offset in the rank-major topology. Kept in `cache` by (mesh id, degree); the
-    coordinates are not, a mesh may move between writes (`_node_positions`)."""
+    vertices' and edges' global ids and the edges' ends, the counts, the cells'
+    offset in the rank-major topology, and which vertices and edges this rank writes
+    (`owned`, a mask per dimension, `owned_entities`) under which node ids (`rows`).
+    Kept in `cache` by (mesh id, degree); the coordinates are not, a mesh may move
+    between writes (`_node_positions`). Collective (`owned_entities`)."""
     key = ('mesh', mesh.id(), degree)
     if key in cache:
         return cache[key]
@@ -1626,59 +1646,112 @@ def _node_layout(mesh, degree, cache):
                             np.hstack((cells, cell_edges + len(vertices)))[:, order],
                             cellname)
         conn = np.hstack((conn, gedge[cell_edges] + n_vert))[:, order]
+    owned = [owned_entities(mesh, 0)] + ([owned_entities(mesh, 1)] if degree == 2 else [])
+    rows = np.concatenate([gvert[owned[0]]] +
+                          ([gedge[owned[1]] + n_vert] if degree == 2 else []))
     layout = dict(gvert=gvert, gedge=gedge, ends=ends if degree == 2 else None, conn=conn,
                   n_vert=n_vert, n_nodes=n_nodes,
                   n_cells=mesh.num_entities_global(tdim),
-                  cell_offset=_exscan(mesh.mpi_comm(), len(conn)))
+                  cell_offset=_exscan(mesh.mpi_comm(), len(conn)),
+                  owned=owned, rows=rows)
     cache[key] = layout
     return layout
 
 
-def _owned_nodes(V, mesh, degree, width, layout, cache):
-    """For a plain space V: the global node ids of the nodes whose dofs this rank owns,
-    which vertices and edges they are (a mask each), and per component the local
-    indices of their values. Kept in `cache` by V's id: a time series writes the same
-    space every step."""
-    key = ('space', V.id())
+def _node_dofs(V, mesh, degree, width, layout, cache):
+    """Where each component's values at this rank's nodes (`layout['owned']`) sit in
+    the local form of a V Function's vector -- owned dofs, then ghosts -- as a pair per
+    component: the local dof of each node that has one of its own, and, for a linear
+    field on the quadratic node set, the dofs at the two ends of each edge (its midside
+    value is their mean, which is exact for a linear field), None otherwise.
+
+    The dof is the one V's dofmap gives the entity, so a periodic V needs nothing
+    else: a slave vertex or edge is mapped to its master's dof, whose value is the
+    field's on either side of the period. That dof is in this rank's dofmap because
+    the entity is in one of its cells (`owned_entities` picks among the ranks holding
+    it in their own cells), so its value is either owned or one of the vector's ghosts.
+
+    The components come from V's own dofmap, which lists an entity's dofs component by
+    component -- its `width` columns are what `V.sub(c).dofmap()` gives, checked on
+    vector, tensor and mixed-component spaces (tests/test_xdmf.py) -- rather than from
+    the sub-dofmaps: each `V.sub(c)` is a space V keeps for its own lifetime, with a
+    copy of the cell table, 12 MB a component on the 291k-cell bead pack. A component
+    of a mixed Function (`Function.split()`) is read the same way, its dofmap indexing
+    the mixed vector. Kept in `cache` by (V's id, degree): a time series writes the
+    same space every step."""
+    key = ('space', V.id(), degree)
     if key in cache:
         return cache[key]
-    to_global = np.asarray(V.dofmap().tabulate_local_to_global_dofs())
-    lo, hi = V.dofmap().ownership_range()
-    # a sub-dofmap's entity dofs are indices into the *parent* vector, which is what
-    # makes reading the components a slice rather than three deep copies
-    dofmaps = [V.sub(c).dofmap() for c in range(width)] if width > 1 else [V.dofmap()]
-    rows, takes, masks = [], [[] for _ in dofmaps], []
-    tdim = mesh.topology().dim()
-    n_own = len(_owned_cells(mesh))
-    for dim, ids in ((0, layout['gvert']), (1, layout['gedge'])):
-        if dim == 1 and degree != 2:
-            continue
-        per_entity = [to_global[_entity_dofs(d, mesh, dim)] for d in dofmaps]
-        # entity_dofs fills the entities of the owned cells alone, the rest reading as
-        # dof 0 (a real dof): with ghost cells, an entity of ghost cells only is left
-        # out, its dofs being another rank's anyway
-        of_owned = np.zeros(len(per_entity[0]), bool)
-        of_owned[_connectivity(mesh, tdim, dim)[:n_own].ravel()] = True
-        owned = (per_entity[0] >= lo) & (per_entity[0] < hi) & of_owned
-        # a blocked dofmap keeps a node's components together, so they share an
-        # owner; if that ever stopped holding, the components of a node would be
-        # written by different ranks and one of them would be missing its value
-        for other in per_entity[1:]:
-            if not np.array_equal((other >= lo) & (other < hi) & of_owned, owned):
-                raise ValueError('the components of a node are owned by '
-                                 'different ranks; this cannot write that')
-        rows.append(ids[owned] + (0 if dim == 0 else layout['n_vert']))
-        masks.append(owned)
-        for c, dofs in enumerate(per_entity):
-            takes[c].append(dofs[owned] - lo)
-    nodes = (np.concatenate(rows), masks, [np.concatenate(t) for t in takes])
-    cache[key] = nodes
-    return nodes
+    owned = layout['owned']
+    linear = degree == 2 and V.ufl_element().degree() == 1
+
+    def entity_dofs(dim):
+        dofs = _entity_dofs(V.dofmap(), mesh, dim)
+        if len(dofs) != width * mesh.num_entities(dim):
+            raise ValueError('{} dofs on {} entities of dimension {}; a Lagrange field of '
+                             '{} component(s) has one a component'.format(
+                                 len(dofs), mesh.num_entities(dim), dim, width))
+        return dofs.reshape(-1, width)
+
+    vertex = entity_dofs(0)
+    direct, ends = [vertex[owned[0]]], None
+    if degree == 2 and not linear:
+        direct.append(entity_dofs(1)[owned[1]])
+    elif linear:
+        pairs = layout['ends'][owned[1]]
+        ends = (vertex[pairs[:, 0]], vertex[pairs[:, 1]])
+    direct = np.concatenate(direct)
+    takes = [(np.ascontiguousarray(direct[:, c]),
+              None if ends is None else tuple(np.ascontiguousarray(e[:, c]) for e in ends))
+             for c in range(width)]
+    cache[key] = takes
+    return takes
+
+
+def _node_values(func, takes):
+    """`func`'s values at this rank's nodes, from the local form of its vector (owned
+    entries, then ghosts) at the dofs `_node_dofs` found: an array of one column per
+    component, or a flat one for a scalar. Collective (the ghost update).
+
+    The ghosts are brought up to date first -- a vector solved into by PETSc directly
+    need not have them -- which sets each to its owner's value and changes nothing
+    else. A vector with no ghosts at all (one assembled, then wrapped in a Function)
+    cannot answer for a dof another rank owns; its values are then copied into a
+    Function of the same space, which has them, rather than read wrong. Every rank
+    takes the same branch (`agreed`), the copy being collective."""
+    import dolfin as df
+    from femtools.hdf5_rows import agreed
+    vector = df.as_backend_type(func.vector())
+    vector.update_ghost_values()
+    reach = max([int(t.max()) for direct, ends in takes
+                 for t in (direct,) + (ends or ()) if len(t)] + [-1])
+    with vector.vec().localForm() as local:
+        # a vector PETSc built without ghosts has no local form at all (a null handle,
+        # on which getSize segfaults), dolfin's own have one, empty of ghosts or not
+        short = not local.handle or reach >= local.getSize()
+        if not agreed(func.function_space().mesh().mpi_comm(), short):
+            values = local.getArray(readonly=True)
+            out = [values[direct] if ends is None else np.concatenate(
+                       (values[direct], 0.5 * (values[ends[0]] + values[ends[1]])))
+                   for direct, ends in takes]
+            return np.column_stack(out) if len(out) > 1 else out[0]
+    V = func.function_space()
+    if len(V.component()):
+        raise ValueError('a component of a mixed Function whose vector holds no ghost '
+                         'values; write its collapsed copy (split(deepcopy=True))')
+    copy = df.Function(V)
+    if agreed(V.mesh().mpi_comm(),
+              func.vector().local_size() != copy.vector().local_size()):
+        raise ValueError("the Function's vector does not hold its space's own dofs on "
+                         'every rank, so its values cannot be matched to the dofmap')
+    copy.vector().set_local(func.vector().get_local())
+    copy.vector().apply('insert')
+    return _node_values(copy, takes)
 
 
 def _node_positions(mesh, layout, masks):
-    """The positions of the nodes `masks` select (`_owned_nodes`): vertices, then edge
-    midpoints, from the mesh's coordinates now."""
+    """The positions of the nodes `masks` select (`layout['owned']`): vertices, then
+    edge midpoints, from the mesh's coordinates now."""
     x = _geometry(mesh.coordinates())
     out = [x[masks[0]]]
     if len(masks) > 1:
@@ -1691,37 +1764,46 @@ def _function_nodes_distributed(functions, cache=None):
     """The functions' node set -- the mesh's vertices, then (at degree 2) one per edge
     -- left where it already is: every rank returns only the nodes it owns, so nothing
     is gathered. Node ids are the global entity ids -- vertex index, then `n_vert +`
-    edge index -- the same on any number of ranks, which is what keeps the file
-    identical however many ranks wrote it.
+    edge index -- whose order is the file's row order (`XdmfDocument.rows`).
 
-    Ownership is taken from the **dofmap**, not from `shared_entities`: a dof belongs
-    to exactly one rank, its ownership range is contiguous, and the rank that owns it
-    is the one holding the value in `get_local()`. What depends on the mesh and the
-    spaces alone is kept in `cache` (`_node_layout`, `_owned_nodes`), so a step of a
-    time series costs its values.
+    A node is written by the rank that owns its **entity** (`owned_entities`), and its
+    value is read straight off the field's own dofmap: the dof the space gives that
+    vertex or edge, from the vector's local form, ghosts included (`_node_dofs`,
+    `_node_values`). A linear field on the quadratic node set takes its midsides as
+    the mean of the edge's ends.
+
+    That is what makes a periodic field cheap. Its slave entities share their masters'
+    dofs, so dof ownership cannot say who writes the nodes on both sides of the period,
+    and the field used to be interpolated onto an unconstrained space first
+    (`fast_interpolation`, dolfin's transfer matrix) and read from that space's owned
+    dofs -- which builds point-search trees on every rank. Writing a 611 M-dof periodic
+    Taylor-Hood solution on 256 ranks, that took a job whose three solves had peaked at
+    981 GB to 1753 GiB, over its two nodes' 1480, and it was killed inside the write
+    (stokes-beadpack, 2026-11-12). Read directly, a write holds this rank's entities'
+    dof numbers and values and nothing the size of a space: writing u and p of the
+    291k-cell bead pack (1.36 M dofs) raised the resident size by 180 MiB serially and
+    339 summed over 8 ranks, where the transfer raised it by 525 and 684, and it took
+    1.6 s where that took 10 (1.4 and 3.5 on 8 ranks). The file is the same --
+    geometry and topology bit for bit, on 1 to 4 ranks -- and its values are the dofs'
+    own, where the transfer's were the basis functions evaluated at the nodes, good to
+    rounding: a P2 velocity's agree to 4.4e-16 of its largest value (on the bead pack
+    bit for bit), and a P1 pressure's midsides, now exactly the mean of their ends,
+    differ from the transfer's by up to 1.4e-15 of its largest value.
+
+    What depends on the mesh and the spaces alone is kept in `cache` (`_node_layout`,
+    `_node_dofs`), so a step of a time series costs its values.
     """
-    own = cache is None             # a cache of this call's own: let go of before returning
-    cache = {} if own else cache
+    cache = {} if cache is None else cache
     mesh, degree, widths = _check_functions(functions)
     layout = _node_layout(mesh, degree, cache)
     fields = []
-    coord_rows = coord_masks = None
     for index, (func, width) in enumerate(zip(functions, widths)):
-        source = func if _is_plain(func.function_space(), mesh, degree, width) \
-            else fast_interpolate(func, _plain_space(mesh, degree, width, cache))
-        rows, masks, takes = _owned_nodes(source.function_space(), mesh, degree,
-                                          width, layout, cache)
-        local = source.vector().get_local()
-        values = [local[t] for t in takes]
-        fields.append((func.name() if func.name() else 'f{}'.format(index), rows,
-                       np.column_stack(values) if len(values) > 1 else values[0]))
-        if coord_rows is None:
-            coord_rows, coord_masks = rows, masks
-    if own:
-        _release_plain(cache)
+        takes = _node_dofs(func.function_space(), mesh, degree, width, layout, cache)
+        fields.append((func.name() if func.name() else 'f{}'.format(index),
+                       layout['rows'], _node_values(func, takes)))
     return {'n_nodes': layout['n_nodes'], 'n_cells': layout['n_cells'],
             'degree': degree, 'mesh': mesh, 'layout': layout,
-            'coord_rows': coord_rows, 'coord_masks': coord_masks,
+            'coord_rows': layout['rows'], 'coord_masks': layout['owned'],
             'conn': layout['conn'], 'cell_offset': layout['cell_offset'],
             'fields': fields}
 

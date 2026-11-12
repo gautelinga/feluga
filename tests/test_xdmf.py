@@ -686,13 +686,133 @@ The way twoasis writes its series, and the way it reads them back.
     print('{} steps of {} nodes, one mesh, exact both ways'.format(len(times), len(nodes)))
 
 
-def test_periodic_write_lets_go_on_close():
-    """a periodic field's unconstrained space and its transfer are the file's, kept
-    across its steps and let go of when it closes
+def _no_transfers(monkeypatch):
+    """Every way the writer could reach an unconstrained space or a transfer onto it,
+    made to raise: femtools' own helpers and dolfin's transfer matrix underneath them,
+    whose point-search trees are what the write must not build."""
+    from femtools import fast_interpolation
 
-    Held module-wide, they outlived every file: a Stokes tensor solve writing each
-    direction between its solves carried them into the next solves, and at 224 M dofs
-    that took the job past its node's memory (stokes-beadpack, 2026-11-12).
+    def refuse(*args, **kwargs):
+        raise AssertionError('the write built an unconstrained space or a transfer')
+    monkeypatch.setattr(fast_interpolation, 'transfer', refuse)
+    monkeypatch.setattr(fast_interpolation, 'interpolate', refuse)
+    monkeypatch.setattr(export_p2_xdmf, 'fast_interpolate', refuse)
+    monkeypatch.setattr(export_p2_xdmf, '_plain_space', refuse)
+    monkeypatch.setattr(df.PETScDMCollection, 'create_transfer_matrix', refuse)
+
+
+@CELLS
+def test_periodic_write_builds_no_transfer(cell, monkeypatch):
+    """a periodic field is written from its own dofmap: no unconstrained space, no
+    transfer onto one, and so no point-search trees
+
+    It used to be interpolated onto an unconstrained P2 space first, through dolfin's
+    transfer matrix, which builds a point-search tree on every rank. Writing a 611 M-dof
+    periodic Taylor-Hood solution on 256 ranks, that took the job from its solves' 981
+    GB to 1753 GiB, over its two nodes' 1480, and it was killed inside the write
+    (stokes-beadpack, 2026-11-12). Each node's value is now the value of the dof the
+    space gives its vertex or edge -- a slave's is its master's -- and a P1 field's
+    midsides on the quadratic grid are the mean of their edge's ends.
+    """
+    mesh = unit_mesh(4, cell)
+    gdim = mesh.geometry().dim()
+    velocity = PERIODIC_VELOCITY + (('x[2]*cos(2*pi*x[0])',) if gdim == 3 else ())
+    V = df.VectorFunctionSpace(mesh, 'CG', 2, constrained_domain=periodic_x())
+    P = df.FunctionSpace(mesh, 'CG', 1, constrained_domain=periodic_x())
+    u, p = df.Function(V), df.Function(P)
+    u.rename('u', 'u')
+    p.rename('p', 'p')
+    u.interpolate(df.Expression(velocity, t=0.0, degree=4))
+    p.interpolate(df.Expression('cos(2*pi*x[0]) + x[1]', degree=2))
+    _no_transfers(monkeypatch)
+    path = tmp('direct_{}.xdmf'.format(cell))
+    with XDMFFile2(df.MPI.comm_world, path) as f:
+        f.write((u, p))
+        assert not [k for k in f._nodes if k[:1] == ('plain',)], \
+            'the file holds an unconstrained space'
+    monkeypatch.undo()
+    grid = _scan(path)[0]
+    x, _ = _read_grid_geometry(path, grid)
+    values = _read_grid_attribute(path, grid, 'u')
+    pressure = _read_grid_attribute(path, grid, 'p').ravel()
+    mesh.init(1)
+    assert len(x) == mesh.num_vertices() + mesh.num_edges(), len(x)
+    # the field at every node, both sides of the period; the pressure is linear in
+    # nothing, so at the midsides it is the mean of the ends, which is what P1 holds
+    c, y = np.cos(2 * np.pi * x[:, 0]), x[:, 1]
+    assert_close(values[:, 0], c * y, 1e-14, 'u0 at the nodes')
+    assert_close(values[:, 1], np.sin(2 * np.pi * x[:, 0]) * y * y, 1e-14, 'u1')
+    if gdim == 3:
+        assert_close(values[:, 2], x[:, 2] * c, 1e-14, 'u2')
+    n = mesh.num_vertices()
+    assert_close(pressure[:n], c[:n] + y[:n], 1e-14, 'p at the vertices')
+    # and every value is a dof's own, exactly: the pressure at the vertices against
+    # dolfin's vertex-to-dof map, which sends a slave vertex to its master's dof
+    gvert = mesh.topology().global_indices(0)
+    assert np.array_equal(pressure[gvert],
+                          p.vector().get_local()[df.vertex_to_dof_map(P)]), \
+        'a vertex value is not its dof'
+    print('{}: {} nodes from the dofmap, no transfer'.format(cell, len(x)))
+
+
+def test_node_dofs_columns_are_components():
+    """an entity's dofs in a vector, tensor or mixed-component dofmap come component by
+    component, so `_node_dofs` reads the components off the space's own dofmap -- the
+    columns are what each `V.sub(c).dofmap()` gives, without building those spaces"""
+    from femtools.xdmf import _entity_dofs
+    mesh = unit_mesh(3)
+    mesh.init(1)
+    V = df.VectorFunctionSpace(mesh, 'CG', 2, constrained_domain=periodic_x())
+    T = df.TensorFunctionSpace(mesh, 'CG', 1, constrained_domain=periodic_x())
+    W = df.FunctionSpace(mesh, df.MixedElement(
+        [V.ufl_element(), df.FiniteElement('CG', mesh.ufl_cell(), 1)]),
+        constrained_domain=periodic_x())
+    for name, S, width in (('vector P2', V, 3), ('tensor P1', T, 9),
+                           ('mixed component', W.sub(0), 3)):
+        for dim in (0, 1) if S.ufl_element().degree() == 2 else (0,):
+            dofs = _entity_dofs(S.dofmap(), mesh, dim)
+            assert len(dofs) == width * mesh.num_entities(dim), (name, dim)
+            for c in range(width):
+                assert np.array_equal(dofs.reshape(-1, width)[:, c],
+                                      _entity_dofs(S.sub(c).dofmap(), mesh, dim)), \
+                    (name, dim, c)
+
+
+def test_split_component_written_as_collapsed(monkeypatch):
+    """a component of a mixed periodic Function (`w.split()`, its dofmap indexing the
+    mixed vector) writes what its collapsed copy writes"""
+    mesh = unit_mesh(3)
+    W = df.FunctionSpace(mesh, df.MixedElement(
+        [df.VectorElement('CG', mesh.ufl_cell(), 2), df.FiniteElement('CG', mesh.ufl_cell(), 1)]),
+        constrained_domain=periodic_x())
+    w = df.Function(W)
+    w.interpolate(df.Expression(PERIODIC_VELOCITY + ('x[2]', 'cos(2*pi*x[0])*x[2]'),
+                                t=0.5, degree=4))
+    _no_transfers(monkeypatch)
+    for tag, (u, p) in (('view', w.split()), ('copy', w.split(deepcopy=True))):
+        u.rename('u', 'u')
+        p.rename('p', 'p')
+        with XDMFFile2(df.MPI.comm_world, tmp('split_{}.xdmf'.format(tag))) as f:
+            f.write((u, p))
+    monkeypatch.undo()
+    for name in ('u', 'p'):
+        a, b = tmp('split_view.xdmf'), tmp('split_copy.xdmf')
+        assert np.array_equal(_read_grid_attribute(a, _scan(a)[0], name),
+                              _read_grid_attribute(b, _scan(b)[0], name)), name
+
+
+def test_periodic_write_lets_go_on_close():
+    """what a file builds for its fields is its own, kept across its steps and let go of
+    when it closes
+
+    A write keeps its node layout and each space's node dofs for the next step, and
+    holds no unconstrained space and no transfer at all
+    (`test_periodic_write_builds_no_transfer`). A read into a periodic space still goes
+    through an unconstrained one and a transfer from it (`read_checkpoint`), and those
+    are the file's too. Held module-wide, they outlived every file: a Stokes tensor
+    solve writing each direction between its solves carried them into the next solves,
+    and at 224 M dofs that took the job past its node's memory (stokes-beadpack,
+    2026-11-12).
     """
     from femtools import fast_interpolation
     mesh = unit_mesh(4, 'triangle')
@@ -703,24 +823,132 @@ def test_periodic_write_lets_go_on_close():
     before = set(fast_interpolation._TRANSFERS)
     f = XDMFFile2(df.MPI.comm_world, tmp('letgo.xdmf'))
     f.write(u, 0.0)
-    plain = [v for k, v in f._nodes.items() if k[:1] == ('plain',)]
-    assert len(plain) == 1, 'no unconstrained space kept for the file'
-    made = set(fast_interpolation._TRANSFERS) - before
-    assert made, 'no transfer made onto the unconstrained space'
+    kept = dict(f._nodes)
+    assert kept, 'the write kept nothing for its next step'
     f.write(u, 1.0)
-    assert [v for k, v in f._nodes.items() if k[:1] == ('plain',)] == plain, \
-        'a second step built its space again'
-    assert set(fast_interpolation._TRANSFERS) - before == made, \
-        'a second step built its transfer again'
+    assert all(f._nodes[k] is v for k, v in kept.items()), \
+        'a second step built its layout or node dofs again'
+    assert not [k for k in f._nodes if k[:1] == ('plain',)], 'a write built a space'
+    assert set(fast_interpolation._TRANSFERS) == before, 'a write built a transfer'
     f.close()
-    assert not f._nodes, 'the file still holds its spaces after close'
+    assert not f._nodes, 'the file still holds its node layout after close'
+
+    g = XDMFFile2(df.MPI.comm_world, tmp('letgo.xdmf'))
+    back = df.Function(V)
+    g.read_checkpoint(back, 'u', 0)
+    plain = [v for k, v in g._nodes.items() if k[:1] == ('plain',)]
+    assert len(plain) == 1, 'no unconstrained space kept for the read'
+    made = set(fast_interpolation._TRANSFERS) - before
+    assert made, 'no transfer made from the unconstrained space'
+    g.read_checkpoint(back, 'u', 1)
+    assert [v for k, v in g._nodes.items() if k[:1] == ('plain',)] == plain, \
+        'a second read built its space again'
+    assert set(fast_interpolation._TRANSFERS) - before == made, \
+        'a second read built its transfer again'
+    g.close()
+    assert not g._nodes, 'the file still holds its spaces after close'
     assert not set(fast_interpolation._TRANSFERS) & made, 'its transfers outlived the file'
     # and what it wrote is still the field
-    back = df.Function(V)
-    with XDMFFile2(df.MPI.comm_world, tmp('letgo.xdmf')) as g:
-        g.read_checkpoint(back, 'u', 0)
     assert_close(back.vector().get_local(), u.vector().get_local(), 1e-14, 'read back')
-    print('one space and {} transfer(s) for two steps, none after close'.format(len(made)))
+    print('two steps written with no space or transfer; the read\'s {} transfer(s) '
+          'gone after close'.format(len(made)))
+
+
+DIRECT_SCRIPT = """
+import sys
+import numpy as np, dolfin as df
+from petsc4py import PETSc
+from femtools import fast_interpolation, xdmf
+from femtools.xdmf import XDMFFile2
+df.set_log_level(40)
+C = df.MPI.comm_world
+
+
+def refuse(*args, **kwargs):
+    raise AssertionError('the write built an unconstrained space or a transfer')
+fast_interpolation.transfer = fast_interpolation.interpolate = refuse
+xdmf.fast_interpolate = xdmf._plain_space = refuse
+df.PETScDMCollection.create_transfer_matrix = refuse
+
+
+class Periodic(df.SubDomain):
+    def inside(self, x, on_boundary):
+        return bool(df.near(x[0], 0.0) and on_boundary)
+
+    def map(self, x, y):
+        y[0] = x[0] - 1.0
+        y[1] = x[1]
+        y[2] = x[2]
+
+
+mesh = df.UnitCubeMesh(C, 4, 4, 4)
+V = df.VectorFunctionSpace(mesh, 'CG', 2, constrained_domain=Periodic())
+P = df.FunctionSpace(mesh, 'CG', 1, constrained_domain=Periodic())
+first = ('1.0', '2.0', '3.0')
+field = ('cos(2*pi*x[0])*x[1]', 'sin(2*pi*x[0])*x[2]', 'x[2]*x[2]')
+want = df.interpolate(df.Expression(field, degree=4), V)
+p = df.interpolate(df.Expression('cos(2*pi*x[0]) + x[1]', degree=2), P)
+p.rename('p', 'p')
+
+# stale ghosts: the owned values are the field, the ghosts still an earlier constant,
+# as a vector PETSc solved into without a ghost update holds them
+stale = df.interpolate(df.Expression(first, degree=0), V)
+stale.rename('u', 'u')
+vec = df.as_backend_type(stale.vector()).vec()
+vec.array[:] = want.vector().get_local()
+with vec.localForm() as local:
+    n_ghost = local.getSize() - vec.getLocalSize()
+assert df.MPI.sum(C, float(n_ghost)) > 0, 'no ghosts to go stale'
+
+# no ghosts at all: a plain PETSc vector with V's ownership, wrapped in a Function
+bare = PETSc.Vec().createMPI((want.vector().local_size(), V.dim()), comm=C)
+bare.array[:] = want.vector().get_local()
+ghostless = df.Function(V, df.PETScVector(bare))
+ghostless.rename('u', 'u')
+with bare.localForm() as local:
+    assert not local.handle, 'the bare vector has a ghosted local form'
+
+for tag, u in (('stale', stale), ('ghostless', ghostless)):
+    with XDMFFile2(C, sys.argv[1] + '_' + tag + '.xdmf') as f:
+        f.write((u, p))
+if df.MPI.rank(C) == 0:
+    print('OK')
+"""
+
+
+@pytest.mark.mpi
+def test_direct_write_on_three_ranks():
+    """three ranks write a periodic field from its own dofmap, ghosts and all
+
+A master dof is another rank's as often as not, so its value comes from the vector's ghosts.
+
+    Two vectors that would read wrong if the ghosts were taken as they stand: one whose
+    ghosts are stale (the owned values set as PETSc sets them, no ghost update), and one
+    with no ghosts at all, wrapped in a Function -- whose values are then copied into a
+    Function of the space, which has them. Neither builds a transfer (the script makes
+    every route to one raise), and both are the field at every node.
+    """
+    script = os.path.join(TMP, 'direct.py')
+    with open(script, 'w') as handle:
+        handle.write(DIRECT_SCRIPT)
+    # this checkout's femtools in the children, not whichever one is installed
+    proc = support.run([sys.executable, script, tmp('direct3')], 3, timeout=600,
+                       env={'PYTHONPATH': os.path.dirname(os.path.dirname(
+                           os.path.abspath(__file__)))})
+    assert 'OK' in proc.stdout, proc.stdout[-400:]
+    for tag in ('stale', 'ghostless'):
+        path = tmp('direct3_{}.xdmf'.format(tag))
+        grid = _scan(path)[0]
+        x, _ = _read_grid_geometry(path, grid)
+        u = _read_grid_attribute(path, grid, 'u')
+        p = _read_grid_attribute(path, grid, 'p').ravel()
+        assert len(x) == 125 + 604, len(x)
+        c = np.cos(2 * np.pi * x[:, 0])
+        assert_close(u[:, 0], c * x[:, 1], 1e-14, tag + ': u0')
+        assert_close(u[:, 1], np.sin(2 * np.pi * x[:, 0]) * x[:, 2], 1e-14, tag + ': u1')
+        assert_close(u[:, 2], x[:, 2] ** 2, 1e-14, tag + ': u2')
+        assert_close(p[:125], c[:125] + x[:125, 1], 1e-14, tag + ': p')
+    print('stale ghosts and no ghosts: the field at all 729 nodes, no transfer')
 
 
 # -- reading back -----------------------------------------------------------------

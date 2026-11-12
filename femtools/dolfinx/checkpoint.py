@@ -18,11 +18,13 @@ What makes the layouts meet, cell by cell:
 - Dofs in a cell in dolfin's (UFC's) order: the vertices by increasing global index (the
   original vertex index), then for degree 2 the edges, edge i opposite vertex i in a
   triangle (UFC's edge order in a tetrahedron); a mixed element's components one after
-  the other. DOLFINx's local dofs are matched to those points by their coordinates.
+  the other, a vector's unrolled. DOLFINx's local dofs are found there through the dof
+  layout's entity dofs (`dolfin_cell_dofs`).
 
 Continuous Lagrange elements of degree 1 and 2 on affine triangles and tetrahedra, vector
-(blocked) elements of them, and mixed elements of them. The file's dofs need not be numbered as here: a reader goes
-through the file's own `cells`, `cell_dofs` and `vector_0`.
+(blocked) elements of them, and mixed elements of them (Taylor-Hood too). The file's dofs
+need not be numbered as here: a reader goes through the file's own `cells`, `cell_dofs`
+and `vector_0`.
 """
 import numpy as np
 
@@ -36,15 +38,19 @@ CELLS = {2: "triangle", 3: "tetrahedron"}
 
 
 def _components(V):
+    """V's scalar components in the order dolfin's cell dofs hold them: a mixed space's
+    one after the other, a vector (blocked) space's or sub-space's unrolled."""
     n = V.element.num_sub_elements
-    return [V] if n == 0 else [V.sub(i) for i in range(n)]
+    if n == 0:
+        return [V]
+    return [leaf for i in range(n) for leaf in _components(V.sub(i))]
 
 
 def _lagrange_degree(S):
     e = S.ufl_element()
-    if getattr(e, "discontinuous", False) or e.family_name not in ("P", "Lagrange", "Q"):
-        raise NotImplementedError("dolfin layout: continuous Lagrange elements only, not "
-                                  "{}".format(e))
+    if getattr(e, "discontinuous", False) or e.family_name not in ("P", "Lagrange"):
+        raise NotImplementedError("dolfin layout: continuous Lagrange elements on "
+                                  "simplices only, not {}".format(e))
     degree = e.embedded_superdegree
     if degree not in (1, 2):
         raise NotImplementedError("dolfin layout: degree 1 or 2, not {}".format(degree))
@@ -52,82 +58,112 @@ def _lagrange_degree(S):
 
 
 def _blocked(V):
-    return V.dofmap.index_map_bs > 1
+    return V.dofmap.dof_layout.block_size > 1
 
 
 def signature(V):
-    """dolfin's signature of V's element (scalar Lagrange, vector, or mixed)."""
+    """dolfin's signature of V's element: scalar Lagrange, vector, or mixed of them
+    (a Taylor-Hood space's `MixedElement(VectorElement(...), FiniteElement(...))`)."""
     tdim = V.mesh.topology.dim
 
-    def one(S):
-        return "FiniteElement('Lagrange', {}, {})".format(CELLS[tdim], _lagrange_degree(S))
+    def sig(S):
+        n = S.element.num_sub_elements
+        if n == 0:
+            return "FiniteElement('Lagrange', {}, {})".format(CELLS[tdim], _lagrange_degree(S))
+        parts = [sig(S.sub(i)) for i in range(n)]
+        if _blocked(S):
+            return "VectorElement({}, dim={})".format(parts[0], n)
+        return "MixedElement({})".format(", ".join(parts))
 
-    parts = [one(S) for S in _components(V)]
-    if _blocked(V):
-        return "VectorElement({}, dim={})".format(parts[0], len(parts))
-    return parts[0] if V.element.num_sub_elements == 0 else \
-        "MixedElement({})".format(", ".join(parts))
-
-
-def _dof_coordinates(V):
-    """The coordinates of every local dof of V (a mixed space through its components)."""
-    from femtools.dolfinx.periodic import flat_collapse_map
-    if V.element.num_sub_elements == 0:
-        return V.tabulate_dof_coordinates()
-    imap = V.dofmap.index_map
-    X = np.zeros(((imap.size_local + imap.num_ghosts) * V.dofmap.index_map_bs, 3))
-    for S in _components(V):
-        Sc, parent = S.collapse()
-        X[flat_collapse_map(parent)] = Sc.tabulate_dof_coordinates()
-    return X
+    return sig(V)
 
 
-_TABLES = {}
+class _WeakCache:
+    """Values computed once per live object (a space, a UniqueDofs), dropped with it: the
+    object is not kept alive, and a later object reusing its id is not served."""
+
+    def __init__(self):
+        self._d = {}
+
+    def get(self, objs, build):
+        import weakref
+        key = tuple(id(o) for o in objs)
+        hit = self._d.get(key)
+        if hit is not None and all(r() is o for r, o in zip(hit[0], objs)):
+            return hit[1]
+        value = build()
+        refs = tuple(weakref.ref(o) for o in objs)
+        self._d[key] = (refs, value)
+        for o in objs:
+            weakref.finalize(o, self._d.pop, key, None)
+        return value
+
+    def __len__(self):
+        return len(self._d)
 
 
-def ufc_vertices(mesh):
-    """This rank's own cells' geometry nodes (their vertices, the mesh being affine) in
-    dolfin's (UFC's) order: by increasing input global index. (n, tdim+1)."""
+_TABLES = _WeakCache()
+
+
+def _vertex_order(mesh):
+    """This rank's own cells' local vertices (their reference positions) in dolfin's
+    (UFC's) order: by increasing input global index. (n, tdim+1)."""
     tdim = mesh.topology.dim
     if tdim not in EDGES or mesh.geometry.cmap.degree != 1:
         raise NotImplementedError("dolfin layout: affine triangles and tetrahedra only")
     n = mesh.topology.index_map(tdim).size_local
     G = mesh.geometry.dofmaps[0][:n]
     gv = np.asarray(mesh.geometry.input_global_indices, dtype=np.int64)
-    return np.take_along_axis(G, np.argsort(gv[G], axis=1, kind="stable"), axis=1)
+    return np.argsort(gv[G], axis=1, kind="stable")
+
+
+def ufc_vertices(mesh):
+    """This rank's own cells' geometry nodes (their vertices, the mesh being affine) in
+    dolfin's (UFC's) order: by increasing input global index. (n, tdim+1)."""
+    n = mesh.topology.index_map(mesh.topology.dim).size_local
+    G = mesh.geometry.dofmaps[0][:n]
+    return np.take_along_axis(G, _vertex_order(mesh), axis=1)
+
+
+def _edge_index(tdim):
+    """The reference cell's edge between local vertices i and j, (d+1, d+1): UFC's and
+    basix's edges are the same."""
+    E = np.full((tdim + 1, tdim + 1), -1, dtype=np.int64)
+    for k, (a, b) in enumerate(EDGES[tdim]):
+        E[a, b] = E[b, a] = k
+    return E
 
 
 def dolfin_cell_dofs(V):
     """`(gc, D)`: this rank's own cells' global ids (uint64), and for each cell V's local
-    dofs in dolfin's order (unrolled for a vector space), a row a cell. Built once per
-    space."""
-    key = id(V)
-    if key in _TABLES and _TABLES[key][0] is V:
-        return _TABLES[key][1]
+    dofs in dolfin's order (vector components unrolled), a row a cell. From the dof
+    layout's entity dofs: a cell's vertex j and edge e (reference numbering) carry dofs
+    `entity_dofs(0, j)` and `entity_dofs(1, e)` of its row. Built once per space (kept
+    while the space lives)."""
+    return _TABLES.get((V,), lambda: _dolfin_cell_dofs(V))
+
+
+def _dolfin_cell_dofs(V):
     mesh = V.mesh
     tdim = mesh.topology.dim
     n = mesh.topology.index_map(tdim).size_local
-    vertices = mesh.geometry.x[ufc_vertices(mesh)]           # (n, tdim+1, 3), dolfin's order
-    edges = np.stack([0.5 * (vertices[:, a] + vertices[:, b]) for a, b in EDGES[tdim]], axis=1)
-    X = _dof_coordinates(V)
-    lo, hi = mesh.geometry.x.min(axis=0), mesh.geometry.x.max(axis=0)
-    tol = 1e-8 * max(float(np.max(hi - lo)), 1e-300)
+    perm = _vertex_order(mesh)                       # (n, d+1): reference vertex per slot
+    pairs = np.asarray(EDGES[tdim])                  # dolfin's edges by dolfin's slots
+    ref_edges = _edge_index(tdim)[perm[:, pairs[:, 0]], perm[:, pairs[:, 1]]]   # (n, n_e)
     blocks = []
     for S in _components(V):
-        points = vertices if _lagrange_degree(S) == 1 else np.concatenate([vertices, edges], 1)
-        D = np.asarray(S.dofmap.list[:n])                    # V's local dofs, DOLFINx's order
-        if D.shape[1] != points.shape[1]:
+        layout = S.dofmap.dof_layout
+        vdof = np.array([layout.entity_dofs(0, j)[0] for j in range(tdim + 1)])
+        cols = vdof[perm]
+        if _lagrange_degree(S) == 2:
+            edof = np.array([layout.entity_dofs(1, e)[0] for e in range(len(pairs))])
+            cols = np.concatenate([cols, edof[ref_edges]], axis=1)
+        D = np.asarray(S.dofmap.list[:n])            # V's local dofs, DOLFINx's order
+        if D.shape[1] != cols.shape[1]:
             raise NotImplementedError("dolfin layout: unexpected dofs per cell")
-        dist = np.linalg.norm(points[:, :, None, :] - X[D][:, None, :, :], axis=-1)
-        j = dist.argmin(axis=2)
-        if n and (np.max(np.take_along_axis(dist, j[..., None], 2)) > tol
-                  or np.any(np.sort(j, axis=1) != np.arange(D.shape[1]))):
-            raise RuntimeError("dolfin layout: a cell's dofs do not sit at dolfin's points")
-        blocks.append(np.take_along_axis(D, j, axis=1))
-    D = np.concatenate(blocks, axis=1) if n else np.zeros((0, sum(b.shape[1] for b in blocks)),
-                                                          dtype=np.int32)
+        blocks.append(np.take_along_axis(D, cols, axis=1))
+    D = np.concatenate(blocks, axis=1)
     gc = np.asarray(mesh.topology.original_cell_index[:n], dtype=np.uint64)
-    _TABLES[key] = (V, (gc, D))
     return gc, D
 
 
@@ -135,6 +171,15 @@ def _global_tables(V, U):
     from femtools.tables import space_tables
     t = space_tables((V, U))
     return t.gc, t.dofs
+
+
+_FINGERPRINTS = _WeakCache()
+
+
+def _space_fingerprint(V, U):
+    """The fingerprint of V's tables numbered by U (femtools.dolfin_layout), computed once
+    per (V, U). Collective."""
+    return _FINGERPRINTS.get((V, U), lambda: _fingerprint(V.mesh.comm, *_global_tables(V, U)))
 
 
 def _n_cells(V):
@@ -149,7 +194,7 @@ def write_dofs(path, V, U, name="dofs", mode="w"):
     comm = V.mesh.comm
     gc, dofs = _global_tables(V, U)
     _write_tables(path, name, comm, _n_cells(V), gc, dofs, mode)
-    fingerprint = _fingerprint(comm, gc, dofs)
+    fingerprint = _FINGERPRINTS.get((V, U), lambda: _fingerprint(comm, gc, dofs))
     with opened(path, "a", comm) as h5:
         if h5 is not None:
             h5[name].attrs["signature"] = np.bytes_(signature(V))
@@ -202,7 +247,7 @@ def _check_linked(path, dofs, V, U, comm):
         except (OSError, KeyError) as e:
             found = str(e)
     found = comm.bcast(found, root=0)
-    fingerprint = _fingerprint(comm, *_global_tables(V, U))
+    fingerprint = _space_fingerprint(V, U)
     if os.path.realpath(where) == os.path.realpath(path):
         return "{}: the dof tables must be in another file than the Function's".format(where)
     if isinstance(found, str):

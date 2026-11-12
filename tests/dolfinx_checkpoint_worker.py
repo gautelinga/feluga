@@ -19,7 +19,8 @@ import numpy as np
 LX, LY, NX, NY = 1.0, 2.0, 6, 10
 # name: (component degrees, periodic in x)
 SPACES = {"P2": ((2,), True), "P1": ((1,), True), "W22": ((2, 2), True),
-          "W21": ((2, 1), True), "P2_walls": ((2,), False), "V2": ("vector", True)}
+          "W21": ((2, 1), True), "P2_walls": ((2,), False), "V2": ("vector", True),
+          "TH": ("taylor-hood", False)}   # periodic: periodic_box pairs blocked sub-spaces wrongly
 
 
 def f(x, y):
@@ -30,8 +31,13 @@ def g(x, y):
     return np.cos(2 * np.pi * x / LX) * (1.0 + y)
 
 
+def h(x, y):
+    return np.sin(2 * np.pi * x / LX) + y
+
+
 F_CPP = "sin(2*pi*x[0]/LX)*x[1] + cos(2*pi*x[0]/LX) + 0.5*x[1]*x[1]"
 G_CPP = "cos(2*pi*x[0]/LX)*(1.0 + x[1])"
+H_CPP = "sin(2*pi*x[0]/LX) + x[1]"
 
 
 def dolfin_spaces():
@@ -44,6 +50,13 @@ def dolfin_spaces():
         if degrees == "vector":
             V = df.VectorFunctionSpace(mesh, "CG", 2, constrained_domain=cd)
             out[name] = (V, df.interpolate(df.Expression((F_CPP, G_CPP), LX=LX, degree=4), V))
+            continue
+        if degrees == "taylor-hood":           # a vector P2 and a P1: u_x, u_y, p
+            el = df.MixedElement([df.VectorElement("CG", mesh.ufl_cell(), 2),
+                                  df.FiniteElement("CG", mesh.ufl_cell(), 1)])
+            V = df.FunctionSpace(mesh, el, constrained_domain=cd)
+            expr = df.Expression((F_CPP, G_CPP, H_CPP), LX=LX, degree=4)
+            out[name] = (V, df.interpolate(expr, V))
             continue
         els = [df.FiniteElement("CG", mesh.ufl_cell(), d) for d in degrees]
         el = els[0] if len(els) == 1 else df.MixedElement(els)
@@ -66,6 +79,10 @@ def dolfinx_spaces():
     for name, (degrees, periodic) in SPACES.items():
         if degrees == "vector":
             V = fem.functionspace(msh, ("Lagrange", 2, (2,)))
+        elif degrees == "taylor-hood":
+            V = fem.functionspace(msh, basix.ufl.mixed_element([
+                basix.ufl.element("Lagrange", "triangle", 2, shape=(2,)),
+                basix.ufl.element("Lagrange", "triangle", 1)]))
         else:
             els = [basix.ufl.element("Lagrange", "triangle", d) for d in degrees]
             V = fem.functionspace(msh, els[0] if len(els) == 1 else basix.ufl.mixed_element(els))
@@ -77,15 +94,18 @@ def dolfinx_spaces():
         if degrees == "vector":
             X = np.repeat(V.tabulate_dof_coordinates(), bs, axis=0)
             comp = np.tile(np.arange(bs), n_loc // bs)
-        elif len(degrees) == 1:
+        elif degrees != "taylor-hood" and len(degrees) == 1:
             X = V.tabulate_dof_coordinates()
         else:
-            for i in range(len(degrees)):
-                Vi, parent = V.sub(i).collapse()
+            leaves = ([V.sub(0).sub(0), V.sub(0).sub(1), V.sub(1)] if degrees == "taylor-hood"
+                      else [V.sub(i) for i in range(len(degrees))])
+            for i, S in enumerate(leaves):
+                Vi, parent = S.collapse()
                 parent = flat_collapse_map(parent)
                 X[parent], comp[parent] = Vi.tabulate_dof_coordinates(), i
         own = U.owned_unique
-        exact = np.where(comp[own] == 0, f(X[own, 0], X[own, 1]), g(X[own, 0], X[own, 1]))
+        x, y = X[own, 0], X[own, 1]
+        exact = np.choose(comp[own], [f(x, y), g(x, y), h(x, y)])
         out[name] = (V, U, exact)
     return out
 

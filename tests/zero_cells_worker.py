@@ -4,8 +4,9 @@ every rank -- no rank-local exception, no hang -- and give the right values.
 
     mpirun -n 4 python3 tests/zero_cells_worker.py dolfinx|dolfin|dolfin-nested DIR out.json
 
-`dolfin-nested` (the nested transfer on dolfin) hangs in femtools.plaza_periodic's
-refinement on a rank without cells, so the suite does not run it yet.
+`dolfin-nested` (the nested transfer on dolfin): dolfin cannot refine a mesh with ranks
+that hold no cells (its edge numbering hangs), so femtools.plaza_periodic refuses it,
+on every rank.
 """
 import json
 import os
@@ -104,7 +105,11 @@ def dolfin_nested_run(folder):
     V = df.FunctionSpace(msh, "CG", 2)
     e = df.Expression("1.0 + x[0] + 2.0*x[1] + 0.5*x[0]*x[1]", degree=2)
     u = df.interpolate(e, V)
-    fine, anc = refine_uniformly(msh, 1, [1.0, 1.0], [])
+    try:
+        fine, anc = refine_uniformly(msh, 1, [1.0, 1.0], [])
+    except ValueError as e:
+        res["refused"] = str(e)
+        return comm, res
     nest = Nested(msh, fine, anc, 1)
     Vf = df.FunctionSpace(fine, "CG", 2)
     P = nest.prolongation(V, Vf)

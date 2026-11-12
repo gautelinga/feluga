@@ -40,3 +40,12 @@ def test_dolfin(tmp_path):
     r = _run("dolfin", tmp_path)
     assert 0 in r["cells"] and r["tables_cells"] == 2
     assert r["checkpoint"] < 1e-12
+
+
+@pytest.mark.dolfin
+def test_dolfin_refinement_refused(tmp_path):
+    """dolfin cannot refine with ranks that hold no cells: refused on every rank (the
+    worker finishing on all four is the check that none hangs)."""
+    pytest.importorskip("dolfin")
+    r = _run("dolfin-nested", tmp_path)
+    assert 0 in r["cells"] and "refused" in r

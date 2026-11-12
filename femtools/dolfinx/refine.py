@@ -28,7 +28,8 @@ The children stay on their parent's rank (DOLFINx's identity partitioner) unless
 `redistribute`; the parent-cell map (`parent`, new local cell -> old local cell) is
 returned when they stay. The C++ (femtools/dolfinx/cpp) is built on first use with CMake
 against the installed DOLFINx and nanobind, into femtools' cache folder
-(FEMTOOLS_JIT_DIR, else ~/.cache/femtools), rank 0 building while the others wait.
+(FEMTOOLS_JIT_DIR, else ~/.cache/femtools), rank 0 building while the others wait
+(femtools.jit: a failed build raises on every rank, concurrent jobs share the cache).
 """
 import hashlib
 import importlib.util
@@ -46,10 +47,16 @@ TOL = 1e-9
 
 
 def _module(comm):
-    """The compiled extension, built once per source and installation."""
+    """The compiled extension, built once per source and installation: by rank 0 into a
+    fresh folder renamed into the cache when complete (femtools.jit), its path then
+    broadcast. A failed build raises on every rank, naming the installed DOLFINx."""
     if _MODULE[0] is not None:
         return _MODULE[0]
+    import tempfile
+
     import dolfinx
+
+    from femtools.jit import install_dir, on_every_rank, on_rank0
     sources = [os.path.join(HERE, f) for f in ("plaza_periodic.cpp", "CMakeLists.txt")]
     sources.append(os.path.join(HERE, "..", "..", "cpp", "plaza_periodic_rules.h"))
     h = hashlib.sha1()
@@ -59,41 +66,83 @@ def _module(comm):
     h.update((dolfinx.__version__ + sys.version).encode())
     root = os.environ.get("FEMTOOLS_JIT_DIR") or os.path.join(
         os.path.expanduser("~"), ".cache", "femtools")
-    build = os.path.join(root, "plaza_periodic_x_" + h.hexdigest()[:16])
-    error = None
-    if comm.rank == 0 and not os.path.exists(os.path.join(build, "done")):
-        os.makedirs(build, exist_ok=True)
-        steps = [["cmake", "-S", HERE, "-B", build, "-DCMAKE_BUILD_TYPE=Release",
+    name = "plaza_periodic_x_" + h.hexdigest()[:16]
+
+    def built_in(folder):
+        found = [f for f in os.listdir(folder)
+                 if f.startswith("plaza_periodic_x") and f.endswith(".so")]
+        if len(found) != 1:
+            raise RuntimeError("{} holds {} extension libraries, not one".format(
+                folder, len(found)))
+        return os.path.join(folder, found[0])
+
+    def build():
+        final = os.path.join(root, name)
+        if os.path.exists(os.path.join(final, "done")):
+            return built_in(final)
+        os.makedirs(root, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix=name + ".", dir=root)
+        steps = [["cmake", "-S", HERE, "-B", tmp, "-DCMAKE_BUILD_TYPE=Release",
                   "-DPython_EXECUTABLE=" + sys.executable],
-                 ["cmake", "--build", build, "-j", str(min(8, os.cpu_count() or 1))]]
+                 ["cmake", "--build", tmp, "-j", str(min(8, os.cpu_count() or 1))]]
         for step in steps:
             proc = subprocess.run(step, capture_output=True, text=True)
             if proc.returncode:
-                error = (proc.stdout + proc.stderr)[-4000:]
-                break
-        else:
-            open(os.path.join(build, "done"), "w").close()
-    error = comm.bcast(error, root=0)
-    if error is not None:
-        raise RuntimeError("femtools.dolfinx.refine: building the extension failed:\n" + error)
-    (so,) = [f for f in os.listdir(build) if f.startswith("plaza_periodic_x") and f.endswith(".so")]
-    spec = importlib.util.spec_from_file_location("plaza_periodic_x", os.path.join(build, so))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _MODULE[0] = module
-    return module
+                raise RuntimeError("{} failed against DOLFINx {}:\n{}".format(
+                    " ".join(step[:2]), dolfinx.__version__,
+                    (proc.stdout + proc.stderr)[-4000:]))
+        open(os.path.join(tmp, "done"), "w").close()
+        return built_in(install_dir(tmp, final))
+
+    so = on_rank0(comm, build, "femtools.dolfinx.refine: building the extension against "
+                  "DOLFINx {}".format(dolfinx.__version__))
+
+    def load():
+        spec = importlib.util.spec_from_file_location("plaza_periodic_x", so)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    _MODULE[0] = on_every_rank(comm, load, "femtools.dolfinx.refine: loading " + so,
+                               wait_for=so)
+    return _MODULE[0]
 
 
 def _cells(mesh, markers):
-    """Local cell indices from None (every owned cell), indices, or a boolean per owned
-    cell."""
-    tdim = mesh.topology.dim
+    """This rank's own cells to refine, as local indices, from None (every owned cell),
+    local indices (owned or ghost: a ghost is dropped, its owner marking it -- as
+    `dolfinx.mesh.locate_entities` finds it there too), or a boolean per owned cell
+    (ghosts' entries, if given, likewise dropped). Indices outside the local cells, or
+    booleans of another length, are refused on every rank. Collective."""
+    from femtools.hdf5_rows import agreed
+    imap = mesh.topology.index_map(mesh.topology.dim)
+    n_own, n_all = imap.size_local, imap.size_local + imap.num_ghosts
     if markers is None:
-        return np.arange(mesh.topology.index_map(tdim).size_local, dtype=np.int32)
+        return np.arange(n_own, dtype=np.int32)
     markers = np.asarray(markers)
     if markers.dtype == bool:
-        markers = np.flatnonzero(markers)
-    return np.ascontiguousarray(markers, dtype=np.int32)
+        if agreed(mesh.comm, len(markers) not in (n_own, n_all)):
+            raise ValueError("refine_periodic: boolean markers need one entry a local cell "
+                             "(owned, or owned then ghost)")
+        return np.flatnonzero(markers[:n_own]).astype(np.int32)
+    markers = markers.ravel().astype(np.int64)
+    if agreed(mesh.comm, bool(len(markers)) and (markers.min() < 0 or markers.max() >= n_all)):
+        raise ValueError("refine_periodic: cell indices outside the local cells")
+    return np.ascontiguousarray(markers[markers < n_own], dtype=np.int32)
+
+
+def _frozen(mesh, frozen):
+    """`frozen` as local edge indices (owned or ghost), checked in range on every rank."""
+    from femtools.hdf5_rows import agreed
+    if frozen is None:
+        return np.zeros(0, np.int32)
+    frozen = np.asarray(frozen).ravel().astype(np.int64)
+    mesh.topology.create_entities(1)
+    imap = mesh.topology.index_map(1)
+    n_all = imap.size_local + imap.num_ghosts
+    if agreed(mesh.comm, bool(len(frozen)) and (frozen.min() < 0 or frozen.max() >= n_all)):
+        raise ValueError("refine_periodic: frozen edge indices outside the local edges")
+    return np.ascontiguousarray(frozen, dtype=np.int32)
 
 
 def _lower(mesh, axes, lower):
@@ -113,10 +162,11 @@ def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
     """`dolfinx.mesh.refine` of the marked cells, with the identified faces bisected
     alike: `femtools.plaza_periodic.refine_periodic`'s signature and cells.
 
-    `markers`: None (every cell), local cell indices, or a boolean per owned cell.
-    `box` is the periodic box's upper corner and `lower` its lower one (the origin when
-    None, which a mesh elsewhere is refused), `axes` the periodic axes; `tol` how near a
-    face a point must be. 2D and 3D, any rank count.
+    `markers`: None (every cell), local cell indices (ghosts dropped: their owners mark
+    them), or a boolean per owned cell. `box` is the periodic box's upper corner and
+    `lower` its lower one (the origin when None, which a mesh elsewhere is refused),
+    `axes` the periodic axes; `tol` how near a face a point must be, relative to the box
+    (`femtools.periodic_core.box_scale`). 2D and 3D, any rank count.
 
     Returns `(new_mesh, npair, parent_cell)`: the refined mesh, the number of periodic
     partner edges paired (summed over ranks, both ways) and the parent-cell map, each
@@ -128,7 +178,7 @@ def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
     `frozen_cells`. Collective."""
     import ufl
     from dolfinx.mesh import Mesh
-    from femtools.periodic_core import xyz
+    from femtools.periodic_core import box_scale, xyz
     comm = mesh.comm
     tdim = mesh.topology.dim
     cap, rank_cap = int(max_cells or 0), int(max_rank_cells or 0)
@@ -138,12 +188,12 @@ def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
     lo = _lower(mesh, axes, lower)
     hi = xyz(np.asarray(box, float))
     cells = _cells(mesh, markers)
-    frozen = (np.zeros(0, np.int32) if frozen is None
-              else np.ascontiguousarray(np.asarray(frozen).ravel(), np.int32))
+    frozen = _frozen(mesh, frozen)
     module = _module(comm)
     new, parent, npair, n_children, n_rank, n_unmarked, n_frozen = module.refine_periodic(
         mesh._cpp_object, cells, [float(v) for v in lo], [float(v) for v in hi],
-        [int(a) for a in axes], float(tol), bool(redistribute), cap, rank_cap, frozen)
+        [int(a) for a in axes], float(tol) * box_scale(lo, hi), bool(redistribute), cap,
+        rank_cap, frozen)
     if report is not None:
         report.update(unmarked=int(n_unmarked), frozen_cells=int(n_frozen))
     if new is None:

@@ -7,10 +7,12 @@ upper periodic face down by the box length, so an edge or corner dof maps to the
 corner in one step. The dof at the image is its master; masters are never on an upper
 periodic face, so there are no chains.
 
-Matching is by coordinates, in parallel: each rank contributes its owned candidate
-masters (dofs on a lower periodic face and on no upper one) to one allgather, and every
-rank looks up its local (owned and ghost) slaves in a KD-tree of all candidates. The
-gathered set is one face's worth of dofs.
+Matching is by coordinates, in parallel, without gathering a face anywhere: each owned
+candidate master (a dof on a lower periodic face and on no upper one) goes to the rank
+its position's bin hashes to, each local (owned and ghost) slave to the ranks of the
+bins a master within tol of its image may be in; they meet there in a KD-tree, and each
+slave hears its master's global index back. `tol` is relative to the box
+(`femtools.periodic_core.box_scale`).
 
     slaves, masters = periodic_box(V, upper=(Lx, Ly), periodic=(True, False))
 
@@ -51,8 +53,11 @@ def _pad3(v, fill):
 
 def _pair(comm, x, n_owned, l2g, lower, upper, periodic, tol):
     """Slave local indices and master global indices for one set of coordinates `x`
-    (owned first, then ghosts) with global indices `l2g`."""
+    (owned first, then ghosts) with global indices `l2g`; `tol` a length. Raises on
+    every rank alike when some slave has no master. Collective."""
     from scipy.spatial import cKDTree
+
+    from femtools.hdf5_rows import allsum, rank_of, reply, route
 
     axes = np.flatnonzero(periodic)
     on_hi = np.zeros(len(x), dtype=bool)
@@ -64,23 +69,53 @@ def _pair(comm, x, n_owned, l2g, lower, upper, periodic, tol):
         on_lo |= np.abs(x[:, a] - lower[a]) < tol
         image[hi_a, a] -= upper[a] - lower[a]
     slaves = np.flatnonzero(on_hi)
-
     cand = np.flatnonzero(on_lo & ~on_hi)
     cand = cand[cand < n_owned]  # each master contributed once, by its owner
-    pts = np.concatenate(comm.allgather(x[cand])) if comm.size > 1 else x[cand]
-    gids = np.concatenate(comm.allgather(l2g[cand])) if comm.size > 1 else l2g[cand]
 
-    if len(slaves) == 0:
-        return slaves.astype(np.int32), np.zeros(0, dtype=np.int64)
-    if len(pts) == 0:
-        raise RuntimeError("periodic_box: slaves found but no candidate masters")
-    dist, idx = cKDTree(pts).query(image[slaves], distance_upper_bound=tol)
-    bad = ~np.isfinite(dist)
-    if bad.any():
+    # bins much wider than tol: a master goes to its own bin's rank, a slave to those of
+    # its image's bin and, where within tol of a bin's edge, the neighbour's
+    h = 1e3 * tol
+    size = comm.Get_size()
+    sent = route(comm, rank_of(np.floor(x[cand] / h).astype(np.int64), size),
+                 x[cand], l2g[cand])
+    pts, gids = sent.received
+    pts = pts.reshape(-1, 3)
+    y = image[slaves] / h
+    keys, of = _near_bins(y, 2 * tol / h)
+    asked = route(comm, rank_of(keys, size), image[slaves][of])
+    (q,) = asked.received
+    found = np.full(len(q), -1, np.int64)
+    if len(q) and len(pts):
+        dist, idx = cKDTree(pts).query(q.reshape(-1, 3), distance_upper_bound=tol)
+        ok = np.isfinite(dist)
+        found[ok] = gids[idx[ok]]
+    (found,) = reply(comm, asked, found)
+    master = np.full(len(slaves), -1, np.int64)
+    np.maximum.at(master, of, found)
+    bad = master < 0
+    n_bad = int(allsum(comm, int(bad.sum())))
+    if n_bad:
+        first = image[slaves][bad][0] if bad.any() else None
+        firsts = [f for f in comm.allgather(first) if f is not None]
         raise RuntimeError(
-            f"periodic_box: {bad.sum()} slave dofs have no master within {tol:g} "
-            f"(first image {image[slaves][bad][0]}); are the periodic faces congruent?")
-    return slaves.astype(np.int32), gids[idx].astype(np.int64)
+            f"periodic_box: {n_bad} slave dofs have no master within {tol:g} "
+            f"(first image {firsts[0]}); are the periodic faces congruent?")
+    return slaves.astype(np.int32), master
+
+
+def _near_bins(y, near):
+    """`(keys, index)`: each row's bin (`floor(y)`) and, in each coordinate within `near`
+    of a bin's edge, the neighbour's too -- every bin a point within `near` of it has."""
+    b = np.floor(y).astype(np.int64)
+    frac = y - b
+    keys, index = b, np.arange(len(y))
+    for d in range(3):
+        for step, m in ((-1, frac[:, d] <= near), (1, frac[:, d] >= 1 - near)):
+            mm = m[index]
+            extra = keys[mm].copy()
+            extra[:, d] += step
+            keys, index = np.vstack([keys, extra]), np.r_[index, index[mm]]
+    return keys, index
 
 
 def periodic_box(V, upper=None, periodic=None, lower=None, tol=1e-8):
@@ -88,7 +123,8 @@ def periodic_box(V, upper=None, periodic=None, lower=None, tol=1e-8):
 
     `upper`, `lower`: the box corners (default the mesh's bounding box); `periodic`:
     which axes are identified (default all geometric axes); `tol`: how near a face a
-    dof must be, and how near its master, relative to the box size.
+    dof must be, and how near its master, relative to the box
+    (`femtools.periodic_core.box_scale`).
     Returns (slaves, masters): local dof indices (owned and ghost, unrolled) and the
     global dof index of each one's master.
     """
@@ -101,7 +137,8 @@ def periodic_box(V, upper=None, periodic=None, lower=None, tol=1e-8):
     if periodic is None:
         periodic = [True] * gdim
     periodic = np.concatenate([np.asarray(periodic, bool), np.zeros(3 - len(periodic), bool)])
-    atol = tol * float(np.max(upper - lower))
+    from femtools.periodic_core import box_scale
+    atol = tol * box_scale(lower, upper)
 
     imap = V.dofmap.index_map
     bs = V.dofmap.index_map_bs

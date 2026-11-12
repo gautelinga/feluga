@@ -436,7 +436,9 @@ def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
 
     `box` is the periodic box's upper corner and `lower` its lower one
     (`periodic.box_lower`: the origin when None, which a mesh elsewhere is refused),
-    `axes` the periodic axes. 2D and 3D. Works at any rank count. `redistribute=True` matches `df.refine`'s default; a
+    `axes` the periodic axes; `tol` how near a face a point must be, relative to the box
+    (`femtools.periodic_core.box_scale`: as it is for a unit box at the origin). 2D and
+    3D. Works at any rank count. `redistribute=True` matches `df.refine`'s default; a
     pass that grows the mesh a few percent is much faster without the repartition, and
     gives the same mesh.
 
@@ -464,13 +466,20 @@ def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
     if cap < 0 or rank_cap < 0:
         raise ValueError("max_cells and max_rank_cells must be positive, got {} and {}"
                          .format(max_cells, max_rank_cells))
+    from femtools.hdf5_rows import agreed
     from femtools.periodic import box_lower, xyz
+    from femtools.periodic_core import box_scale
     lower = box_lower(mesh, axes, lower)
+    frozen = np.zeros(0, np.int64) if frozen is None else \
+        np.asarray(frozen).ravel().astype(np.int64)
+    mesh.init(1)
+    if agreed(mesh.mpi_comm(), bool(len(frozen)) and (
+            frozen.min() < 0 or frozen.max() >= mesh.num_edges())):
+        raise ValueError("refine_periodic: frozen edge indices outside the local edges")
     npair, parent, n_children, n_rank, n_unmarked, n_frozen = _cpp().refine_periodic(
         new_mesh, mesh, markers, [int(a) for a in axes], [float(v) for v in lower],
-        [float(b) for b in xyz(box)], tol,
-        redistribute, cap, rank_cap,
-        [] if frozen is None else [int(e) for e in np.asarray(frozen).ravel()])
+        [float(b) for b in xyz(box)], float(tol) * box_scale(lower, xyz(box)),
+        redistribute, cap, rank_cap, [int(e) for e in frozen])
     if report is not None:
         report.update(unmarked=int(n_unmarked), frozen_cells=int(n_frozen))
     if (cap and n_children > cap) or (rank_cap and n_rank > rank_cap):

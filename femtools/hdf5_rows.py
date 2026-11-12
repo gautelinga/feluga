@@ -480,6 +480,58 @@ def extent(x, comm=None, width=None):
     return out_lo, out_hi
 
 
+def near_keys(y, delta):
+    """`(keys, index)`: every integer rounding of the rows of `y` moved by up to `delta`
+    (less than a half) in each coordinate -- one key a point, more where a coordinate lies
+    within `delta` of a rounding boundary -- and the point each key is of. Two points
+    within `2 delta` of each other in every coordinate share a key, and two within `delta`
+    find each other's `np.round` among their keys."""
+    y = as_rows(np.asarray(y, dtype=float))
+    lo, hi = np.round(y - delta).astype(np.int64), np.round(y + delta).astype(np.int64)
+    keys, index = lo, np.arange(len(y))
+    for d in range(y.shape[1]):
+        m = lo[index, d] != hi[index, d]
+        extra = keys[m].copy()
+        extra[:, d] = hi[index[m], d]
+        keys, index = np.vstack([keys, extra]), np.r_[index, index[m]]
+    return keys, index
+
+
+def match_nodes(comm, coords, values, x, tol, lower):
+    """The rows of `values` at the points `x`: each point matched to its nearest node of
+    `coords` (`values` row for row), nodes and points spread over the ranks in any way.
+    Returns `(found, distance)`, aligned with `x`: the row at each point's node and how
+    far that node is. A node within `tol` of a point is always found; past `tol` the
+    nearest may be missed, and a point with no node at all gets `inf`. Collective on comm
+    (None for one rank).
+
+    Under MPI nodes and points meet by position: space is cut into cubes of side
+    `1000 tol` from `lower`, a point goes to the rank of its cube (`rank_of` of its
+    rounded position) and a node to the ranks of every cube within `tol` of it
+    (`near_keys`), so each is sent about once however the ranks' boxes overlap."""
+    from scipy.spatial import cKDTree
+    coords, values = as_rows(np.asarray(coords, dtype=float)), as_rows(values)
+    x = as_rows(np.asarray(x, dtype=float))
+    width = values.shape[1]
+    asked, points = None, x
+    if comm is not None and comm.Get_size() > 1:
+        size = comm.Get_size()
+        h = 1e3 * tol
+        lower = np.asarray(lower, dtype=float)
+        keys, of = near_keys((coords - lower) / h, tol / h)
+        coords, values = route(comm, rank_of(keys, size), coords[of], values[of]).received
+        asked = route(comm, rank_of(np.round((x - lower) / h), size), x)
+        points = asked.received[0]
+    if len(points) and len(coords):
+        distance, index = cKDTree(coords).query(points)
+        found = values[index]
+    else:
+        distance = np.full(len(points), np.inf)
+        found = np.zeros((len(points), width), dtype=values.dtype)
+    if asked is not None:
+        found, distance = reply(comm, asked, found, distance)
+    return found.reshape(len(x), width), distance
+
 def unique_inverse(values):
     """`np.unique(values, return_inverse=True)`, the same two arrays, for the 1-D int64
     arrays of row and vertex ids the readers deduplicate: value and position packed into

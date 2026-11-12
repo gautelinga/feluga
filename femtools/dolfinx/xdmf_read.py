@@ -8,7 +8,7 @@ The file's nodes are matched to the dofs of a plain Lagrange space of the file's
 by position, and that field is interpolated onto u's space, any degree and periodicity
 (a periodic field, written on both sides of the period, is the same there). Each rank
 reads one block of the file's nodes; nodes and dofs meet by position
-(`femtools.xdmf.match_nodes`): nothing is read whole. A scalar or vector u (not a mixed
+(`femtools.xdmf.read_nodes_at`): nothing is read whole. A scalar or vector u (not a mixed
 one: read its components), with as many components as the file's field. Collective.
 """
 import numpy as np
@@ -34,8 +34,7 @@ def read_nodal(path, name, counter, u):
     """Step `counter` (an index into the steps holding `name`, negative from the end)
     of field `name` into the DOLFINx Function u, its array ghosts included. Returns u."""
     from dolfinx import fem
-    from femtools.hdf5_rows import agreed, as_rows, extent
-    from femtools.xdmf import _NODAL_DEGREE, _block_of, _scan, match_nodes
+    from femtools.xdmf import _NODAL_DEGREE, _scan, read_nodes_at
 
     picked = [g for g in _scan(path) if name in g["attributes"]]
     if not picked:
@@ -61,17 +60,7 @@ def read_nodal(path, name, counter, u):
     plain = _plain_space(V, degree, bs)
     x = plain.tabulate_dof_coordinates()[:, :gdim]
 
-    coords = as_rows(np.asarray(_block_of(path, grid["geometry_item"], comm), dtype=float))
-    values = as_rows(_block_of(path, grid["attributes"][name], comm))
-    if coords.shape[1] < gdim:
-        coords = np.hstack((coords, np.zeros((len(coords), gdim - coords.shape[1]))))
-    coords = np.ascontiguousarray(coords[:, :gdim])
-    lo, hi = extent(coords, comm, gdim)
-    tol = 1e-9 * max(float(np.max(hi - lo)) if len(lo) else 0.0, 1.0)
-    found, far = match_nodes(comm, coords, values, x, tol, lo)
-    if agreed(comm, far > tol):
-        raise ValueError("a dof sits farther than {:.1e} from every node in {}, so the mesh is "
-                         "not the one the field was written on".format(tol, path))
+    found = read_nodes_at(path, grid, name, x, comm)
     f = fem.Function(plain)
     f.x.array[:] = np.asarray(found[:, :bs], dtype=float).reshape(-1)
     u.interpolate(f)

@@ -7,11 +7,10 @@ upper periodic face down by the box length, so an edge or corner dof maps to the
 corner in one step. The dof at the image is its master; masters are never on an upper
 periodic face, so there are no chains.
 
-Matching is by coordinates, in parallel, without gathering a face anywhere: each owned
-candidate master (a dof on a lower periodic face and on no upper one) goes to the rank
-its position's bin hashes to, each local (owned and ghost) slave to the ranks of the
-bins a master within tol of its image may be in; they meet there in a KD-tree, and each
-slave hears its master's global index back. `tol` is relative to the box
+Matching is by coordinates, in parallel, without gathering a face anywhere: the owned
+candidate masters (dofs on a lower periodic face and on no upper one) and the local
+(owned and ghost) slaves' images meet by position (`femtools.hdf5_rows.match_nodes`), and
+each slave hears its master's global index back. `tol` is relative to the box
 (`femtools.periodic_core.box_scale`).
 
     slaves, masters = periodic_box(V, upper=(Lx, Ly), periodic=(True, False))
@@ -25,16 +24,8 @@ import numpy as np
 
 def box_extent(mesh):
     """The mesh's bounding box over all ranks, as two 3-vectors."""
-    from mpi4py import MPI
-
-    x = mesh.geometry.x
-    lo_loc = x.min(axis=0) if len(x) else np.full(3, np.inf)
-    hi_loc = x.max(axis=0) if len(x) else np.full(3, -np.inf)
-    lo, hi = np.empty(3), np.empty(3)
-    # Buffer Allreduce: the pickle-based allreduce compares whole arrays with MIN/MAX.
-    mesh.comm.Allreduce(np.ascontiguousarray(lo_loc, dtype=float), lo, op=MPI.MIN)
-    mesh.comm.Allreduce(np.ascontiguousarray(hi_loc, dtype=float), hi, op=MPI.MAX)
-    return lo, hi
+    from femtools.hdf5_rows import extent
+    return extent(mesh.geometry.x, mesh.comm, 3)
 
 
 def flat_collapse_map(dofs):
@@ -47,18 +38,13 @@ def flat_collapse_map(dofs):
     return np.asarray(dofs, dtype=np.int32)
 
 
-def _pad3(v, fill):
-    v = np.asarray(v, dtype=float)
-    return np.concatenate([v, np.full(3 - len(v), fill)])
-
-
 def _pair(comm, x, n_owned, l2g, lower, upper, periodic, tol):
     """Slave local indices and master global indices for one set of coordinates `x`
-    (owned first, then ghosts) with global indices `l2g`; `tol` a length. Raises on
-    every rank alike when some slave has no master. Collective."""
-    from scipy.spatial import cKDTree
-
-    from femtools.hdf5_rows import allsum, rank_of, reply, route
+    (owned first, then ghosts) with global indices `l2g`; `tol` a length. The owned
+    candidate masters are the nodes and the slaves' images the points of
+    `hdf5_rows.match_nodes`. Raises on every rank alike when some slave has no master.
+    Collective."""
+    from femtools.hdf5_rows import allsum, match_nodes
 
     axes = np.flatnonzero(periodic)
     on_hi = np.zeros(len(x), dtype=bool)
@@ -72,27 +58,8 @@ def _pair(comm, x, n_owned, l2g, lower, upper, periodic, tol):
     slaves = np.flatnonzero(on_hi)
     cand = np.flatnonzero(on_lo & ~on_hi)
     cand = cand[cand < n_owned]  # each master contributed once, by its owner
-
-    # bins much wider than tol: a master goes to its own bin's rank, a slave to those of
-    # its image's bin and, where within tol of a bin's edge, the neighbour's
-    h = 1e3 * tol
-    size = comm.Get_size()
-    sent = route(comm, rank_of(np.floor(x[cand] / h).astype(np.int64), size),
-                 x[cand], l2g[cand])
-    pts, gids = sent.received
-    pts = pts.reshape(-1, 3)
-    y = image[slaves] / h
-    keys, of = _near_bins(y, 2 * tol / h)
-    asked = route(comm, rank_of(keys, size), image[slaves][of])
-    (q,) = asked.received
-    found = np.full(len(q), -1, np.int64)
-    if len(q) and len(pts):
-        dist, idx = cKDTree(pts).query(q.reshape(-1, 3), distance_upper_bound=tol)
-        ok = np.isfinite(dist)
-        found[ok] = gids[idx[ok]]
-    (found,) = reply(comm, asked, found)
-    master = np.full(len(slaves), -1, np.int64)
-    np.maximum.at(master, of, found)
+    found, distance = match_nodes(comm, x[cand], l2g[cand], image[slaves], tol, lower)
+    master = np.where(distance < tol, found[:, 0], -1)
     bad = master < 0
     n_bad = int(allsum(comm, int(bad.sum())))
     if n_bad:
@@ -101,22 +68,7 @@ def _pair(comm, x, n_owned, l2g, lower, upper, periodic, tol):
         raise RuntimeError(
             f"periodic_box: {n_bad} slave dofs have no master within {tol:g} "
             f"(first image {firsts[0]}); are the periodic faces congruent?")
-    return slaves.astype(np.int32), master
-
-
-def _near_bins(y, near):
-    """`(keys, index)`: each row's bin (`floor(y)`) and, in each coordinate within `near`
-    of a bin's edge, the neighbour's too -- every bin a point within `near` of it has."""
-    b = np.floor(y).astype(np.int64)
-    frac = y - b
-    keys, index = b, np.arange(len(y))
-    for d in range(3):
-        for step, m in ((-1, frac[:, d] <= near), (1, frac[:, d] >= 1 - near)):
-            mm = m[index]
-            extra = keys[mm].copy()
-            extra[:, d] += step
-            keys, index = np.vstack([keys, extra]), np.r_[index, index[mm]]
-    return keys, index
+    return slaves.astype(np.int32), master.astype(np.int64)
 
 
 def _scalar_leaves(V):
@@ -138,16 +90,16 @@ def periodic_box(V, upper=None, periodic=None, lower=None, tol=1e-8):
     Returns (slaves, masters): local dof indices (owned and ghost, unrolled) and the
     global dof index of each one's master.
     """
+    from femtools.periodic_core import box_scale, xyz
     mesh = V.mesh
     comm = mesh.comm
     gdim = mesh.geometry.dim
     lo_m, hi_m = box_extent(mesh)
-    lower = lo_m if lower is None else _pad3(lower, 0.0)
-    upper = hi_m if upper is None else _pad3(upper, 0.0)
+    lower = lo_m if lower is None else xyz(lower)
+    upper = hi_m if upper is None else xyz(upper)
     if periodic is None:
         periodic = [True] * gdim
     periodic = np.concatenate([np.asarray(periodic, bool), np.zeros(3 - len(periodic), bool)])
-    from femtools.periodic_core import box_scale
     atol = tol * box_scale(lower, upper)
 
     imap = V.dofmap.index_map

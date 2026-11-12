@@ -126,38 +126,19 @@ def on_planes(x, lower, upper, axes, tol):
 
 
 # how far (in units of tol) a node's position may lie from its partner's for the two
-# to be found by the keys they share: a node also goes under every rounding of its
-# position moved by up to this, so two nodes closer than this never miss each other on
-# a rounding boundary (refined partners differ by ~1e-16 of the box)
+# to be found by the keys they share (`hdf5_rows.near_keys`)
 NEAR = 0.01
-
-
-def near_keys(y, delta=NEAR):
-    """`(keys, index)`: every integer rounding of the rows of `y` (positions over tol)
-    moved by up to `delta` in each coordinate -- one row a point, more where a
-    coordinate lies within `delta` of a rounding boundary -- and the point each is of.
-    Two points within `2 delta` of each other share a key, and one of them's
-    `np.round` is among the other's keys."""
-    y = np.asarray(y, float).reshape(-1, 3)
-    lo, hi = np.round(y - delta).astype(np.int64), np.round(y + delta).astype(np.int64)
-    keys, index = lo, np.arange(len(y))
-    for d in range(3):
-        m = lo[index, d] != hi[index, d]
-        extra = keys[m].copy()
-        extra[:, d] = hi[index[m], d]
-        keys, index = np.vstack([keys, extra]), np.r_[index, index[m]]
-    return keys, index
 
 
 def _compare_sides(comm, lo, hi, a, L, tol, ex_lo=None, ex_hi=None):
     """`(n_lo, n_hi, bad_lo, bad_hi)` over every rank: the distinct nodes on each side of
     axis `a` (`hi` taken back by L[a]), and those of each with no partner on the other
     side and not exempt. A node is its rounded position (ghosted copies agree); it goes
-    under each of its `near_keys` to the rank the key hashes to, where the sides meet,
+    under each of its `hdf5_rows.near_keys` to the rank the key hashes to, where the sides meet,
     then with what it met to the rank of its rounded position, which deduplicates and
     counts. Only counts are reduced. Collective."""
     from mpi4py import MPI
-    from femtools.hdf5_rows import rank_of, reply, route
+    from femtools.hdf5_rows import near_keys, rank_of, reply, route
     hi = np.array(hi, float).reshape(-1, 3)
     hi[:, a] -= L[a]
     y = np.vstack([np.reshape(lo, (-1, 3)), hi]) / tol
@@ -166,7 +147,7 @@ def _compare_sides(comm, lo, hi, a, L, tol, ex_lo=None, ex_hi=None):
     ex = np.zeros(len(node), np.int64) if ex_lo is None else \
         np.r_[np.asarray(ex_lo, np.int64), np.asarray(ex_hi, np.int64)]
     # 1. the sides meet under each near key: a key met by both matches its nodes
-    keys, of = near_keys(y)
+    keys, of = near_keys(y, NEAR)
     routed = route(comm, rank_of(keys, comm.Get_size()), keys, side[of])
     k, s = routed.received
     met = np.zeros(len(k), np.int64)
@@ -214,10 +195,10 @@ def _faces_congruent_exempt(comm, x, exempt, L, axes, tol):
 
 def _at_positions(pts, where, tol):
     """Which of `pts` lie at one of the positions `where`, to `tol` (and never miss one
-    on a rounding boundary: `near_keys`)."""
+    on a rounding boundary: `hdf5_rows.near_keys`)."""
     if not len(pts) or not len(where):
         return np.zeros(len(pts), bool)
-    from femtools.hdf5_rows import find_rows, unique_rows
+    from femtools.hdf5_rows import find_rows, near_keys, unique_rows
     keys, of = near_keys(np.asarray(pts) / tol, 2 * NEAR)
     hit = find_rows(keys, unique_rows(np.round(np.asarray(where) / tol).astype(np.int64))) >= 0
     out = np.zeros(len(pts), bool)

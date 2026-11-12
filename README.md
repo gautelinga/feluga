@@ -116,9 +116,11 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   cell and vertex indices and dolfin's local dof order, so a checkpoint written by
   either backend, on any number of ranks, reads on the other. Values are a space's
   unique dofs (`UniqueDofs`); Lagrange P1/P2, scalar or mixed.
-- **`dolfinx.mesh`**: `read_mesh`, a DOLFINx mesh from dolfin's HDF5 layout, every rank
-  reading its block; a cell's original index is its global id in the file, a vertex's
-  its row, so checkpoints name the same cells on both backends.
+- **`dolfinx.mesh`**: `read_mesh` and `write_mesh`, DOLFINx meshes in dolfin's HDF5
+  layout, every rank reading or writing its block; a cell's original index is its
+  global id in the file, a vertex's its row, so checkpoints name the same cells on both
+  backends. `write_boundary_facets` writes marked boundary facets as
+  `BoundaryMarkers.write` does (the file partrac reads).
 - **`dolfinx.xdmf`**: `XDMFSeries`, time series of DOLFINx Functions in `XDMFFile2`'s
   layout -- the same XML word for word, quadratic cells for P2, the mesh stored once,
   every rank writing its own rows -- so `grids`, `merge_series` and

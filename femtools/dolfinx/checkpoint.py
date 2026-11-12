@@ -20,8 +20,8 @@ What makes the layouts meet, cell by cell:
   triangle (UFC's edge order in a tetrahedron); a mixed element's components one after
   the other. DOLFINx's local dofs are matched to those points by their coordinates.
 
-Continuous Lagrange elements of degree 1 and 2 on affine triangles and tetrahedra, and
-mixed elements of them. The file's dofs need not be numbered as here: a reader goes
+Continuous Lagrange elements of degree 1 and 2 on affine triangles and tetrahedra, vector
+(blocked) elements of them, and mixed elements of them. The file's dofs need not be numbered as here: a reader goes
 through the file's own `cells`, `cell_dofs` and `vector_0`.
 """
 import numpy as np
@@ -51,14 +51,20 @@ def _lagrange_degree(S):
     return degree
 
 
+def _blocked(V):
+    return V.dofmap.index_map_bs > 1
+
+
 def signature(V):
-    """dolfin's signature of V's element (scalar Lagrange, or mixed of them)."""
+    """dolfin's signature of V's element (scalar Lagrange, vector, or mixed)."""
     tdim = V.mesh.topology.dim
 
     def one(S):
         return "FiniteElement('Lagrange', {}, {})".format(CELLS[tdim], _lagrange_degree(S))
 
     parts = [one(S) for S in _components(V)]
+    if _blocked(V):
+        return "VectorElement({}, dim={})".format(parts[0], len(parts))
     return parts[0] if V.element.num_sub_elements == 0 else \
         "MixedElement({})".format(", ".join(parts))
 
@@ -69,7 +75,7 @@ def _dof_coordinates(V):
     if V.element.num_sub_elements == 0:
         return V.tabulate_dof_coordinates()
     imap = V.dofmap.index_map
-    X = np.zeros((imap.size_local + imap.num_ghosts, 3))
+    X = np.zeros(((imap.size_local + imap.num_ghosts) * V.dofmap.index_map_bs, 3))
     for S in _components(V):
         Sc, parent = S.collapse()
         X[flat_collapse_map(parent)] = Sc.tabulate_dof_coordinates()
@@ -81,7 +87,8 @@ _TABLES = {}
 
 def dolfin_cell_dofs(V):
     """`(gc, D)`: this rank's own cells' global ids (uint64), and for each cell V's local
-    dofs in dolfin's order, a row a cell. Built once per space."""
+    dofs in dolfin's order (unrolled for a vector space), a row a cell. Built once per
+    space."""
     key = id(V)
     if key in _TABLES and _TABLES[key][0] is V:
         return _TABLES[key][1]
@@ -228,7 +235,7 @@ def read_function(path, name, V, U):
     file_dofs = fetch_rows(path, name + "/cell_dofs", flat, comm).astype(np.int64)
     vals = fetch_rows(path, name + "/vector_0", file_dofs, comm)
     imap = V.dofmap.index_map
-    full = np.full(imap.size_local + imap.num_ghosts, np.nan)
+    full = np.full((imap.size_local + imap.num_ghosts) * V.dofmap.index_map_bs, np.nan)
     full[D.reshape(-1)] = vals
     out = full[U.owned_unique]
     if agreed(comm, bool(np.any(np.isnan(out)))):

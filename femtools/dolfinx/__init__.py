@@ -12,8 +12,9 @@
     femtools.dolfinx.checkpoint  Functions in dolfin's HDF5 layout (femtools.dolfin_layout),
                                written and read: checkpoints across the backends and the
                                numbers of ranks
-    femtools.dolfinx.mesh      read_mesh: a mesh from dolfin's HDF5 layout, numbered as the
-                               file (dolfin's global cell and vertex ids)
+    femtools.dolfinx.mesh      read_mesh / write_mesh: meshes in dolfin's HDF5 layout,
+                               numbered as dolfin numbers them; write_boundary_facets, as
+                               femtools.boundary_markers writes a facet MeshFunction
     femtools.dolfinx.xdmf      XDMFSeries: time series in femtools.xdmf.XDMFFile2's layout
                                (quadratic grids kept), the same files as dolfin's
 

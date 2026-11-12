@@ -76,7 +76,56 @@ def read_dolfinx(folder, out):
             json.dump(res, fh)
 
 
+def write_dolfinx(folder):
+    """A rectangle's mesh and its walls (y = 0 marked 2, y = 2 marked 3), written by
+    DOLFINx in dolfin's layouts."""
+    import dolfinx.mesh as dmesh
+    from mpi4py import MPI
+    from femtools.dolfinx.mesh import write_boundary_facets, write_mesh
+    mesh = dmesh.create_rectangle(MPI.COMM_WORLD, [[0, 0], [1, 2]], [5, 7],
+                                  dmesh.CellType.triangle, diagonal=dmesh.DiagonalType.crossed)
+    write_mesh(os.path.join(folder, "x_mesh.h5"), mesh)
+    tdim = mesh.topology.dim
+    mesh.topology.create_entities(tdim - 1)
+    imap = mesh.topology.index_map(tdim - 1)
+    values = np.zeros(imap.size_local + imap.num_ghosts, dtype=np.int64)
+    for y, m in ((0.0, 2), (2.0, 3)):
+        values[dmesh.locate_entities_boundary(mesh, tdim - 1,
+                                              lambda X, y=y: np.isclose(X[1], y))] = m
+    write_boundary_facets(os.path.join(folder, "x_walls.xdmf"), mesh, values)
+
+
+def check_dolfin(folder, out):
+    """dolfin reads DOLFINx's mesh (the same cells and vertices as its own rectangle),
+    and writes the same walls with BoundaryMarkers: the facet files agree."""
+    import dolfin as df
+    from femtools import boundaries
+    from femtools.boundary_markers import BoundaryMarkers
+    ref = df.RectangleMesh(df.Point(0, 0), df.Point(1, 2), 5, 7, "crossed")
+    m = df.Mesh()
+    with df.HDF5File(df.MPI.comm_world, os.path.join(folder, "x_mesh.h5"), "r") as h:
+        h.read(m, "mesh", False)
+    res = {"mesh_cells": np.array_equal(np.sort(m.cells(), axis=1), np.sort(ref.cells(), axis=1)),
+           "mesh_x": bool(np.allclose(m.coordinates(), ref.coordinates(), atol=1e-14))}
+    b = BoundaryMarkers(ref)
+    df.CompiledSubDomain("on_boundary && near(x[1], 0)").mark(b, 2)
+    df.CompiledSubDomain("on_boundary && near(x[1], 2)").mark(b, 3)
+    b.write(os.path.join(folder, "d_walls.xdmf"))
+
+    def facet_set(path):
+        points, facets, markers = boundaries.read(path)
+        return sorted((tuple(sorted(map(tuple, np.round(points[f], 12)))), int(k))
+                      for f, k in zip(facets, markers))
+    res["walls"] = facet_set(os.path.join(folder, "x_walls.xdmf")) == \
+        facet_set(os.path.join(folder, "d_walls.xdmf"))
+    res["n_walls"] = len(facet_set(os.path.join(folder, "x_walls.xdmf")))
+    with open(out, "w") as fh:
+        json.dump({k: (bool(v) if isinstance(v, (bool, np.bool_)) else v) for k, v in res.items()}, fh)
+
+
 if __name__ == "__main__":
     mode, folder = sys.argv[1:3]
     {"write-dolfin": lambda: write_dolfin(folder),
-     "read-dolfinx": lambda: read_dolfinx(folder, sys.argv[3])}[mode]()
+     "read-dolfinx": lambda: read_dolfinx(folder, sys.argv[3]),
+     "write-dolfinx": lambda: write_dolfinx(folder),
+     "check-dolfin": lambda: check_dolfin(folder, sys.argv[3])}[mode]()

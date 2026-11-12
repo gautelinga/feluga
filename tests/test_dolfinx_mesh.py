@@ -36,3 +36,17 @@ def test_dolfin_mesh_on_dolfinx(tmp_path, ranks):
         assert not res[name + "_identity_ids"], name + ": the test needs scrambled ids"
         assert res[name + "_field"] < 1e-13, name
         assert res[name + "_cells_global"] == n_cells, name
+
+
+@pytest.mark.parametrize("ranks", [1, 3])
+def test_dolfinx_mesh_and_walls_on_dolfin(tmp_path, ranks):
+    """DOLFINx writes a mesh and its marked walls in dolfin's layouts; dolfin reads the
+    mesh as its own rectangle, and its BoundaryMarkers write the same facets."""
+    pytest.importorskip("dolfin")
+    env = {"PYTHONPATH": ROOT}
+    support.run([sys.executable, WORKER, "write-dolfinx", str(tmp_path)], ranks, env=env)
+    out = tmp_path / "res.json"
+    support.run([sys.executable, WORKER, "check-dolfin", str(tmp_path), str(out)], 1, env=env)
+    res = json.loads(out.read_text())
+    assert res["mesh_cells"] and res["mesh_x"]
+    assert res["walls"] and res["n_walls"] == 2 * 5   # 5 facets on each wall

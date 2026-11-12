@@ -18,7 +18,7 @@ import numpy as np
 LX, LY, NX, NY = 1.0, 2.0, 6, 10
 # name: (component degrees, periodic in x)
 SPACES = {"P2": ((2,), True), "P1": ((1,), True), "W22": ((2, 2), True),
-          "W21": ((2, 1), True), "P2_walls": ((2,), False)}
+          "W21": ((2, 1), True), "P2_walls": ((2,), False), "V2": ("vector", True)}
 
 
 def f(x, y):
@@ -40,6 +40,10 @@ def dolfin_spaces():
     out = {}
     for name, (degrees, periodic) in SPACES.items():
         cd = periodic_box_from_bounds({0: (0.0, LX)}) if periodic else None
+        if degrees == "vector":
+            V = df.VectorFunctionSpace(mesh, "CG", 2, constrained_domain=cd)
+            out[name] = (V, df.interpolate(df.Expression((F_CPP, G_CPP), LX=LX, degree=4), V))
+            continue
         els = [df.FiniteElement("CG", mesh.ufl_cell(), d) for d in degrees]
         el = els[0] if len(els) == 1 else df.MixedElement(els)
         V = df.FunctionSpace(mesh, el, constrained_domain=cd)
@@ -59,13 +63,20 @@ def dolfinx_spaces():
                                  dmesh.CellType.triangle, diagonal=dmesh.DiagonalType.right)
     out = {}
     for name, (degrees, periodic) in SPACES.items():
-        els = [basix.ufl.element("Lagrange", "triangle", d) for d in degrees]
-        V = fem.functionspace(msh, els[0] if len(els) == 1 else basix.ufl.mixed_element(els))
+        if degrees == "vector":
+            V = fem.functionspace(msh, ("Lagrange", 2, (2,)))
+        else:
+            els = [basix.ufl.element("Lagrange", "triangle", d) for d in degrees]
+            V = fem.functionspace(msh, els[0] if len(els) == 1 else basix.ufl.mixed_element(els))
         U = UniqueDofs(V, *periodic_box(V, periodic=(True, False))) if periodic else UniqueDofs(V)
         imap = V.dofmap.index_map
-        n_loc = imap.size_local + imap.num_ghosts
+        bs = V.dofmap.index_map_bs
+        n_loc = (imap.size_local + imap.num_ghosts) * bs
         X, comp = np.zeros((n_loc, 3)), np.zeros(n_loc, dtype=int)
-        if len(degrees) == 1:
+        if degrees == "vector":
+            X = np.repeat(V.tabulate_dof_coordinates(), bs, axis=0)
+            comp = np.tile(np.arange(bs), n_loc // bs)
+        elif len(degrees) == 1:
             X = V.tabulate_dof_coordinates()
         else:
             for i in range(len(degrees)):

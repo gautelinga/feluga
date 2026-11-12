@@ -44,6 +44,17 @@ def transfer(V, W):
     return T
 
 
+def forget(V):
+    """Drop every transfer onto or from the space V, and the values buffer on it: for the
+    owner of a space it built for a while (`femtools.xdmf`), whose transfers would
+    otherwise stay until 64 newer ones pushed them out."""
+    i = V.id()
+    for key in [k for k in _TRANSFERS if i in k]:
+        T = _TRANSFERS.pop(key)
+        if hasattr(T, 'destroy'):
+            T.destroy()
+
+
 def _selection(V, source, dofs):
     """The matrix from the mixed vector to the component's collapsed space: a one in
     each row, at the mixed dof that the row's collapsed dof is."""

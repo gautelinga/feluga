@@ -1,0 +1,43 @@
+"""`femtools.dolfinx.legacy`: dolfin's object API on DOLFINx. A Function's DOLFINx writes
+reach its compact vector, a Dirichlet condition on periodic slaves constrains their
+masters on any number of ranks, and a periodic Poisson solve through dolfin's names
+gives the exact quadratic -- on one rank and on three.
+
+    python3 -m pytest tests/test_dolfinx_legacy.py [-m mpi]
+"""
+import json
+import os
+import sys
+
+import pytest
+
+pytest.importorskip("dolfinx")
+pytestmark = [pytest.mark.dolfinx]
+
+from tests import support  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
+
+def _run(tmp_path, ranks):
+    out = tmp_path / "legacy.{}.json".format(ranks)
+    support.run([sys.executable, os.path.join(HERE, "dolfinx_legacy_worker.py"), str(out)],
+                ranks, env={"PYTHONPATH": ROOT})
+    return json.loads(out.read_text())
+
+
+def _check(r):
+    assert r["interpolate"] == pytest.approx(1.0) and r["array"] == pytest.approx(2.0)
+    assert r["n_unique"] == 72              # 81 nodes, the 9 on x = 1 slaves
+    assert r["bc_rows"] == 5                # y = 0, x >= 1/2: 5 masters
+    assert r["poisson"] < 1e-3
+
+
+def test_one_rank(tmp_path):
+    _check(_run(tmp_path, 1))
+
+
+@pytest.mark.mpi
+def test_three_ranks(tmp_path):
+    _check(_run(tmp_path, 3))

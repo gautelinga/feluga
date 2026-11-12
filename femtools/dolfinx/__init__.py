@@ -12,6 +12,8 @@
     femtools.dolfinx.checkpoint  Functions in dolfin's HDF5 layout (femtools.dolfin_layout),
                                written and read: checkpoints across the backends and the
                                numbers of ranks
+    femtools.dolfinx.xdmf      XDMFSeries: time series in femtools.xdmf.XDMFFile2's layout
+                               (quadratic grids kept), the same files as dolfin's
 
 A solver algorithm built on these sees PETSc vectors and matrices over unique dofs only,
 as dolfin's constrained_domain gives it, whatever the periodicity. `import

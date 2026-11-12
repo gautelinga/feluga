@@ -20,11 +20,12 @@
 //    and partners) and a count of the children before refining, both from
 //    plaza_periodic.
 //
-// Partner edges are found without gathering a face on any rank: each rank sends each
-// owned edge on an identified face to a rank chosen by a hash of its periodic image
-// (edges near a bin boundary to the neighbouring bins too), partners meet there and are
-// told of each other. The ranks to send to are found by DOLFINx's NBX graph discovery;
-// marks then travel on a neighbourhood communicator over the partner ranks.
+//  - in 2D, a triangle is split uniformly when its edges' ratio passes within a relative
+//    1e-10 (DOLFINx's test is exact, so a right isosceles triangle hangs on rounding).
+//
+// The tie rule, the 2D ratio test, the partner pairing and the mark exchange are
+// femtools/cpp/plaza_periodic_rules.h, shared with the dolfin module: one algorithm on
+// both backends, the same cells from the same mesh.
 
 #include <algorithm>
 #include <array>
@@ -59,6 +60,8 @@
 #include <dolfinx/refinement/refine.h>
 #include <dolfinx/refinement/utils.h>
 
+#include "plaza_periodic_rules.h"
+
 namespace nb = nanobind;
 using namespace dolfinx;
 using T = double;
@@ -66,44 +69,10 @@ using T = double;
 namespace
 {
 
-std::int64_t allsum(MPI_Comm comm, std::int64_t v)
-{
-  std::int64_t out;
-  MPI_Allreduce(&v, &out, 1, MPI_INT64_T, MPI_SUM, comm);
-  return out;
-}
-
-std::int64_t allmax(MPI_Comm comm, std::int64_t v)
-{
-  std::int64_t out;
-  MPI_Allreduce(&v, &out, 1, MPI_INT64_T, MPI_MAX, comm);
-  return out;
-}
-
-struct Box
-{
-  std::array<double, 3> lower, upper;
-  std::vector<int> axes;
-  double tol;
-};
-
-// A position with each upper periodic plane mapped onto the lower one
-std::array<double, 3> periodic_key(const double* x, const Box& box)
-{
-  std::array<double, 3> k = {x[0], x[1], x[2]};
-  for (int a : box.axes)
-    if (std::abs(k[a] - box.upper[a]) < box.tol)
-      k[a] = box.lower[a];
-  return k;
-}
-
-bool key_less(const std::array<double, 3>& p, const std::array<double, 3>& q, double tol)
-{
-  for (int d = 0; d < 3; ++d)
-    if (std::abs(p[d] - q[d]) > tol)
-      return p[d] < q[d];
-  return false;
-}
+using femtools_plaza::allmax;
+using femtools_plaza::allsum;
+using femtools_plaza::Box;
+using femtools_plaza::Partners;
 
 // Every local vertex's coordinates (owned and ghost), through the geometry
 std::vector<double> vertex_coordinates(const mesh::Mesh<T>& mesh)
@@ -124,7 +93,7 @@ std::vector<double> vertex_coordinates(const mesh::Mesh<T>& mesh)
   return vx;
 }
 
-// DOLFINx's face_long_edge with plaza_periodic's tie rule (see the header)
+// DOLFINx's face_long_edge with the shared tie rule, and the 2D uniform-split test
 std::pair<std::vector<std::int32_t>, std::vector<std::int8_t>>
 face_long_edge(const mesh::Mesh<T>& mesh, const std::vector<double>& vx, const Box& box)
 {
@@ -139,287 +108,59 @@ face_long_edge(const mesh::Mesh<T>& mesh, const std::vector<double>& vx, const B
   for (std::int32_t e = 0; e < ne; ++e)
   {
     auto v = e_to_v->links(e);
-    double s = 0;
-    for (int d = 0; d < 3; ++d)
-    {
-      const double dd = vx[3 * v[0] + d] - vx[3 * v[1] + d];
-      s += dd * dd;
-    }
-    length[e] = std::sqrt(s);
+    length[e] = femtools_plaza::distance(&vx[3 * v[0]], &vx[3 * v[1]]);
   }
   const std::int32_t nf = f_to_v->num_nodes();
   std::vector<std::int32_t> long_edge(nf);
   std::vector<std::int8_t> edge_ratio_ok;
   if (tdim == 2)
     edge_ratio_ok.resize(nf);
-  const double min_ratio = std::sqrt(2.0) / 2.0;
   for (std::int32_t f = 0; f < nf; ++f)
   {
     auto edges = f_to_e->links(f);
     auto verts = f_to_v->links(f);   // edge i is opposite vertex i
-    double max_len = 0, min_len = std::numeric_limits<double>::max();
-    for (int i = 0; i < 3; ++i)
-    {
-      max_len = std::max(max_len, length[edges[i]]);
-      min_len = std::min(min_len, length[edges[i]]);
-    }
-    int imax = 3;
-    std::array<double, 3> best = {0, 0, 0};
-    for (int i = 0; i < 3; ++i)
-    {
-      if (length[edges[i]] < max_len * (1.0 - 1e-10))
-        continue;
-      const auto k = periodic_key(&vx[3 * verts[i]], box);
-      if (imax == 3 or key_less(best, k, box.tol))
-      {
-        imax = i;
-        best = k;
-      }
-    }
-    long_edge[f] = edges[imax];
+    const double len[3] = {length[edges[0]], length[edges[1]], length[edges[2]]};
+    const double* x[3] = {&vx[3 * verts[0]], &vx[3 * verts[1]], &vx[3 * verts[2]]};
+    long_edge[f] = edges[femtools_plaza::long_edge(len, x, box)];
     if (tdim == 2)
-      edge_ratio_ok[f] = (min_len / max_len >= min_ratio);
+      edge_ratio_ok[f] = femtools_plaza::uniform_ok(len);
   }
   return {std::move(long_edge), std::move(edge_ratio_ok)};
 }
 
-// Partners of the owned edges on identified faces: (local edge, partner rank, partner's
-// local edge), both ways, one axis at a time.
-struct Partners
-{
-  std::vector<std::int32_t> local;
-  std::vector<int> rank;
-  std::vector<std::int32_t> remote;
-};
-
+// Partners of the owned edges on identified faces (the shared pairing)
 Partners periodic_partners(const mesh::Mesh<T>& mesh, const std::vector<double>& vx,
                            const Box& box)
 {
-  MPI_Comm comm = mesh.comm();
-  const int size = dolfinx::MPI::size(comm), rank = dolfinx::MPI::rank(comm);
   auto topology = mesh.topology();
   auto e_to_v = topology->connectivity(1, 0);
   const std::int32_t n_owned = topology->index_map(1)->size_local();
-  double extent = 0;
-  for (int d = 0; d < 3; ++d)
-    extent = std::max(extent, box.upper[d] - box.lower[d]);
-  // the bins edges meet in: much wider than tol, small beside the box
-  const double h = std::max(1e3 * box.tol, 1e-6 * extent);
-  Partners out;
-
-  for (int a : box.axes)
+  std::vector<std::int32_t> ids;
+  std::vector<double> x;
+  for (std::int32_t e = 0; e < n_owned; ++e)
   {
-    // (dest) -> records: role (0 slave, 1 master), local edge, 6 key coordinates
-    std::map<int, std::vector<double>> send;
-    for (std::int32_t e = 0; e < n_owned; ++e)
-    {
-      auto v = e_to_v->links(e);
-      const double* x0 = &vx[3 * v[0]];
-      const double* x1 = &vx[3 * v[1]];
-      const bool up = std::abs(x0[a] - box.upper[a]) < box.tol
-                      and std::abs(x1[a] - box.upper[a]) < box.tol;
-      const bool lo = std::abs(x0[a] - box.lower[a]) < box.tol
-                      and std::abs(x1[a] - box.lower[a]) < box.tol;
-      if (!up and !lo)
-        continue;
-      std::array<double, 3> p = {x0[0], x0[1], x0[2]}, q = {x1[0], x1[1], x1[2]};
-      if (up)
-        p[a] = q[a] = box.lower[a];   // the slave's image, on the lower face
-      if (key_less(q, p, box.tol))
-        std::swap(p, q);
-      // bins of the midpoint, and the neighbouring ones when within tol of a boundary
-      std::array<std::vector<long>, 3> bins;
-      for (int d = 0; d < 3; ++d)
-      {
-        const double m = 0.5 * (p[d] + q[d]) / h;
-        const long b = static_cast<long>(std::floor(m));
-        bins[d].push_back(b);
-        const double frac = m - b;
-        if (frac < box.tol / h)
-          bins[d].push_back(b - 1);
-        if (frac > 1.0 - box.tol / h)
-          bins[d].push_back(b + 1);
-      }
-      std::set<int> dests;
-      for (long b0 : bins[0])
-        for (long b1 : bins[1])
-          for (long b2 : bins[2])
-          {
-            std::uint64_t key = static_cast<std::uint64_t>(b0) * 73856093ULL
-                                ^ static_cast<std::uint64_t>(b1) * 19349663ULL
-                                ^ static_cast<std::uint64_t>(b2) * 83492791ULL;
-            dests.insert(static_cast<int>(key % static_cast<std::uint64_t>(size)));
-          }
-      for (int dest : dests)
-      {
-        auto& s = send[dest];
-        s.insert(s.end(), {up ? 0.0 : 1.0, static_cast<double>(e), p[0], p[1], p[2], q[0],
-                           q[1], q[2]});
-      }
-    }
-
-    // to the bin owners (NBX discovery), matched there, answered back
-    std::vector<int> dest;
-    for (auto& kv : send)
-      dest.push_back(kv.first);
-    std::vector<int> src = dolfinx::MPI::compute_graph_edges_nbx(comm, dest);
-    std::ranges::sort(src);
-    MPI_Comm nbr;
-    MPI_Dist_graph_create_adjacent(comm, src.size(), src.data(), MPI_UNWEIGHTED,
-                                   dest.size(), dest.data(), MPI_UNWEIGHTED,
-                                   MPI_INFO_NULL, false, &nbr);
-    std::vector<int> scount, sdisp = {0};
-    std::vector<double> sbuf;
-    for (int d : dest)
-    {
-      scount.push_back(send[d].size());
-      sbuf.insert(sbuf.end(), send[d].begin(), send[d].end());
-      sdisp.push_back(sdisp.back() + scount.back());
-    }
-    std::vector<int> rcount(src.size()), rdisp(src.size() + 1, 0);
-    MPI_Neighbor_alltoall(scount.data(), 1, MPI_INT, rcount.data(), 1, MPI_INT, nbr);
-    std::partial_sum(rcount.begin(), rcount.end(), rdisp.begin() + 1);
-    std::vector<double> rbuf(rdisp.back());
-    MPI_Neighbor_alltoallv(sbuf.data(), scount.data(), sdisp.data(), MPI_DOUBLE,
-                           rbuf.data(), rcount.data(), rdisp.data(), MPI_DOUBLE, nbr);
-    MPI_Comm_free(&nbr);
-
-    // match: masters sorted by their first key point, each slave looked up within tol
-    struct Rec { int rank; std::int32_t edge; std::array<double, 6> k; };
-    std::vector<Rec> slaves, masters;
-    for (std::size_t s = 0; s < src.size(); ++s)
-      for (int i = rdisp[s]; i < rdisp[s + 1]; i += 8)
-      {
-        Rec r{src[s], static_cast<std::int32_t>(rbuf[i + 1]),
-              {rbuf[i + 2], rbuf[i + 3], rbuf[i + 4], rbuf[i + 5], rbuf[i + 6], rbuf[i + 7]}};
-        (rbuf[i] == 0.0 ? slaves : masters).push_back(r);
-      }
-    std::ranges::sort(masters, [](auto& x, auto& y) { return x.k[0] < y.k[0]; });
-    // replies, by the rank they go to: (my local edge, partner rank, partner edge)
-    std::map<int, std::vector<std::int64_t>> reply;
-    std::set<std::pair<int, std::int32_t>> done;   // a pair met in several bins: once
-    for (auto& s : slaves)
-    {
-      auto it = std::lower_bound(masters.begin(), masters.end(), s.k[0] - box.tol,
-                                 [](const Rec& m, double v) { return m.k[0] < v; });
-      for (; it != masters.end() and it->k[0] <= s.k[0] + box.tol; ++it)
-      {
-        bool same = true;
-        for (int d = 0; d < 6; ++d)
-          same &= std::abs(it->k[d] - s.k[d]) <= box.tol;
-        if (!same)
-          continue;
-        if (done.insert({s.rank, s.edge}).second)
-        {
-          auto& rs = reply[s.rank];
-          rs.insert(rs.end(), {s.edge, it->rank, it->edge});
-          auto& rm = reply[it->rank];
-          rm.insert(rm.end(), {it->edge, s.rank, s.edge});
-        }
-        break;
-      }
-    }
-    std::vector<int> rdest;
-    for (auto& kv : reply)
-      rdest.push_back(kv.first);
-    std::vector<int> rsrc = dolfinx::MPI::compute_graph_edges_nbx(comm, rdest);
-    std::ranges::sort(rsrc);
-    MPI_Dist_graph_create_adjacent(comm, rsrc.size(), rsrc.data(), MPI_UNWEIGHTED,
-                                   rdest.size(), rdest.data(), MPI_UNWEIGHTED,
-                                   MPI_INFO_NULL, false, &nbr);
-    std::vector<int> c2, d2 = {0};
-    std::vector<std::int64_t> b2;
-    for (int d : rdest)
-    {
-      c2.push_back(reply[d].size());
-      b2.insert(b2.end(), reply[d].begin(), reply[d].end());
-      d2.push_back(d2.back() + c2.back());
-    }
-    std::vector<int> rc2(rsrc.size()), rd2(rsrc.size() + 1, 0);
-    MPI_Neighbor_alltoall(c2.data(), 1, MPI_INT, rc2.data(), 1, MPI_INT, nbr);
-    std::partial_sum(rc2.begin(), rc2.end(), rd2.begin() + 1);
-    std::vector<std::int64_t> rb2(rd2.back());
-    MPI_Neighbor_alltoallv(b2.data(), c2.data(), d2.data(), MPI_INT64_T, rb2.data(),
-                           rc2.data(), rd2.data(), MPI_INT64_T, nbr);
-    MPI_Comm_free(&nbr);
-    std::int64_t n_slaves_here = 0;
-    for (std::int32_t e = 0; e < n_owned; ++e)
-    {
-      auto v = e_to_v->links(e);
-      n_slaves_here += std::abs(vx[3 * v[0] + a] - box.upper[a]) < box.tol
-                       and std::abs(vx[3 * v[1] + a] - box.upper[a]) < box.tol;
-    }
-    // a pair met in bins on two ranks is answered twice: once is enough
-    std::vector<std::array<std::int64_t, 3>> got;
-    for (std::size_t i = 0; i < rb2.size(); i += 3)
-      got.push_back({rb2[i], rb2[i + 1], rb2[i + 2]});
-    std::ranges::sort(got);
-    got.erase(std::unique(got.begin(), got.end()), got.end());
-    std::int64_t n_slave_partners = 0;
-    for (auto& g : got)
-    {
-      const std::int32_t e = g[0];
-      out.local.push_back(e);
-      out.rank.push_back(static_cast<int>(g[1]));
-      out.remote.push_back(static_cast<std::int32_t>(g[2]));
-      auto v = e_to_v->links(e);
-      n_slave_partners += std::abs(vx[3 * v[0] + a] - box.upper[a]) < box.tol
-                          and std::abs(vx[3 * v[1] + a] - box.upper[a]) < box.tol;
-    }
-    const std::int64_t missing = allsum(comm, n_slaves_here - n_slave_partners);
-    if (missing != 0)
-      throw std::runtime_error(
-          "refine_periodic: edges on an upper periodic face have no partner on the lower "
-          "one: the identified faces are not congruent");
-    (void)rank;
+    auto v = e_to_v->links(e);
+    double p[6];
+    std::copy_n(&vx[3 * v[0]], 3, p);
+    std::copy_n(&vx[3 * v[1]], 3, p + 3);
+    if (!femtools_plaza::on_identified_plane(p, 2, box))
+      continue;
+    ids.push_back(e);
+    x.insert(x.end(), p, p + 6);
   }
-  return out;
+  return femtools_plaza::pair<2>(mesh.comm(), ids, x, box);
 }
 
-// A neighbourhood communicator over the partner ranks, both ways (the list is symmetric)
-MPI_Comm partner_comm(MPI_Comm comm, const Partners& p, std::vector<int>& ranks)
-{
-  ranks.assign(p.rank.begin(), p.rank.end());
-  std::ranges::sort(ranks);
-  ranks.erase(std::unique(ranks.begin(), ranks.end()), ranks.end());
-  MPI_Comm nbr;
-  MPI_Dist_graph_create_adjacent(comm, ranks.size(), ranks.data(), MPI_UNWEIGHTED,
-                                 ranks.size(), ranks.data(), MPI_UNWEIGHTED, MPI_INFO_NULL,
-                                 false, &nbr);
-  return nbr;
-}
-
-// The partners' marks: for each partner of a marked local edge, the partner is marked;
-// returns how many local edges this marked (owned ones; their ghosts follow through
+// Marks from the partners: each local edge whose partner is marked is marked; returns
+// how many this marked (owned ones; their ghosts follow through
 // update_logical_edgefunction, whose sends are collected in `for_update`).
-std::int64_t exchange_partner_marks(MPI_Comm nbr, const std::vector<int>& ranks,
-                                    const Partners& p, std::span<std::int8_t> marks,
+std::int64_t exchange_partner_marks(const femtools_plaza::Exchange& exchange,
+                                    std::span<std::int8_t> marks,
                                     const graph::AdjacencyList<int>& edge_ranks,
                                     std::vector<std::vector<std::int32_t>>& for_update)
 {
-  std::vector<std::vector<std::int32_t>> send(ranks.size());
-  for (std::size_t i = 0; i < p.local.size(); ++i)
-    if (marks[p.local[i]])
-    {
-      auto it = std::ranges::lower_bound(ranks, p.rank[i]);
-      send[std::distance(ranks.begin(), it)].push_back(p.remote[i]);
-    }
-  std::vector<int> sc, sd = {0};
-  std::vector<std::int32_t> sb;
-  for (auto& s : send)
-  {
-    sc.push_back(s.size());
-    sb.insert(sb.end(), s.begin(), s.end());
-    sd.push_back(sd.back() + sc.back());
-  }
-  std::vector<int> rc(ranks.size()), rd(ranks.size() + 1, 0);
-  MPI_Neighbor_alltoall(sc.data(), 1, MPI_INT, rc.data(), 1, MPI_INT, nbr);
-  std::partial_sum(rc.begin(), rc.end(), rd.begin() + 1);
-  std::vector<std::int32_t> rb(rd.back());
-  MPI_Neighbor_alltoallv(sb.data(), sc.data(), sd.data(), MPI_INT32_T, rb.data(), rc.data(),
-                         rd.data(), MPI_INT32_T, nbr);
   std::int64_t changed = 0;
-  for (std::int32_t e : rb)
+  for (std::int32_t e : exchange.incoming([&](std::int32_t i) { return marks[i] != 0; }))
     if (!marks[e])
     {
       marks[e] = true;
@@ -431,7 +172,6 @@ std::int64_t exchange_partner_marks(MPI_Comm nbr, const std::vector<int>& ranks,
 }
 
 } // namespace
-
 // The refinement (see the header). `cells`: local cells to refine (each marks its
 // edges); `frozen`: local edges never to bisect. Returns (the new mesh, its parent
 // cells, partner-pair count, children summed and on the most loaded rank -- 0 unless
@@ -495,8 +235,7 @@ refine_periodic(const mesh::Mesh<T>& mesh, std::span<const std::int32_t> cells,
   MPI_Dist_graph_create_adjacent(comm, ranks.size(), ranks.data(), MPI_UNWEIGHTED,
                                  ranks.size(), ranks.data(), MPI_UNWEIGHTED, MPI_INFO_NULL,
                                  false, &ncomm);
-  std::vector<int> pranks;
-  MPI_Comm pcomm = partner_comm(comm, partners, pranks);
+  const femtools_plaza::Exchange exchange(comm, partners);
   const std::int32_t ne = map_e->size_local() + map_e->num_ghosts();
   auto c_to_e = topology->connectivity(tdim, 1);
   auto f_to_e = topology->connectivity(2, 1);
@@ -533,7 +272,7 @@ refine_periodic(const mesh::Mesh<T>& mesh, std::span<const std::int32_t> cells,
               for (int r : edge_ranks.links(e))
                 upd[r].push_back(e);
             }
-      changed += exchange_partner_marks(pcomm, pranks, partners, fz, edge_ranks, upd);
+      changed += exchange_partner_marks(exchange, fz, edge_ranks, upd);
       refinement::update_logical_edgefunction(ncomm, upd, fz, *map_e);
       for (auto& u : upd)
         u.clear();
@@ -577,11 +316,10 @@ refine_periodic(const mesh::Mesh<T>& mesh, std::span<const std::int32_t> cells,
     refinement::plaza::impl::enforce_rules(ncomm, edge_ranks, marked, *topology, long_edge);
     for (auto& u : upd)
       u.clear();
-    changed = exchange_partner_marks(pcomm, pranks, partners, marked, edge_ranks, upd);
+    changed = exchange_partner_marks(exchange, marked, edge_ranks, upd);
     refinement::update_logical_edgefunction(ncomm, upd, marked, *map_e);
     changed = allsum(comm, changed);
   }
-  MPI_Comm_free(&pcomm);
 
   if (freezing)
   {

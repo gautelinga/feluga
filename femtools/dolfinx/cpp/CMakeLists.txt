@@ -11,3 +11,5 @@ find_package(nanobind CONFIG REQUIRED)
 find_package(DOLFINX REQUIRED CONFIG)
 nanobind_add_module(plaza_periodic_x NOMINSIZE plaza_periodic.cpp)
 target_link_libraries(plaza_periodic_x PRIVATE dolfinx)
+# femtools/cpp/plaza_periodic_rules.h, shared with the dolfin module
+target_include_directories(plaza_periodic_x PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../cpp)

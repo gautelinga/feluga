@@ -20,24 +20,35 @@ so propagation and symmetry reach a joint fixed point. Everything it calls on
 `face_long_edge`, `enforce_rules` and `do_refine` are private, which is why they are
 reproduced here. A face's longest edge is chosen by position on ties, the same on both
 faces of a pair and on every rank (dolfin breaks ties on global vertex indices, which the
-two faces do not share).
+two faces do not share). In 2D a triangle is split into four similar ones when its edges'
+ratio allows (as dolfin's and DOLFINx's own refinement do), the test made with a relative
+1e-10 so a right isosceles triangle does not hang on rounding.
 
-Partners come from `PeriodicBoundaryComputation::compute_periodic_pairs`, dolfin's own
-cross-rank matching, with `femtools.periodic`'s `CppPeriodicBox` one axis at a time, so the
-refinement and the dofmap agree on which points are identified and no call crosses into
-Python. It gives the slave side only, so one all_to_all before the propagation tells each
-master its partner; every propagation round then exchanges the marks of the pairs. At one
-rank that is a local copy: serial and parallel are one code path. The final assembly calls
-`ParallelRefinement::partition` on more than one rank, as `PlazaRefinementND::refine` does.
+Partners are paired without gathering a face anywhere: each rank sends each owned edge on
+an identified face to a rank chosen by a hash of its periodic image, partners meet there
+and are told of each other; every propagation round then exchanges the marks of the pairs
+over a neighbourhood communicator. At one rank that is a local copy: serial and parallel
+are one code path. The final assembly calls `ParallelRefinement::partition` on more than
+one rank, as `PlazaRefinementND::refine` does.
+
+The tie rule, the 2D ratio test, the pairing and the exchange are
+femtools/cpp/plaza_periodic_rules.h, inlined here and shared with the DOLFINx port
+(`femtools.dolfinx.refine`): the same mesh refined on either backend gives the same cells.
 
 Parent facet markers are dropped; the parent-cell map is returned
 (`femtools.hierarchical_transfer` is built on it).
 
 No Python fallback: a compiler and `libdolfin-dev` are needed, and this raises without them.
 """
+import os
+
 import dolfin as df
 
-from femtools.periodic import PERIODIC_BOX_SOURCE
+from femtools.periodic_core import TooManyCells  # noqa: F401  (raised here)
+
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp",
+                       "plaza_periodic_rules.h")) as _f:
+    _RULES = _f.read()
 
 _CODE = r"""
 #include <pybind11/pybind11.h>
@@ -54,12 +65,11 @@ _CODE = r"""
 #include <dolfin/mesh/MeshEntityIterator.h>
 #include <dolfin/mesh/MeshFunction.h>
 #include <dolfin/common/Array.h>
-#include <dolfin/mesh/SubDomain.h>
-#include <dolfin/mesh/PeriodicBoundaryComputation.h>
 #include <dolfin/mesh/Cell.h>
 #include <dolfin/mesh/Edge.h>
 #include <dolfin/mesh/Face.h>
 #include <dolfin/mesh/Vertex.h>
+#include <dolfin/mesh/DistributedMeshTools.h>
 #include <dolfin/refinement/ParallelRefinement.h>
 #include <dolfin/refinement/PlazaRefinementND.h>
 #include <dolfin/common/MPI.h>
@@ -67,40 +77,10 @@ _CODE = r"""
 namespace py = pybind11;
 using namespace dolfin;
 
-// The periodic pairing itself is `femtools.periodic`'s CppPeriodicBox, embedded
-// here rather than restated: compute_periodic_pairs calls inside()/map() once per
-// exterior mesh entity per axis -- and "exterior" includes every bead-surface edge,
-// not just the box faces, so on the real packing that is of order a million calls
-// (measured: the call count scales exactly with surface, 9520 -> 38240 for a
-// 10^3 -> 20^3 cube). Through a Python-subclassed SubDomain each one crosses the
-// pybind boundary; defined here, none of them leave C++. This module uses it one
-// axis at a time, with a mask selecting that axis, which is exactly the single-axis
-// restriction of the general class the constraint is built with -- so the refinement
-// and the dofmap cannot disagree about which points are identified.
-""" + PERIODIC_BOX_SOURCE + r"""
+""" + _RULES + r"""
 
-// A vertex's position with each upper periodic plane mapped onto the lower one: the
-// same for a vertex and its periodic partner, and on every rank -- unlike its global
-// index, which the two faces number independently.
-std::array<double, 3> periodic_key(const Vertex& v, const std::vector<double>& lower,
-                                   const std::vector<double>& box,
-                                   const std::vector<std::size_t>& axes, double tol)
-{
-  std::array<double, 3> k = {0.0, 0.0, 0.0};
-  const std::size_t gdim = v.mesh().geometry().dim();
-  for (std::size_t d = 0; d < gdim; ++d)
-    k[d] = v.x(d);
-  for (auto a : axes)
-    if (std::abs(k[a] - box[a]) < tol) k[a] = lower[a];
-  return k;
-}
-
-bool key_less(const std::array<double, 3>& p, const std::array<double, 3>& q, double tol)
-{
-  for (std::size_t d = 0; d < 3; ++d)
-    if (std::abs(p[d] - q[d]) > tol) return p[d] < q[d];
-  return false;
-}
+using femtools_plaza::Box;
+using femtools_plaza::Partners;
 
 // dolfin's PlazaRefinementND::face_long_edge (private there), with the choice made the
 // same on the two faces of a periodic pair. dolfin takes the strictly longest edge and
@@ -110,98 +90,83 @@ bool key_less(const std::array<double, 3>& p, const std::array<double, 3>& q, do
 // edges equal to the last bit come out in either order, since partner coordinates agree
 // only to ~2e-16 -- so the faces bisected different edges and their triangulations
 // drifted apart ("flips"), invisible to a vertex check until a flipped edge was refined.
-// Here edges within a relative 1e-10 of the longest are tied, and a tie goes to the
-// largest periodic_key of the opposite vertex: a position, so the same on both faces and
-// on every rank, which is all dolfin's global index was there for.
-void face_long_edge(std::vector<unsigned int>& long_edge, const Mesh& mesh,
-                    const std::vector<double>& lower, const std::vector<double>& box,
-                    const std::vector<std::size_t>& axes, double tol)
+// The shared rule (femtools_plaza::long_edge) ties edges within a relative 1e-10 of the
+// longest and gives a tie to the largest periodic key of the opposite vertex. Also, in
+// 2D, whether each triangle may be split uniformly (femtools_plaza::uniform_ok).
+void face_long_edge(std::vector<unsigned int>& long_edge, std::vector<bool>& uniform,
+                    const Mesh& mesh, const std::vector<double>& vx, const Box& box)
 {
   mesh.init(1); mesh.init(2); mesh.init(2, 1);
   long_edge.resize(mesh.num_faces());
+  uniform.assign(mesh.topology().dim() == 2 ? mesh.num_faces() : 0, false);
   std::vector<double> edge_length(mesh.num_edges());
   for (EdgeIterator e(mesh); !e.end(); ++e)
     edge_length[e->index()] = e->length();
   for (FaceIterator f(mesh); !f.end(); ++f)
   {
     const unsigned int* face_edges = f->entities(1);
-    double max_len = 0.0;
-    for (unsigned int i = 0; i < 3; ++i)
-      max_len = std::max(max_len, edge_length[face_edges[i]]);
-    std::size_t imax = 3;
-    std::array<double, 3> best = {0.0, 0.0, 0.0};
-    for (unsigned int i = 0; i < 3; ++i)
-    {
-      if (edge_length[face_edges[i]] < max_len * (1.0 - 1e-10)) continue;
-      const std::array<double, 3> k
-        = periodic_key(Vertex(mesh, f->entities(0)[i]), lower, box, axes, tol);
-      if (imax == 3 || key_less(best, k, tol)) { imax = i; best = k; }
-    }
-    long_edge[f->index()] = face_edges[imax];
+    const unsigned int* face_verts = f->entities(0);
+    const double len[3] = {edge_length[face_edges[0]], edge_length[face_edges[1]],
+                           edge_length[face_edges[2]]};
+    const double* x[3] = {&vx[3 * face_verts[0]], &vx[3 * face_verts[1]],
+                          &vx[3 * face_verts[2]]};
+    long_edge[f->index()] = face_edges[femtools_plaza::long_edge(len, x, box)];
+    if (!uniform.empty())
+      uniform[f->index()] = femtools_plaza::uniform_ok(len);
   }
 }
 
-// For one periodic SubDomain (one axis), the bidirectional local<->remote edge partner
-// list: for every local edge that is a slave or a master under this identification,
-// (local index, remote rank, remote local index). Appends into the caller's arrays, so
-// several axes accumulate into one combined list -- an edge on a domain edge or corner,
-// identified by more than one axis at once, ends up in the list once per axis, which is
-// right: the marking loop unions over every pair it is given.
-//
-// PeriodicBoundaryComputation::compute_periodic_pairs gives the slave side only: a
-// slave's owning rank learns (master_rank, master_local), but the master's owning rank
-// is never told. The second half here is one more all_to_all telling it -- (my_rank,
-// slave_local) sent to master_rank -- built once, not per propagation iteration.
-void add_periodic_partners(const Mesh& mesh, const SubDomain& sub_domain,
-                           std::vector<std::size_t>& partner_local,
-                           std::vector<std::size_t>& partner_rank,
-                           std::vector<std::size_t>& partner_remote)
+// Every local vertex's position, padded to three components
+std::vector<double> vertex_coordinates(const Mesh& mesh)
 {
-  const MPI_Comm comm = mesh.mpi_comm();
-  const std::size_t num_ranks = dolfin::MPI::size(comm);
-
-  auto pairs = PeriodicBoundaryComputation::compute_periodic_pairs(mesh, sub_domain, 1);
-
-  for (auto& kv : pairs)
-  {
-    partner_local.push_back(kv.first);
-    partner_rank.push_back(kv.second.first);
-    partner_remote.push_back(kv.second.second);
-  }
-
-  std::vector<std::vector<std::size_t>> send(num_ranks);
-  for (auto& kv : pairs)
-  {
-    const std::size_t master_rank = kv.second.first;
-    send[master_rank].push_back(kv.second.second);  // master_local, on master_rank
-    send[master_rank].push_back(kv.first);           // slave_local, on this rank
-  }
-  std::vector<std::vector<std::size_t>> recv;
-  dolfin::MPI::all_to_all(comm, send, recv);
-  for (std::size_t p = 0; p < num_ranks; ++p)
-  {
-    const std::vector<std::size_t>& rp = recv[p];
-    for (std::size_t i = 0; i + 1 < rp.size(); i += 2)
-    {
-      partner_local.push_back(rp[i]);       // my local master edge
-      partner_rank.push_back(p);            // the rank holding its slave
-      partner_remote.push_back(rp[i + 1]);  // the slave's local index there
-    }
-  }
+  const std::size_t gdim = mesh.geometry().dim();
+  const std::vector<double>& x = mesh.coordinates();
+  const std::size_t nv = mesh.num_vertices();
+  std::vector<double> vx(3 * nv, 0.0);
+  for (std::size_t v = 0; v < nv; ++v)
+    for (std::size_t d = 0; d < gdim; ++d)
+      vx[3 * v + d] = x[gdim * v + d];
+  return vx;
 }
 
-// dolfin's enforce_rules, with the periodic correction generalised from a local pair
-// lookup to an MPI exchange over the partner list. At one rank, partner_rank[i] is
-// always 0 (this rank), so MPI::all_to_all degenerates to a local copy and the serial
-// and parallel cases are one code path.
+// The periodic partners of the edges this rank owns (no rank sharing the edge is lower,
+// dolfin's ownership), by the shared pairing. Marks reach the other copies of a shared
+// edge through ParallelRefinement::update_logical_edgefunction.
+Partners periodic_partners(const Mesh& mesh, const std::vector<double>& vx, const Box& box)
+{
+  const unsigned int rank = dolfin::MPI::rank(mesh.mpi_comm());
+  std::map<std::int32_t, std::set<unsigned int>> none;
+  if (dolfin::MPI::size(mesh.mpi_comm()) > 1)
+    DistributedMeshTools::number_entities(mesh, 1);
+  const auto& shared = dolfin::MPI::size(mesh.mpi_comm()) > 1
+                       ? mesh.topology().shared_entities(1) : none;
+  std::vector<std::int32_t> ids;
+  std::vector<double> x;
+  for (EdgeIterator e(mesh); !e.end(); ++e)
+  {
+    const unsigned int* ev = e->entities(0);
+    double p[6];
+    std::copy_n(&vx[3 * ev[0]], 3, p);
+    std::copy_n(&vx[3 * ev[1]], 3, p + 3);
+    if (!femtools_plaza::on_identified_plane(p, 2, box))
+      continue;
+    auto it = shared.find(e->index());
+    if (it != shared.end() and *it->second.begin() < rank)
+      continue;
+    ids.push_back(e->index());
+    x.insert(x.end(), p, p + 6);
+  }
+  return femtools_plaza::pair<2>(mesh.mpi_comm(), ids, x, box);
+}
+
+// dolfin's enforce_rules, alternated with the marks of the periodic partners, to a joint
+// fixed point. At one rank the exchange is a local copy: serial and parallel are one
+// code path.
 void enforce_rules_periodic(ParallelRefinement& p_ref, const Mesh& mesh,
                             const std::vector<unsigned int>& long_edge,
-                            const std::vector<std::size_t>& partner_local,
-                            const std::vector<std::size_t>& partner_rank,
-                            const std::vector<std::size_t>& partner_remote)
+                            const femtools_plaza::Exchange& exchange)
 {
   const MPI_Comm comm = mesh.mpi_comm();
-  const std::size_t num_ranks = dolfin::MPI::size(comm);
   std::size_t update_count = 1;
   while (update_count != 0)
   {
@@ -216,30 +181,8 @@ void enforce_rules_periodic(ParallelRefinement& p_ref, const Mesh& mesh,
         any_marked |= p_ref.is_marked(e->index());
       if (any_marked) { p_ref.mark(long_e); ++update_count; }
     }
-
-    std::vector<std::vector<std::size_t>> send(num_ranks);
-    for (std::size_t i = 0; i < partner_local.size(); ++i)
-    {
-      send[partner_rank[i]].push_back(partner_remote[i]);
-      send[partner_rank[i]].push_back(p_ref.is_marked(partner_local[i]) ? 1 : 0);
-    }
-    std::vector<std::vector<std::size_t>> recv;
-    dolfin::MPI::all_to_all(comm, send, recv);
-    for (std::size_t p = 0; p < num_ranks; ++p)
-    {
-      const std::vector<std::size_t>& rp = recv[p];
-      for (std::size_t i = 0; i + 1 < rp.size(); i += 2)
-      {
-        const std::size_t local_idx = rp[i];
-        const bool other_marked = rp[i + 1] != 0;
-        if (other_marked != p_ref.is_marked(local_idx))
-        {
-          p_ref.mark(local_idx);
-          ++update_count;
-        }
-      }
-    }
-
+    for (auto e : exchange.incoming([&](std::int32_t i) { return p_ref.is_marked(i); }))
+      if (!p_ref.is_marked(e)) { p_ref.mark(e); ++update_count; }
     update_count = dolfin::MPI::sum(comm, update_count);
   }
 }
@@ -253,12 +196,9 @@ void enforce_rules_periodic(ParallelRefinement& p_ref, const Mesh& mesh,
 void freeze_closure(ParallelRefinement& f_ref, const Mesh& mesh,
                     const std::vector<std::size_t>& seeds,
                     const std::vector<unsigned int>& long_edge,
-                    const std::vector<std::size_t>& partner_local,
-                    const std::vector<std::size_t>& partner_rank,
-                    const std::vector<std::size_t>& partner_remote)
+                    const femtools_plaza::Exchange& exchange)
 {
   const MPI_Comm comm = mesh.mpi_comm();
-  const std::size_t num_ranks = dolfin::MPI::size(comm);
   for (auto e : seeds) f_ref.mark(e);
   std::size_t update_count = 1;
   while (update_count != 0)
@@ -271,15 +211,8 @@ void freeze_closure(ParallelRefinement& f_ref, const Mesh& mesh,
       for (EdgeIterator e(*f); !e.end(); ++e)
         if (!f_ref.is_marked(e->index())) { f_ref.mark(e->index()); ++update_count; }
     }
-    std::vector<std::vector<std::size_t>> send(num_ranks);
-    for (std::size_t i = 0; i < partner_local.size(); ++i)
-      if (f_ref.is_marked(partner_local[i]))
-        send[partner_rank[i]].push_back(partner_remote[i]);
-    std::vector<std::vector<std::size_t>> recv;
-    dolfin::MPI::all_to_all(comm, send, recv);
-    for (std::size_t p = 0; p < num_ranks; ++p)
-      for (auto e : recv[p])
-        if (!f_ref.is_marked(e)) { f_ref.mark(e); ++update_count; }
+    for (auto e : exchange.incoming([&](std::int32_t i) { return f_ref.is_marked(i); }))
+      if (!f_ref.is_marked(e)) { f_ref.mark(e); ++update_count; }
     update_count = dolfin::MPI::sum(comm, update_count);
   }
 }
@@ -288,7 +221,8 @@ void freeze_closure(ParallelRefinement& f_ref, const Mesh& mesh,
 // parallel assembly (redistribute) rather than build_local when running on more than
 // one rank -- exactly what unmodified PlazaRefinementND::refine does.
 void do_refine(Mesh& new_mesh, const Mesh& mesh, ParallelRefinement& p_ref,
-               const std::vector<unsigned int>& long_edge, bool redistribute,
+               const std::vector<unsigned int>& long_edge,
+               const std::vector<bool>& uniform, bool redistribute,
                std::vector<std::size_t>& parent_cell)
 {
   const std::size_t tdim = mesh.topology().dim();
@@ -332,7 +266,8 @@ void do_refine(Mesh& new_mesh, const Mesh& mesh, ParallelRefinement& p_ref,
         for (EdgeIterator ej(*cell); !ej.end(); ++ej)
           if (p == ej->index()) { p = ej.pos(); break; }
 
-      PlazaRefinementND::get_simplices(simplex_set, markers, longest_edge, tdim, false);
+      PlazaRefinementND::get_simplices(simplex_set, markers, longest_edge, tdim,
+                                     tdim == 2 && uniform[cell->index()]);
       const std::size_t ncells = simplex_set.size() / num_cell_vertices;
       for (std::size_t i = 0; i != ncells; ++i)
         parent_cell.push_back(cell->index());
@@ -362,7 +297,8 @@ void do_refine(Mesh& new_mesh, const Mesh& mesh, ParallelRefinement& p_ref,
 // partition), so a refinement too large for what follows it can be refused before it
 // is paid for.
 std::pair<std::size_t, std::size_t> count_children(const Mesh& mesh, ParallelRefinement& p_ref,
-                                                   const std::vector<unsigned int>& long_edge)
+                                                   const std::vector<unsigned int>& long_edge,
+                                                   const std::vector<bool>& uniform)
 {
   const std::size_t tdim = mesh.topology().dim();
   const std::size_t num_cell_edges = tdim*3 - 3;
@@ -381,7 +317,8 @@ std::pair<std::size_t, std::size_t> count_children(const Mesh& mesh, ParallelRef
     for (auto &p : longest_edge)
       for (EdgeIterator ej(*cell); !ej.end(); ++ej)
         if (p == ej->index()) { p = ej.pos(); break; }
-    PlazaRefinementND::get_simplices(simplex_set, markers, longest_edge, tdim, false);
+    PlazaRefinementND::get_simplices(simplex_set, markers, longest_edge, tdim,
+                                     tdim == 2 && uniform[cell->index()]);
     n += simplex_set.size() / num_cell_vertices;
   }
   return std::make_pair(dolfin::MPI::sum(mesh.mpi_comm(), n),
@@ -408,17 +345,21 @@ py::tuple refine_periodic(Mesh& new_mesh, const Mesh& mesh,
                           std::size_t max_rank_cells,
                           const std::vector<std::size_t>& frozen)
 {
-  std::vector<unsigned int> long_edge;
-  face_long_edge(long_edge, mesh, lower, box, axes, tol);
-
-  std::vector<std::size_t> partner_local, partner_rank, partner_remote;
-  for (auto axis : axes)
+  Box pbox;
+  for (std::size_t d = 0; d < 3; ++d)
   {
-    std::vector<bool> mask(3, false);
-    mask[axis] = true;
-    CppPeriodicBox sub(lower, box, mask, tol, tol);
-    add_periodic_partners(mesh, sub, partner_local, partner_rank, partner_remote);
+    pbox.lower[d] = d < lower.size() ? lower[d] : 0.0;
+    pbox.upper[d] = d < box.size() ? box[d] : 0.0;
   }
+  pbox.axes.assign(axes.begin(), axes.end());
+  pbox.tol = tol;
+  std::vector<unsigned int> long_edge;
+  std::vector<bool> uniform;
+  const std::vector<double> vx = vertex_coordinates(mesh);
+  face_long_edge(long_edge, uniform, mesh, vx, pbox);
+  const Partners partners = periodic_partners(mesh, vx, pbox);
+  const femtools_plaza::Exchange exchange(mesh.mpi_comm(), partners);
+  const std::int64_t npair = femtools_plaza::allsum(mesh.mpi_comm(), partners.local.size());
 
   ParallelRefinement p_ref(mesh);
   // the freeze is collective: every rank takes this branch or none does
@@ -429,8 +370,7 @@ py::tuple refine_periodic(Mesh& new_mesh, const Mesh& mesh,
   else
   {
     ParallelRefinement f_ref(mesh);
-    freeze_closure(f_ref, mesh, frozen, long_edge, partner_local, partner_rank,
-                   partner_remote);
+    freeze_closure(f_ref, mesh, frozen, long_edge, exchange);
     for (CellIterator c(mesh); !c.end(); ++c)
     {
       bool holds = false;
@@ -440,8 +380,7 @@ py::tuple refine_periodic(Mesh& new_mesh, const Mesh& mesh,
       if (holds) { ++n_unmarked; continue; }
       p_ref.mark(*c);
     }
-    enforce_rules_periodic(p_ref, mesh, long_edge, partner_local, partner_rank,
-                           partner_remote);
+    enforce_rules_periodic(p_ref, mesh, long_edge, exchange);
     std::size_t bad = 0;
     for (EdgeIterator e(mesh); !e.end(); ++e)
       bad += f_ref.is_marked(e->index()) && p_ref.is_marked(e->index());
@@ -451,27 +390,26 @@ py::tuple refine_periodic(Mesh& new_mesh, const Mesh& mesh,
     n_frozen_cells = dolfin::MPI::sum(mesh.mpi_comm(), n_frozen_cells);
   }
   if (!freezing)
-    enforce_rules_periodic(p_ref, mesh, long_edge, partner_local, partner_rank,
-                           partner_remote);
+    enforce_rules_periodic(p_ref, mesh, long_edge, exchange);
   std::vector<std::size_t> parent_cell;
   std::size_t n_children = 0, n_rank = 0;
   if (max_cells > 0 || max_rank_cells > 0)
   {
-    const auto counts = count_children(mesh, p_ref, long_edge);
+    const auto counts = count_children(mesh, p_ref, long_edge, uniform);
     n_children = counts.first;
     n_rank = counts.second;
     if ((max_cells > 0 && n_children > max_cells)
         || (max_rank_cells > 0 && n_rank > max_rank_cells))
-      return py::make_tuple(partner_local.size(), parent_cell, n_children, n_rank,
+      return py::make_tuple(npair, parent_cell, n_children, n_rank,
                             n_unmarked, n_frozen_cells);
   }
-  do_refine(new_mesh, mesh, p_ref, long_edge, redistribute, parent_cell);
+  do_refine(new_mesh, mesh, p_ref, long_edge, uniform, redistribute, parent_cell);
   // as a NumPy array over the vector itself, moved to the heap and freed with it: a
   // list of Python ints was ~40 B a new cell at the refinement's peak
   auto* held = new std::vector<std::size_t>(std::move(parent_cell));
   py::capsule free_it(held, [](void* p) { delete static_cast<std::vector<std::size_t>*>(p); });
   py::array_t<std::size_t> parents(held->size(), held->data(), free_it);
-  return py::make_tuple(partner_local.size(), parents, n_children, n_rank,
+  return py::make_tuple(npair, parents, n_children, n_rank,
                         n_unmarked, n_frozen_cells);
 }
 
@@ -489,24 +427,6 @@ def _cpp():
     if _MODULE[0] is None:
         _MODULE[0] = df.compile_cpp_code(_CODE)
     return _MODULE[0]
-
-
-class TooManyCells(Exception):
-    """The refinement would have made more cells than `max_cells`, or more on one rank
-    than `max_rank_cells`; nothing was refined.
-
-    Raised on every rank alike (both counts are reduced), before any vertex or cell of the
-    new mesh exists -- so a caller can stop for the price of the marking."""
-
-    def __init__(self, n_cells, max_cells, n_rank=0, max_rank_cells=0):
-        self.n_cells, self.max_cells = int(n_cells), int(max_cells or 0)
-        self.n_rank, self.max_rank_cells = int(n_rank), int(max_rank_cells or 0)
-        if self.max_cells and self.n_cells > self.max_cells:
-            what = "{} cells, over the {} allowed".format(self.n_cells, self.max_cells)
-        else:
-            what = "{} cells on the most loaded rank, over the {} allowed a rank".format(
-                self.n_rank, self.max_rank_cells)
-        super().__init__("the refinement would make {}; nothing was refined".format(what))
 
 
 def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,

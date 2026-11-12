@@ -551,9 +551,7 @@ class Vector:
         self._v.axpy(a, x._v)
 
     def norm(self, norm_type="l2"):
-        kinds = {"l1": PETSc.NormType.NORM_1, "l2": PETSc.NormType.NORM_2,
-                 "linf": PETSc.NormType.NORM_INFINITY}
-        return self._v.norm(kinds[norm_type])
+        return self._v.norm(_VEC_NORMS[norm_type])
 
     def sum(self):
         return self._v.sum()
@@ -567,9 +565,17 @@ class Vector:
     def min(self):
         return self._v.min()[1]
 
+    def _new(self):
+        """A new Vector of the same layout, its values not set."""
+        return Vector(self._v.duplicate())
+
     def __mul__(self, other):
-        out = self.copy()
-        out *= other
+        if not isinstance(other, Vector):
+            out = self.copy()
+            out._v.scale(float(other))
+            return out
+        out = self._new()
+        out._v.pointwiseMult(self._v, other._v)
         return out
 
     __rmul__ = __mul__
@@ -589,13 +595,19 @@ class Vector:
         return self
 
     def __add__(self, other):
-        out = self.copy()
-        out += other
-        return out
+        return self._plus(1.0, other)
 
     def __sub__(self, other):
-        out = self.copy()
-        out -= other
+        return self._plus(-1.0, other)
+
+    def _plus(self, a, other):
+        """self + a*other (a Vector or a number), a new Vector."""
+        if isinstance(other, Vector):
+            out = self._new()
+            out._v.waxpy(a, other._v, self._v)
+        else:
+            out = self.copy()
+            out._v.shift(a * float(other))
         return out
 
     def __iadd__(self, other):
@@ -614,6 +626,12 @@ class Vector:
 
     def __neg__(self):
         return self * -1.0
+
+
+_VEC_NORMS = {"l1": PETSc.NormType.NORM_1, "l2": PETSc.NormType.NORM_2,
+              "linf": PETSc.NormType.NORM_INFINITY}
+_MAT_NORMS = {"l1": PETSc.NormType.NORM_1, "frobenius": PETSc.NormType.FROBENIUS,
+              "linf": PETSc.NormType.NORM_INFINITY}
 
 
 class Matrix:
@@ -649,9 +667,7 @@ class Matrix:
         self._m.axpy(a, B._m, structure)
 
     def norm(self, norm_type="frobenius"):
-        kinds = {"l1": PETSc.NormType.NORM_1, "frobenius": PETSc.NormType.FROBENIUS,
-                 "linf": PETSc.NormType.NORM_INFINITY}
-        return self._m.norm(kinds[norm_type])
+        return self._m.norm(_MAT_NORMS[norm_type])
 
     def __mul__(self, x):
         y = self._m.createVecLeft()
@@ -749,8 +765,7 @@ class Function(_WritesBack):
         """The values of `other`, a Function on the same space (dolfin's assign)."""
         if not (isinstance(other, Function) and other.function_space is self.function_space):
             raise NotImplementedError("assign: a Function on the same space only")
-        self._vector._v.array[:] = other._vector._v.array_r
-        self._vector._v.stateIncrease()
+        other._vector._v.copy(self._vector._v)
 
 
 class _ComponentView(_WritesBack):
@@ -1078,7 +1093,7 @@ class DirichletBC:
         if len(args) == 1 and isinstance(args[0], DirichletBC):
             other = args[0]
             self.V, self.value, self._local = other.V, other.value, other._local
-            self._unique = other._unique
+            self._unique, self._rows = other._unique, other._rows
             return
         if len(args) in (3, 4) and isinstance(args[2], str):
             # dolfin's DirichletBC(V, value, "C++ code"[, method]): the facets where the
@@ -1115,6 +1130,7 @@ class DirichletBC:
                       else markers.where(marker))
             dofs = fem.locate_dofs_topological(V, V.mesh.topology.dim - 1, facets)
         self._local = _owned_rows(U, dofs)
+        self._rows = None
 
     def function_space(self):
         return self.V
@@ -1123,18 +1139,27 @@ class DirichletBC:
         self.value = 0.0
 
     def global_rows(self):
-        return (self._local + self._unique.owned_range[0]).astype(PETSc.IntType)
+        """The constrained owned rows, as global indices of the compact vectors (made
+        once)."""
+        if self._rows is None:
+            self._rows = (self._local + self._unique.owned_range[0]).astype(PETSc.IntType)
+        return self._rows
 
-    def values(self):
-        """The values at the constrained owned dofs (in the order of `_local`)."""
+    def _value(self):
+        """The values at the constrained owned dofs: an array in the order of `_local`
+        for a Function, else one number."""
         g = self.value
         if isinstance(g, Function):
             if g.function_space is not self.V:
                 raise NotImplementedError("DirichletBC: a Function value on another space")
-            return g.vector()._v.getArray(readonly=True)[self._local].copy()
+            return g.vector()._v.getArray(readonly=True)[self._local]
         if isinstance(g, fem.Constant):
-            return np.full(len(self._local), float(np.asarray(g.value)))
-        return np.full(len(self._local), float(g))
+            return float(np.asarray(g.value))
+        return float(g)
+
+    def values(self):
+        """The values at the constrained owned dofs (in the order of `_local`)."""
+        return np.broadcast_to(self._value(), self._local.shape).copy()
 
     def get_boundary_values(self):
         """{local dof: value}, the owned constrained dofs (in the compact numbering)."""
@@ -1146,7 +1171,7 @@ class DirichletBC:
                 t._m.zeroRows(self.global_rows(), diag=1.0)
             elif isinstance(t, Vector):
                 with t._v as a:
-                    a[self._local] = self.values()
+                    a[self._local] = self._value()
             else:
                 raise TypeError("DirichletBC.apply: a Matrix or a Vector")
 
@@ -1203,7 +1228,7 @@ def _owned_rows(U, dofs):
     on the ranks that own them: a periodic slave's master may be owned by a rank that
     does not see the slave, so every rank's dofs go to their owner (one reverse scatter).
     Collective."""
-    plain = U.plain_vector("rows")
+    plain = U.plain_vector()
     with plain.localForm() as loc:
         loc.zeroEntries()
         with loc as a:

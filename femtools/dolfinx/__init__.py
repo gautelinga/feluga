@@ -6,9 +6,9 @@
                                with restrict / prolong / fold between Functions and
                                compact PETSc vectors
     femtools.dolfinx.assembly  matrices and right-hand sides over unique dofs, folded
-                               during assembly; Dirichlet values; the constants' null space
-    femtools.dolfinx.mixed     subfunction / set_subfunction / subspace /
-                               AssignedVectorFunction, as femtools.mixed
+                               during assembly; the constants' null space
+    femtools.dolfinx.mixed     subfunction / set_subfunction / subspace: a mixed
+                               Function's components, as femtools.mixed
     femtools.dolfinx.cells     a space's cells and dofs in dolfin's (UFC's) order, and
                                dolfin's signature of its element (femtools.tables)
     femtools.dolfinx.checkpoint  Functions in dolfin's HDF5 layout (femtools.dolfin_layout),

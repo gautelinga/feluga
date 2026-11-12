@@ -105,6 +105,11 @@ class UniqueDofs:
         # Owned slaves too, so compact_of_global resolves any global block.
         ids.setArray(compact[:n_own].astype(float))
         self._ids = ids
+        lo = imap.local_range[0]
+        self._block_range = (lo, lo + n_own)
+        ghosts = np.asarray(imap.ghosts, dtype=np.int64)
+        self._ghost_order = np.argsort(ghosts, kind="stable")
+        self._ghosts = ghosts[self._ghost_order]
 
         self.n_owned = n_unique * bs           # compact entries owned here
         self.n_global = n_global * bs
@@ -122,15 +127,37 @@ class UniqueDofs:
             self._template, PETSc.IS().createGeneral(self.compact.astype(PETSc.IntType),
                                                      comm=PETSc.COMM_SELF), local, None)
         local.destroy()
-        self._plain = {}
+        self._plain = None
+
+    def local_of_global(self, gdofs):
+        """Local indices of global dofs of the space (unrolled), -1 where a dof is
+        neither owned nor a ghost here."""
+        g = np.asarray(gdofs, dtype=np.int64)
+        blk, comp = np.divmod(g, self.bs) if self.bs > 1 else (g, 0)
+        lo, hi = self._block_range
+        out = np.full(len(blk), -1, dtype=np.int64)
+        own = (blk >= lo) & (blk < hi)
+        out[own] = blk[own] - lo
+        rest = np.flatnonzero(~own)
+        if len(rest) and len(self._ghosts):
+            pos = np.searchsorted(self._ghosts, blk[rest])
+            pos[pos == len(self._ghosts)] = 0
+            hit = self._ghosts[pos] == blk[rest]
+            out[rest[hit]] = hi - lo + self._ghost_order[pos[hit]]
+        return np.where(out >= 0, out * self.bs + comp, -1)
 
     def compact_of_global(self, gdofs):
         """Compact indices of arbitrary global dofs of the space (unrolled), slaves
-        resolved to their masters. Collective: every rank must call it."""
+        resolved to their masters: the local dofs' from `compact`, the others' from their
+        owners. Collective: every rank must call it."""
         from petsc4py import PETSc
 
-        gdofs = np.asarray(gdofs, dtype=np.int64)
-        blk, comp = np.divmod(gdofs, self.bs)
+        local = self.local_of_global(gdofs)
+        out = np.empty(len(local), dtype=np.int64)
+        known = local >= 0
+        out[known] = self.compact[local[known]]
+        far = np.asarray(gdofs, dtype=np.int64)[~known]
+        blk, comp = np.divmod(far, self.bs)
         need, inverse = np.unique(blk, return_inverse=True)
         got = PETSc.Vec().createSeq(len(need), comm=PETSc.COMM_SELF)
         sc = PETSc.Scatter().create(
@@ -140,7 +167,8 @@ class UniqueDofs:
         vals = np.rint(got.getArray(readonly=True)).astype(np.int64)
         sc.destroy()
         got.destroy()
-        return vals[inverse] * self.bs + comp
+        out[~known] = vals[inverse] * self.bs + comp
+        return out
 
     def create_vector(self):
         """A compact vector (unique dofs, no ghosts)."""
@@ -151,17 +179,17 @@ class UniqueDofs:
         v.set(0.0)
         return v
 
-    def plain_vector(self, key=0):
-        """A cached ghosted vector in the space's own layout (scratch for assembly)."""
+    def plain_vector(self):
+        """A ghosted vector in the space's own layout, made once: scratch for assembly."""
         from dolfinx.fem import petsc
 
-        if key not in self._plain:
-            self._plain[key] = petsc.create_vector(self.V)
-        return self._plain[key]
+        if self._plain is None:
+            self._plain = petsc.create_vector(self.V)
+        return self._plain
 
     def restrict(self, u, c):
         """The unique values of Function `u` into compact vector `c` (local copy)."""
-        c.getArray()[:] = u.x.array[self.owned_unique]
+        np.take(u.x.array, self.owned_unique, out=c.getArray())
         return c
 
     def prolong(self, c, u):
@@ -171,14 +199,6 @@ class UniqueDofs:
         with u.x.petsc_vec.localForm() as loc:
             self._scatter.scatter(c, loc, PETSc.InsertMode.INSERT, PETSc.ScatterMode.FORWARD)
         return u
-
-    def prolong_vec(self, c, plain):
-        """Compact vector `c` into a ghosted vector in the space's own layout."""
-        from petsc4py import PETSc
-
-        with plain.localForm() as loc:
-            self._scatter.scatter(c, loc, PETSc.InsertMode.INSERT, PETSc.ScatterMode.FORWARD)
-        return plain
 
     def fold(self, plain, c):
         """A vector assembled in the space's own layout (owned and ghost entries, not

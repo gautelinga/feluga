@@ -1,13 +1,9 @@
-"""Components of mixed DOLFINx Functions as Functions of their own, and vector Functions
-put together from scalar ones: the DOLFINx counterpart of `femtools.mixed`, with the
-same names.
+"""Components of mixed DOLFINx Functions as Functions of their own: the DOLFINx
+counterpart of `femtools.mixed`'s subspace and subfunction.
 
-    phi = subfunction(q, 0)          # component 0 of q, on its collapsed space (shared)
-    subfunction(q, 0, out=mine)      # into a Function of one's own on subspace(W, 0)
-    set_subfunction(q, 0, value)     # and back (a Function there, or anything
-                                     # Function.interpolate takes, such as a callable)
-    uv = AssignedVectorFunction([u0, u1])
-    uv()                             # the components copied in
+    S = subspace(W, 0)               # component 0's collapsed space (shared)
+    subfunction(q, 0, out)           # component 0 of q into `out`, a Function on S
+    set_subfunction(q, 0, value)     # and back, from a Function on S
 
 Each component's collapsed space and dof map are built once per mixed space and component
 and shared by every caller (the CAPACITY most recently used are kept). Values move as
@@ -24,16 +20,13 @@ _COMPONENTS = LRU(CAPACITY)
 
 
 class _Component:
-    """Component i of mixed space W, collapsed, with a Function on it and its dof map
-    into W (collapsed local dof -> W local dof)."""
+    """Component i of mixed space W, collapsed, and its dof map into W (collapsed local
+    dof -> W local dof)."""
 
     def __init__(self, W, i):
-        from dolfinx import fem
-
         self.W = W  # held, so that id(W) is not reused while it is a key
         self.space, dofs = W.sub(i).collapse()
         self.map = flat_collapse_map(dofs)
-        self.f = fem.Function(self.space)
 
 
 def _component(W, i):
@@ -54,51 +47,21 @@ def component_map(W, i):
     return _component(W, i).map
 
 
-def subfunction(q, i, out=None):
-    """Component i of the mixed Function q, copied into a Function on its collapsed
-    space: `out` if given, else the component's shared Function -- the same one, with
-    the current values, on every call for the same mixed space and component, so its
-    values last until the next such call (pass `out` for a Function of your own).
-    Returns it."""
+def subfunction(q, i, out):
+    """Component i of the mixed Function q, copied into `out`, a Function on
+    subspace(W, i). Returns it."""
     c = _component(q.function_space, i)
-    if out is None:
-        out = c.f
-    elif out.function_space is not c.space:
+    if out.function_space is not c.space:
         raise ValueError("subfunction: out must be on subspace(W, {})".format(i))
-    out.x.array[:] = q.x.array[c.map]
+    np.take(q.x.array, c.map, out=out.x.array)
     return out
 
 
 def set_subfunction(q, i, value):
-    """Set component i of the mixed Function q to `value`: a Function on the
-    component's collapsed space, or anything Function.interpolate takes (a callable of
-    the coordinates, a Function on another space of the same mesh), interpolated there
-    first."""
+    """Set component i of the mixed Function q to `value`, a Function on
+    subspace(W, i)."""
     c = _component(q.function_space, i)
-    if not (hasattr(value, "function_space") and value.function_space is c.space):
-        c.f.interpolate(value)
-        value = c.f
+    if value.function_space is not c.space:
+        raise ValueError("set_subfunction: value must be on subspace(W, {})".format(i))
     q.x.array[c.map] = value.x.array
     q.x.scatter_forward()
-
-
-class AssignedVectorFunction:
-    """A vector Function on the vector space of the scalar Functions `u` (all on one
-    space). Calling it copies the components in; `.function` is the vector Function."""
-
-    def __init__(self, u, name="Assigned Vector Function"):
-        import basix.ufl
-        from dolfinx import fem
-
-        V = u[0].function_space
-        el = basix.ufl.blocked_element(V.ufl_element(), shape=(len(u),))
-        Vv = fem.functionspace(V.mesh, el)
-        self.function = fem.Function(Vv, name=name)
-        self.u = list(u)
-        self.maps = [flat_collapse_map(Vv.sub(i).collapse()[1]) for i in range(len(u))]
-
-    def __call__(self):
-        for m, ui in zip(self.maps, self.u):
-            self.function.x.array[m] = ui.x.array
-        self.function.x.scatter_forward()
-        return self.function

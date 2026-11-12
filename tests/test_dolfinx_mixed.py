@@ -1,5 +1,5 @@
-"""`femtools.dolfinx.mixed`: components of mixed Functions, and vector Functions from
-scalar ones, on DOLFINx.
+"""`femtools.dolfinx.mixed`: components of mixed Functions on DOLFINx; and the backend's
+vector Functions put together from scalar ones.
 
     python3 -m pytest tests/test_dolfinx_mixed.py
 """
@@ -13,8 +13,7 @@ import basix.ufl  # noqa: E402
 from dolfinx import fem, mesh  # noqa: E402
 from mpi4py import MPI  # noqa: E402
 
-from femtools.dolfinx.mixed import (AssignedVectorFunction, set_subfunction,  # noqa: E402
-                                    subfunction, subspace)
+from femtools.dolfinx.mixed import set_subfunction, subfunction, subspace  # noqa: E402
 
 
 def _mixed():
@@ -25,46 +24,43 @@ def _mixed():
 
 def test_set_and_get_components():
     msh, W = _mixed()
-    q = fem.Function(W)
-    set_subfunction(q, 0, lambda x: x[0] + 2 * x[1])
-    set_subfunction(q, 1, lambda x: np.sin(x[0]))
     V0 = subspace(W, 0)
     assert subspace(W, 0) is V0  # built once
     ref0, ref1 = fem.Function(V0), fem.Function(subspace(W, 1))
     ref0.interpolate(lambda x: x[0] + 2 * x[1])
     ref1.interpolate(lambda x: np.sin(x[0]))
-    assert np.allclose(subfunction(q, 0).x.array, ref0.x.array, atol=1e-14)
-    assert np.allclose(subfunction(q, 1).x.array, ref1.x.array, atol=1e-14)
-    # a Function on the collapsed space goes in as it is
-    ref0.x.array[:] *= 3.0
+    q = fem.Function(W)
     set_subfunction(q, 0, ref0)
-    assert np.allclose(subfunction(q, 0).x.array, ref0.x.array, atol=1e-14)
-    assert np.allclose(subfunction(q, 1).x.array, ref1.x.array, atol=1e-14)
+    set_subfunction(q, 1, ref1)
+    out0, out1 = fem.Function(V0), fem.Function(subspace(W, 1))
+    assert subfunction(q, 0, out0) is out0
+    assert np.array_equal(out0.x.array, ref0.x.array)
+    assert np.array_equal(subfunction(q, 1, out1).x.array, ref1.x.array)
+    # the component as the mixed space's own interpolation gives it
+    whole = fem.Function(W)
+    whole.sub(0).interpolate(lambda x: x[0] + 2 * x[1])
+    whole.sub(1).interpolate(lambda x: np.sin(x[0]))
+    assert np.allclose(q.x.array, whole.x.array, atol=1e-14)
 
 
-def test_subfunction_into_own_function():
-    """`out`: a Function of one's own, not the shared one a later call overwrites."""
+def test_other_spaces_refused():
     msh, W = _mixed()
     q = fem.Function(W)
-    set_subfunction(q, 0, lambda x: x[0])
-    mine = fem.Function(subspace(W, 0))
-    assert subfunction(q, 0, out=mine) is mine and mine is not subfunction(q, 0)
-    set_subfunction(q, 0, lambda x: 2 * x[0])
-    subfunction(q, 0)
-    ref = fem.Function(subspace(W, 0))
-    ref.interpolate(lambda x: x[0])
-    assert np.allclose(mine.x.array, ref.x.array, atol=1e-14)
+    P2 = fem.functionspace(msh, ("Lagrange", 2))
     with pytest.raises(ValueError):
-        subfunction(q, 0, out=fem.Function(fem.functionspace(msh, ("Lagrange", 2))))
+        subfunction(q, 0, fem.Function(P2))
+    with pytest.raises(ValueError):
+        set_subfunction(q, 0, fem.Function(P2))
 
 
 def test_assigned_vector_function():
+    from femtools.backend import dolfinx as B
     msh = mesh.create_unit_square(MPI.COMM_WORLD, 6, 6)
-    V = fem.functionspace(msh, ("Lagrange", 2))
-    u0, u1 = fem.Function(V), fem.Function(V)
+    V = B.FunctionSpace(msh, "CG", 2)
+    u0, u1 = B.Function(V), B.Function(V)
     u0.interpolate(lambda x: x[0] ** 2)
     u1.interpolate(lambda x: x[1] - x[0])
-    uv = AssignedVectorFunction([u0, u1])()
+    uv = B.AssignedVectorFunction([u0, u1])()
     ref = fem.Function(uv.function_space)
     ref.interpolate(lambda x: np.vstack([x[0] ** 2, x[1] - x[0]]))
     assert np.allclose(uv.x.array, ref.x.array, atol=1e-14)

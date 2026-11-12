@@ -1,9 +1,11 @@
 """`femtools.dolfinx`: assembly over unique dofs (periodic slaves folded onto masters).
 
 Against plain DOLFINx without periodicity (identical), against PᵀAP with an explicit P
-(square, rectangular and mixed forms; right-hand sides), against dolfinx_mpc (a periodic
-solve with nonzero Dirichlet data on the corners), on one rank and on three; and against
-dolfin's constrained_domain in one process (unique dofs, a periodic field, the operator).
+(square, rectangular and mixed forms, forms over cells, interior facets and a subdomain;
+right-hand sides) with exact preallocation, against dolfinx_mpc (a periodic solve with
+nonzero Dirichlet data on the corners, applied by the backend's DirichletBC), on one rank
+and on three; and against dolfin's constrained_domain in one process (unique dofs, a
+periodic field, the operator).
 
     python3 -m pytest tests/test_dolfinx_unique.py [-m mpi]
 """
@@ -33,7 +35,10 @@ def _check_unique(r):
     assert r["plain_matrix"] == 0.0 and r["plain_rhs"] == 0.0
     for name in ("fold_square", "fold_rect", "fold_mixed"):
         assert r[name] < 1e-14, name
-        assert r[name + "_mallocs"] == 0, name
+        assert r[name + "_exact"], name
+    for name in ("same_cells", "interior_facets", "cell_subdomain"):
+        assert r["share_" + name] < 1e-14, name
+        assert r["share_" + name + "_exact"], name
     assert r["fold_rhs"] < 1e-14
     assert r["slaves_V"] == 49 and r["unique_dofs_V"] == 1176
     assert r["roundtrip"] == 0.0
@@ -41,7 +46,7 @@ def _check_unique(r):
         assert r["vs_dolfinx_mpc"] < 1e-12
     assert r["nullspace"]
     assert r["interleaved"]
-    assert r["fold_mixed_interleaved"] < 1e-14 and r["fold_mixed_interleaved_mallocs"] == 0
+    assert r["fold_mixed_interleaved"] < 1e-14 and r["fold_mixed_interleaved_exact"]
     assert r["interleaved_roundtrip"] == 0.0
 
 

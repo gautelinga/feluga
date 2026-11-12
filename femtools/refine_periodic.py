@@ -21,12 +21,7 @@ by position before comparing (a rank-boundary vertex is ghosted onto more than o
 
 import dolfin as df
 
-TOL = 1e-9
-
-
-def _say(mesh, text):
-    if mesh.mpi_comm().rank == 0:
-        print(text, flush=True)
+from femtools.periodic_core import TOL
 
 
 def congruent(mesh, box, axes, exempt=None, lower=None):
@@ -110,28 +105,16 @@ def refine_congruent(mesh, cell_markers, box, axes, redistribute=False, max_cell
 
     `lower`: the box's lower corner, when it is not the origin.
     """
-    _say(mesh, "refining")
-    if axes:
-        from femtools.plaza_periodic import refine_periodic as plaza_periodic
-        new_mesh, npair, parent_cell = plaza_periodic(
-            mesh, cell_markers, box, axes, redistribute=redistribute,
-            max_cells=max_cells, max_rank_cells=max_rank_cells, frozen=frozen,
-            report=report, lower=lower)
-        _say(mesh, "periodic Plaza: {} identified edge pairs".format(npair))
-        if deferred:
-            if exempt is not None:
-                raise ValueError("refine_congruent: a deferred guard takes its exempt "
-                                 "nodes at check_congruent")
-        else:
-            check_congruent(new_mesh, box, axes,
-                            None if exempt is None else exempt(new_mesh, parent_cell),
-                            lower)
-    else:
-        if max_cells or max_rank_cells or frozen is not None:
-            raise ValueError("max_cells and frozen need periodic axes: df.refine can "
-                             "neither count nor freeze before it refines")
-        from femtools.plaza_periodic import require_cells_on_every_rank
+    from femtools import periodic_core
+    from femtools.plaza_periodic import refine_periodic, require_cells_on_every_rank
+
+    def refine_plain(mesh, cell_markers):
         require_cells_on_every_rank(mesh, "refine_congruent")
-        new_mesh = df.refine(mesh, cell_markers)
-        npair, parent_cell = 0, None
-    return new_mesh, npair, parent_cell
+        return df.refine(mesh, cell_markers)
+
+    return periodic_core.refine_congruent(
+        mesh, cell_markers, box, axes, comm=mesh.mpi_comm(), refine_periodic=refine_periodic,
+        check_congruent=check_congruent, refine_plain=refine_plain, plain_name="df.refine",
+        redistribute=redistribute, max_cells=max_cells, exempt=exempt,
+        max_rank_cells=max_rank_cells, frozen=frozen, report=report, deferred=deferred,
+        lower=lower)

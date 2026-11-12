@@ -39,11 +39,10 @@ import sys
 
 import numpy as np
 
-from femtools.periodic_core import TooManyCells  # noqa: F401  (raised here)
+from femtools.periodic_core import TOL, TooManyCells  # noqa: F401  (raised here)
 
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp")
 _MODULE = [None]
-TOL = 1e-9
 
 
 def _module(comm):
@@ -149,11 +148,6 @@ def _lower(mesh, axes, lower):
     from femtools.dolfinx.periodic import box_extent
     from femtools.periodic_core import lower_corner
     return lower_corner(None if lower is not None else box_extent(mesh), axes, lower)
-
-
-def _say(mesh, text):
-    if mesh.comm.rank == 0:
-        print(text, flush=True)
 
 
 def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
@@ -262,27 +256,19 @@ def refine_congruent(mesh, cell_markers, box, axes, redistribute=False, max_cell
     runs `check_congruent` itself). Returns `(new_mesh, npair, parent_cell)`. `exempt`:
     a callable `(new_mesh, parent_cell) ->` the nodes allowed no partner. Without
     periodic axes, plain `dolfinx.mesh.refine` (which can neither count nor freeze)."""
-    _say(mesh, "refining")
-    if axes:
-        new_mesh, npair, parent_cell = refine_periodic(
-            mesh, cell_markers, box, axes, redistribute=redistribute, max_cells=max_cells,
-            max_rank_cells=max_rank_cells, frozen=frozen, report=report, lower=lower)
-        _say(mesh, "periodic Plaza: {} identified edge pairs".format(npair))
-        if deferred:
-            if exempt is not None:
-                raise ValueError("refine_congruent: a deferred guard takes its exempt "
-                                 "nodes at check_congruent")
-        else:
-            check_congruent(new_mesh, box, axes,
-                            None if exempt is None else exempt(new_mesh, parent_cell),
-                            lower)
-        return new_mesh, npair, parent_cell
-    if max_cells or max_rank_cells or frozen is not None:
-        raise ValueError("max_cells and frozen need periodic axes: dolfinx.mesh.refine "
-                         "can neither count nor freeze before it refines")
-    import dolfinx.mesh as dm
-    cells = _cells(mesh, cell_markers)
-    mesh.topology.create_entities(1)
-    edges = np.unique(dm.compute_incident_entities(mesh.topology, cells, mesh.topology.dim, 1))
-    new_mesh, _, _ = dm.refine(mesh, edges)
-    return new_mesh, 0, None
+    from femtools import periodic_core
+
+    def refine_plain(mesh, cell_markers):
+        import dolfinx.mesh as dm
+        cells = _cells(mesh, cell_markers)
+        mesh.topology.create_entities(1)
+        edges = np.unique(dm.compute_incident_entities(mesh.topology, cells,
+                                                       mesh.topology.dim, 1))
+        return dm.refine(mesh, edges)[0]
+
+    return periodic_core.refine_congruent(
+        mesh, cell_markers, box, axes, comm=mesh.comm, refine_periodic=refine_periodic,
+        check_congruent=check_congruent, refine_plain=refine_plain,
+        plain_name="dolfinx.mesh.refine", redistribute=redistribute, max_cells=max_cells,
+        exempt=exempt, max_rank_cells=max_rank_cells, frozen=frozen, report=report,
+        deferred=deferred, lower=lower)

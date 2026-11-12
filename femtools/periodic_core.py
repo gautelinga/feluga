@@ -8,6 +8,10 @@ dolfin modules (`femtools.periodic`, `femtools.plaza_periodic`) and the DOLFINx 
     on_planes(x, lower, upper, axes, tol)  which points lie on an identified plane
     xyz(a)                                 padded to three components
     TooManyCells                           a refinement refused by max_cells
+    refine_congruent(mesh, markers, box, axes, *, comm, refine_periodic, ...)
+                                           both backends' refine_congruent, their
+                                           refinement and check given
+    TOL                                    the congruence check's tolerance
 
 Every face node goes by its rounded position to the rank its key hashes to, where the two
 sides are deduplicated and compared; only counts are reduced, so no rank holds a face.
@@ -26,6 +30,9 @@ dolfin's own SubDomains (`femtools.periodic.PeriodicBox`, `periodic_box`) keep d
 absolute convention, which dolfin's `constrained_domain` applies.
 """
 import numpy as np
+
+#: the congruence check's tolerance (relative to the box, `box_scale`)
+TOL = 1e-9
 
 
 def box_scale(lower, upper):
@@ -234,3 +241,38 @@ class TooManyCells(Exception):
             what = "{} cells on the most loaded rank, over the {} allowed a rank".format(
                 self.n_rank, self.max_rank_cells)
         super().__init__("the refinement would make {}; nothing was refined".format(what))
+
+
+def refine_congruent(mesh, cell_markers, box, axes, *, comm, refine_periodic,
+                     check_congruent, refine_plain, plain_name, redistribute=False,
+                     max_cells=None, exempt=None, max_rank_cells=None, frozen=None,
+                     report=None, deferred=False, lower=None):
+    """The periodic-safe refinement, with its output checked before it is trusted: the
+    one body of `femtools.refine_periodic.refine_congruent` (dolfin) and
+    `femtools.dolfinx.refine.refine_congruent`, which give their backend's
+    `refine_periodic`, `check_congruent`, `refine_plain(mesh, cell_markers)` (the
+    library's own refinement, for no periodic axes; `plain_name` names it) and `comm`.
+    Returns `(new_mesh, npair, parent_cell)`; see the backends' docstrings."""
+    def say(text):
+        if comm.rank == 0:
+            print(text, flush=True)
+
+    say("refining")
+    if axes:
+        new_mesh, npair, parent_cell = refine_periodic(
+            mesh, cell_markers, box, axes, redistribute=redistribute, max_cells=max_cells,
+            max_rank_cells=max_rank_cells, frozen=frozen, report=report, lower=lower)
+        say("periodic Plaza: {} identified edge pairs".format(npair))
+        if deferred:
+            if exempt is not None:
+                raise ValueError("refine_congruent: a deferred guard takes its exempt "
+                                 "nodes at check_congruent")
+        else:
+            check_congruent(new_mesh, box, axes,
+                            None if exempt is None else exempt(new_mesh, parent_cell),
+                            lower)
+        return new_mesh, npair, parent_cell
+    if max_cells or max_rank_cells or frozen is not None:
+        raise ValueError("max_cells and frozen need periodic axes: {} can neither count "
+                         "nor freeze before it refines".format(plain_name))
+    return refine_plain(mesh, cell_markers), 0, None

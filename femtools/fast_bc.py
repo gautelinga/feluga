@@ -8,7 +8,7 @@
 DirichletBC.apply searches the boundary facets and tabulates their dofs at every call.
 Here that is done once per condition: one dolfin apply onto a vector of NaNs gives
 this rank's owned constrained dofs, and a later apply sets those entries and updates
-the ghost values, as dolfin does: 0.05 ms where dolfin takes 6.5 ms on 118k P2 dofs.
+the ghost values, as dolfin does.
 
 The values follow the condition's value at every call when it is a Constant (its
 current values) or a Function on the condition's space, changed in place or not (its

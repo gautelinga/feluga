@@ -8,9 +8,8 @@
 For Lagrange elements interpolation is point evaluation, a fixed linear map from the
 source's dofs to the target's: built once per pair of spaces as dolfin's transfer
 matrix (PETScDMCollection.create_transfer_matrix), every call is then one sparse
-matrix-vector product. dolfin.interpolate instead evaluates the source element cell
-by cell and builds a Function every call: 119 ms from a P2 to a P1 space on 33k
-vertices, against well under a millisecond here.
+matrix-vector product, where dolfin.interpolate evaluates the source element cell by
+cell and builds a Function every call.
 
 Any degrees, scalar, vector or tensor; on a periodic space; in parallel. The source may be a
 component of a mixed Function (from Function.split()), whose vector is the mixed

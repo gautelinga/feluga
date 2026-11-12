@@ -33,8 +33,8 @@ PC_NAMES = {
     "ml_amg": {"pc_type": "ml"},
     "additive_schwarz": {"pc_type": "asm"},
 }
-# BoomerAMG settings for 3D: cheaper coarsening and interpolation, which in 3D make
-# each solve of a Poisson problem several times faster for twice the iterations.
+# BoomerAMG settings for 3D: cheaper coarsening and interpolation, so a cheaper
+# preconditioner for a 3D Poisson problem at the cost of more iterations.
 BOOMERAMG_3D = {"pc_hypre_boomeramg_strong_threshold": 0.5,
                 "pc_hypre_boomeramg_coarsen_type": "HMIS",
                 "pc_hypre_boomeramg_interp_type": "ext+i",

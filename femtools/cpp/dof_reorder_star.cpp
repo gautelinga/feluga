@@ -21,7 +21,7 @@
 // Modified by Joachim B Haga, 2012
 // Modified by Martin Alnaes, 2013-2015
 //
-// Modified for stokes-beadpack, 2026-10-25, since moved to femtools: only
+// Modified for femtools by Gaute Linga, 2026: only
 // DofMapBuilder::compute_node_reordering, copied from dolfin 2019.2.0.dev0, with the
 // reordering graph a star a cell instead of a clique.
 

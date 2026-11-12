@@ -85,11 +85,11 @@ using femtools_plaza::Partners;
 // dolfin's PlazaRefinementND::face_long_edge (private there), with the choice made the
 // same on the two faces of a periodic pair. dolfin takes the strictly longest edge and
 // breaks an exact tie on the global index of the opposite vertex (edge i is opposite
-// vertex i). Both go wrong across a periodic pair, and did on the real packing
-// (2026-09-29): an exact tie is broken by indices the two faces do not share, and two
-// edges equal to the last bit come out in either order, since partner coordinates agree
-// only to ~2e-16 -- so the faces bisected different edges and their triangulations
-// drifted apart ("flips"), invisible to a vertex check until a flipped edge was refined.
+// vertex i). Both can differ across a periodic pair: an exact tie is broken by indices
+// the two faces do not share, and two edges equal to the last bit come out in either
+// order, since partner coordinates agree only to rounding -- so the faces would bisect
+// different edges and their triangulations drift apart ("flips"), invisible to a vertex
+// check until a flipped edge is refined.
 // The shared rule (femtools_plaza::long_edge) ties edges within a relative 1e-10 of the
 // longest and gives a tie to the largest periodic key of the opposite vertex. Also, in
 // 2D, whether each triangle may be split uniformly (femtools_plaza::uniform_ok).

@@ -33,6 +33,8 @@ numpy alone at import; dolfin in the functions that take a Mesh, h5py in
 """
 import numpy as np
 
+from femtools.ufc import UFC_EDGES
+
 # midside columns 4..9 of the 10-node connectivity, as (vertex, vertex) pairs, in the
 # XDMF order (`femtools.xdmf.XDMF_ORDER` puts dolfin's cell dofs in it)
 P2_EDGE_PAIRS = ((0, 1), (1, 2), (0, 2), (0, 3), (1, 3), (2, 3))
@@ -377,10 +379,7 @@ class DistributedCellSource:
 # What femtools.nested_transfer needs, for both backends' dof tables (dolfin's own, and
 # DOLFINx's put in dolfin's order by femtools.dolfinx.checkpoint): a cell's vertices,
 # then for degree 2 its edges, edge i of a triangle opposite vertex i and a tetrahedron's
-# in UFC's order -- not the XDMF order of P2_EDGE_PAIRS above.
-
-UFC_EDGES = {2: ((1, 2), (0, 2), (0, 1)),
-             3: ((2, 3), (1, 3), (1, 2), (0, 3), (0, 2), (0, 1))}
+# in UFC's order (femtools.ufc.UFC_EDGES) -- not the XDMF order of P2_EDGE_PAIRS above.
 
 
 def barycentric_simplex(vertices, points):

@@ -78,11 +78,12 @@ import numpy as np
 
 from femtools import compress
 from femtools.fast_interpolation import interpolate as fast_interpolate
+from femtools.ufc import UFC_EDGES
 
 # XDMF's Tetrahedron_10: four corners, then the midsides of these edges in order.
 XDMF_EDGES = ((0, 1), (1, 2), (0, 2), (0, 3), (1, 3), (2, 3))
 # dolfin's own P2 node order: four corners, then the midsides of these.
-DOLFIN_EDGES = ((2, 3), (1, 3), (1, 2), (0, 3), (0, 2), (0, 1))
+DOLFIN_EDGES = UFC_EDGES[3]
 # XDMF slot -> dolfin local node, corners first
 XDMF_ORDER = [0, 1, 2, 3] + [4 + DOLFIN_EDGES.index(e) for e in XDMF_EDGES]
 

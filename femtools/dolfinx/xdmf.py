@@ -20,6 +20,7 @@ vector Lagrange Functions of degree 1 or 2 (not mixed: write their components).
 """
 import numpy as np
 
+from femtools.ufc import CELL_NAMES, edge_index
 from femtools.xdmf import (QUADRATIC, XDMF_TOPOLOGY, XdmfDocument, _int32, _pad3)
 
 
@@ -27,17 +28,15 @@ def _edges_of_cells(mesh, n_cells, pairs):
     """For each of the first n_cells cells, its edges (local indices) in the order of
     the reference vertex pairs `pairs`: a cell's local edge e joins the reference
     vertices of edge e of the reference cell (basix's, UFC's)."""
-    from femtools.dolfinx.checkpoint import _edge_index
     tdim = mesh.topology.dim
     mesh.topology.create_entities(1)
     mesh.topology.create_connectivity(tdim, 1)
     E = mesh.topology.connectivity(tdim, 1).array.reshape(-1, len(pairs))[:n_cells]
-    index = _edge_index(tdim)
+    index = edge_index(tdim)
     return E[:, [index[a, b] for a, b in pairs]]
 
 
 EDGES_PER_CELL = {2: QUADRATIC["triangle"][1], 3: QUADRATIC["tetrahedron"][1]}
-CELL_NAMES = {2: "triangle", 3: "tetrahedron"}
 
 
 class _Layout:

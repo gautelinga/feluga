@@ -113,8 +113,8 @@ def _dolfin_leaves(V):
 
 
 def _dolfinx_space(t, V, U):
-    from femtools.dolfinx.checkpoint import (
-        _components, _lagrange_degree, dolfin_cell_dofs, signature, ufc_vertices)
+    from femtools.dolfinx.cells import (
+        components, dolfin_cell_dofs, lagrange_degree, signature, ufc_vertices)
     if U is None:
         raise ValueError("tables: a DOLFINx space comes with its UniqueDofs, as (V, U)")
     mesh = V.mesh
@@ -132,8 +132,8 @@ def _dolfinx_space(t, V, U):
     t.n_cells = int(mesh.topology.index_map(d).size_global)
     t.signature = signature(V)
     t.components, first = [], 0
-    for S in _components(V):          # a vector (sub-)space's components too, unrolled
-        degree = _lagrange_degree(S)
+    for S in components(V):           # a vector (sub-)space's components too, unrolled
+        degree = lagrange_degree(S)
         k = _n_nodes(d, degree)
         t.components.append((first, k, degree))
         first += k

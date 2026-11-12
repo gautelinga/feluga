@@ -777,10 +777,11 @@ class XDMFFile2(object):
             store = self._stored.get((mesh.id(), degree))
             if store is None or self.parameters['rewrite_function_mesh']:
                 group = doc.mesh_group(time is not None)
-                coords = _node_positions(mesh, info['layout'], info['coord_masks'])
+                coords = node_positions(_geometry(mesh.coordinates()), info['layout'])
                 store = (doc.slab(group + '/topology', info['cell_offset'],
                                   _int32(conn), n_cells),
-                         doc.rows(group + '/geometry', info['coord_rows'], coords, n_nodes))
+                         doc.rows(group + '/geometry', info['layout']['rows'], coords,
+                                  n_nodes))
                 self._stored[(mesh.id(), degree)] = store
             doc.topology(grid, conn, topology_type, ref=store[0],
                          shape=(n_cells, conn.shape[1]))
@@ -1609,62 +1610,106 @@ def _owned_cells(mesh):
     return np.asarray(mesh.cells())[:mesh.topology().ghost_offset(tdim)]
 
 
+def node_layout(comm, gvert, cells, owned_vertices, n_vertices, n_cells, edges=None):
+    """What a write of a degree-1 or 2 field takes of the mesh's topology, from either
+    backend's arrays: `gvert` each local vertex's global id, `cells` this rank's own cells
+    as local vertices, `owned_vertices` which local vertices this rank writes, and the
+    global vertex and cell counts. At degree 2 `edges` holds `gedge` (each local edge's
+    global id), `cells` (the own cells' local edges), `ends` (each local edge's two local
+    vertices), `owned` (which local edges this rank writes), `n` (the global edge count)
+    and `order` (a cell's vertex then edge columns put in XDMF's order, or None).
+
+    Returns a dict: `conn` the own cells' global node numbers (a node's number is its
+    vertex's global id, or `n_vertices` plus its edge's), `rows` the numbers of the nodes
+    this rank writes, `owned` their masks (vertices, then edges), `ends`, the counts
+    `n_nodes` and `n_cells`, and `cell_offset`, the cells' first row in the rank-major
+    topology."""
+    gvert = np.asarray(gvert)
+    conn = gvert[cells]
+    owned, rows = [owned_vertices], [gvert[owned_vertices]]
+    n_nodes, ends = n_vertices, None
+    if edges is not None:
+        gedge = np.asarray(edges['gedge'])
+        conn = np.hstack((conn, gedge[edges['cells']] + n_vertices))
+        if edges.get('order') is not None:
+            conn = conn[:, edges['order']]
+        owned.append(edges['owned'])
+        rows.append(gedge[edges['owned']] + n_vertices)
+        n_nodes += edges['n']
+        ends = edges['ends']
+    return dict(conn=conn, rows=np.concatenate(rows), owned=owned, ends=ends,
+                n_nodes=n_nodes, n_cells=n_cells, cell_offset=_exscan(comm, len(conn)))
+
+
+def node_positions(x, layout):
+    """The positions of the nodes a rank writes (`node_layout`): its vertices' of `x`
+    (the local vertices' coordinates), then its edges' midpoints."""
+    owned = layout['owned']
+    out = [x[owned[0]]]
+    if len(owned) > 1:
+        ends = layout['ends'][owned[1]]
+        out.append(0.5 * (x[ends[:, 0]] + x[ends[:, 1]]))
+    return np.vstack(out)
+
+
+def node_dofs(layout, vertex_dofs, edge_dofs=None):
+    """`(direct, ends)`: the dofs of the nodes a rank writes (`node_layout`), from each
+    local vertex's dofs (`vertex_dofs`, a row a vertex) and at degree 2 each local edge's
+    (`edge_dofs`). `direct` holds a row a node with dofs of its own; a linear field on
+    the quadratic nodes (`edge_dofs` None) has none at the edges, which take the mean of
+    their ends' dofs, `ends` (two arrays of rows, else None)."""
+    owned = layout['owned']
+    direct, ends = [vertex_dofs[owned[0]]], None
+    if len(owned) > 1 and edge_dofs is not None:
+        direct.append(edge_dofs[owned[1]])
+    elif len(owned) > 1:
+        pairs = layout['ends'][owned[1]]
+        ends = (vertex_dofs[pairs[:, 0]], vertex_dofs[pairs[:, 1]])
+    return np.concatenate(direct), ends
+
+
 def _node_layout(mesh, degree, cache):
-    """What a write of a degree-`degree` field on `mesh` needs of its topology, the
-    same every step: the owned cells' global node numbers in XDMF's order, the
-    vertices' and edges' global ids and the edges' ends, the counts, the cells'
-    offset in the rank-major topology, and which vertices and edges this rank writes
-    (`owned`, a mask per dimension, `owned_entities`) under which node ids (`rows`).
-    Kept in `cache` by (mesh id, degree); the coordinates are not, a mesh may move
-    between writes (`_node_positions`). Collective (`owned_entities`)."""
+    """`node_layout` of a dolfin mesh, kept in `cache` by (mesh id, degree); the
+    coordinates are not, a mesh may move between writes (`node_positions`). dolfin
+    numbers a cell's edges by the vertex pairs QUADRATIC names, which is checked on the
+    local cells (`_check_midsides`). Collective (`owned_entities`)."""
     key = ('mesh', mesh.id(), degree)
     if key in cache:
         return cache[key]
     tdim = mesh.topology().dim()
-    gvert = np.asarray(mesh.topology().global_indices(0))
-    n_vert = mesh.num_entities_global(0)
-    vertices = np.asarray(mesh.coordinates())
     cells = _owned_cells(mesh)
-    conn = gvert[cells]
-    n_nodes, gedge, mid = n_vert, None, None
+    owned = owned_entities(mesh, 0)
+    edges = None
     if degree == 2:
         mesh.init(1)
         mesh.init(tdim, 1)
         mesh.init(1, 0)
         mesh.init_global(1)
-        gedge = np.asarray(mesh.topology().global_indices(1))
-        n_nodes = n_vert + mesh.num_entities_global(1)
         ends = _connectivity(mesh, 1)
-        mid = 0.5 * (vertices[ends[:, 0]] + vertices[ends[:, 1]])
-        # dolfin numbers a cell's local edges by the vertex pairs DOLFIN_EDGES (or
-        # DOLFIN_TRIANGLE_EDGES) names -- checked here on the local cells, not
-        # assumed: a midside named for the wrong edge writes a plausible, wrong cell
         cellname = mesh.ufl_cell().cellname()
         order = QUADRATIC[cellname][2]
         cell_edges = _connectivity(mesh, tdim, 1)[:len(cells)]
         if len(cells):
+            vertices = np.asarray(mesh.coordinates())
+            mid = 0.5 * (vertices[ends[:, 0]] + vertices[ends[:, 1]])
             _check_midsides(np.vstack((vertices, mid)),
                             np.hstack((cells, cell_edges + len(vertices)))[:, order],
                             cellname)
-        conn = np.hstack((conn, gedge[cell_edges] + n_vert))[:, order]
-    owned = [owned_entities(mesh, 0)] + ([owned_entities(mesh, 1)] if degree == 2 else [])
-    rows = np.concatenate([gvert[owned[0]]] +
-                          ([gedge[owned[1]] + n_vert] if degree == 2 else []))
-    layout = dict(gvert=gvert, gedge=gedge, ends=ends if degree == 2 else None, conn=conn,
-                  n_vert=n_vert, n_nodes=n_nodes,
-                  n_cells=mesh.num_entities_global(tdim),
-                  cell_offset=_exscan(mesh.mpi_comm(), len(conn)),
-                  owned=owned, rows=rows)
+        edges = dict(gedge=mesh.topology().global_indices(1), cells=cell_edges, ends=ends,
+                     owned=owned_entities(mesh, 1), n=mesh.num_entities_global(1),
+                     order=order)
+    layout = node_layout(mesh.mpi_comm(), mesh.topology().global_indices(0), cells, owned,
+                         mesh.num_entities_global(0), mesh.num_entities_global(tdim), edges)
     cache[key] = layout
     return layout
 
 
 def _node_dofs(V, mesh, degree, width, layout, cache):
-    """Where each component's values at this rank's nodes (`layout['owned']`) sit in
-    the local form of a V Function's vector -- owned dofs, then ghosts -- as a pair per
-    component: the local dof of each node that has one of its own, and, for a linear
-    field on the quadratic node set, the dofs at the two ends of each edge (its midside
-    value is their mean, which is exact for a linear field), None otherwise.
+    """Where each component's values at this rank's nodes sit in the local form of a V
+    Function's vector -- owned dofs, then ghosts -- as a pair per component (`node_dofs`):
+    the local dof of each node that has one of its own, and, for a linear field on the
+    quadratic node set, the dofs at the two ends of each edge (its midside value is their
+    mean, which is exact for a linear field), None otherwise.
 
     The dof is the one V's dofmap gives the entity, so a periodic V needs nothing
     else: a slave vertex or edge is mapped to its master's dof, whose value is the
@@ -1673,17 +1718,14 @@ def _node_dofs(V, mesh, degree, width, layout, cache):
     it in their own cells), so its value is either owned or one of the vector's ghosts.
 
     The components come from V's own dofmap, which lists an entity's dofs component by
-    component -- its `width` columns are what `V.sub(c).dofmap()` gives, checked on
-    vector, tensor and mixed-component spaces (tests/test_xdmf.py) -- rather than from
-    the sub-dofmaps: each `V.sub(c)` is a space V keeps for its own lifetime, with a
-    copy of the cell table, 12 MB a component on the 291k-cell bead pack. A component
-    of a mixed Function (`Function.split()`) is read the same way, its dofmap indexing
-    the mixed vector. Kept in `cache` by (V's id, degree): a time series writes the
-    same space every step."""
+    component -- its `width` columns are what `V.sub(c).dofmap()` gives -- rather than
+    from the sub-dofmaps, each of which V keeps for its own lifetime with a copy of the
+    cell table. A component of a mixed Function (`Function.split()`) is read the same
+    way, its dofmap indexing the mixed vector. Kept in `cache` by (V's id, degree): a
+    time series writes the same space every step."""
     key = ('space', V.id(), degree)
     if key in cache:
         return cache[key]
-    owned = layout['owned']
     linear = degree == 2 and V.ufl_element().degree() == 1
 
     def entity_dofs(dim):
@@ -1694,14 +1736,8 @@ def _node_dofs(V, mesh, degree, width, layout, cache):
                                  len(dofs), mesh.num_entities(dim), dim, width))
         return dofs.reshape(-1, width)
 
-    vertex = entity_dofs(0)
-    direct, ends = [vertex[owned[0]]], None
-    if degree == 2 and not linear:
-        direct.append(entity_dofs(1)[owned[1]])
-    elif linear:
-        pairs = layout['ends'][owned[1]]
-        ends = (vertex[pairs[:, 0]], vertex[pairs[:, 1]])
-    direct = np.concatenate(direct)
+    direct, ends = node_dofs(layout, entity_dofs(0),
+                             entity_dofs(1) if degree == 2 and not linear else None)
     takes = [(np.ascontiguousarray(direct[:, c]),
               None if ends is None else tuple(np.ascontiguousarray(e[:, c]) for e in ends))
              for c in range(width)]
@@ -1750,46 +1786,19 @@ def _node_values(func, takes):
     return _node_values(copy, takes)
 
 
-def _node_positions(mesh, layout, masks):
-    """The positions of the nodes `masks` select (`layout['owned']`): vertices, then
-    edge midpoints, from the mesh's coordinates now."""
-    x = _geometry(mesh.coordinates())
-    out = [x[masks[0]]]
-    if len(masks) > 1:
-        ends = layout['ends'][masks[1]]
-        out.append(0.5 * (x[ends[:, 0]] + x[ends[:, 1]]))
-    return np.vstack(out)
-
-
 def _function_nodes_distributed(functions, cache=None):
     """The functions' node set -- the mesh's vertices, then (at degree 2) one per edge
     -- left where it already is: every rank returns only the nodes it owns, so nothing
     is gathered. Node ids are the global entity ids -- vertex index, then `n_vert +`
     edge index -- whose order is the file's row order (`XdmfDocument.rows`).
 
-    A node is written by the rank that owns its **entity** (`owned_entities`), and its
-    value is read straight off the field's own dofmap: the dof the space gives that
-    vertex or edge, from the vector's local form, ghosts included (`_node_dofs`,
-    `_node_values`). A linear field on the quadratic node set takes its midsides as
-    the mean of the edge's ends.
-
-    That is what makes a periodic field cheap. Its slave entities share their masters'
-    dofs, so dof ownership cannot say who writes the nodes on both sides of the period,
-    and the field used to be interpolated onto an unconstrained space first
-    (`fast_interpolation`, dolfin's transfer matrix) and read from that space's owned
-    dofs -- which builds point-search trees on every rank. Writing a 611 M-dof periodic
-    Taylor-Hood solution on 256 ranks, that took a job whose three solves had peaked at
-    981 GB to 1753 GiB, over its two nodes' 1480, and it was killed inside the write
-    (stokes-beadpack, 2026-11-12). Read directly, a write holds this rank's entities'
-    dof numbers and values and nothing the size of a space: writing u and p of the
-    291k-cell bead pack (1.36 M dofs) raised the resident size by 180 MiB serially and
-    339 summed over 8 ranks, where the transfer raised it by 525 and 684, and it took
-    1.6 s where that took 10 (1.4 and 3.5 on 8 ranks). The file is the same --
-    geometry and topology bit for bit, on 1 to 4 ranks -- and its values are the dofs'
-    own, where the transfer's were the basis functions evaluated at the nodes, good to
-    rounding: a P2 velocity's agree to 4.4e-16 of its largest value (on the bead pack
-    bit for bit), and a P1 pressure's midsides, now exactly the mean of their ends,
-    differ from the transfer's by up to 1.4e-15 of its largest value.
+    A node is written by the rank that owns its entity (`owned_entities`), and its value
+    is read straight off the field's own dofmap: the dof the space gives that vertex or
+    edge, from the vector's local form, ghosts included (`_node_dofs`, `_node_values`).
+    A linear field on the quadratic node set takes its midsides as the mean of the
+    edge's ends. A periodic field needs nothing more: its slave entities share their
+    masters' dofs, so both sides of the period are written from the same values, and
+    nothing the size of a space is built.
 
     What depends on the mesh and the spaces alone is kept in `cache` (`_node_layout`,
     `_node_dofs`), so a step of a time series costs its values.
@@ -1804,7 +1813,6 @@ def _function_nodes_distributed(functions, cache=None):
                        layout['rows'], _node_values(func, takes)))
     return {'n_nodes': layout['n_nodes'], 'n_cells': layout['n_cells'],
             'degree': degree, 'mesh': mesh, 'layout': layout,
-            'coord_rows': layout['rows'], 'coord_masks': layout['owned'],
             'conn': layout['conn'], 'cell_offset': layout['cell_offset'],
             'fields': fields}
 

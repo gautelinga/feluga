@@ -21,7 +21,8 @@ vector Lagrange Functions of degree 1 or 2 (not mixed: write their components).
 import numpy as np
 
 from femtools.ufc import CELL_NAMES, edge_index
-from femtools.xdmf import (QUADRATIC, XDMF_TOPOLOGY, XdmfDocument, _int32, _pad3)
+from femtools.xdmf import (QUADRATIC, XDMF_TOPOLOGY, XdmfDocument, _int32, _pad3,
+                           node_dofs, node_layout, node_positions)
 
 
 def _edges_of_cells(mesh, n_cells, pairs):
@@ -40,14 +41,15 @@ EDGES_PER_CELL = {2: QUADRATIC["triangle"][1], 3: QUADRATIC["tetrahedron"][1]}
 
 
 class _Layout:
-    """What writing a field of space V takes, the same every step: the owned cells'
-    global node numbers in XDMF's order, the owned nodes' global numbers and
-    positions, and the local dof (block) at each owned node."""
+    """What writing a field of space V takes, the same every step
+    (femtools.xdmf.node_layout): the owned cells' global node numbers in XDMF's order,
+    the owned nodes' global numbers and positions, and the local dof (block) at each
+    owned node. A rank writes the vertices and edges it owns."""
 
     def __init__(self, V):
+        import dolfinx.mesh
         from femtools.hdf5_rows import agreed
         mesh = V.mesh
-        comm = mesh.comm
         tdim, gdim = mesh.topology.dim, mesh.geometry.dim
         if tdim not in CELL_NAMES:
             raise NotImplementedError("XDMFSeries: triangles and tetrahedra only")
@@ -59,58 +61,46 @@ class _Layout:
             raise NotImplementedError("XDMFSeries: continuous Lagrange of degree 1 or 2")
         mesh.topology.create_connectivity(tdim, 0)
         mesh.topology.create_connectivity(0, tdim)
-        vmap = mesh.topology.index_map(0)
-        n_cells = mesh.topology.index_map(tdim).size_local
+        cmap, vmap = mesh.topology.index_map(tdim), mesh.topology.index_map(0)
+        n_cells = cmap.size_local
         c2v = mesh.topology.connectivity(tdim, 0).array.reshape(-1, tdim + 1)  # all local
-        corners = c2v[:n_cells]
         n_vloc = vmap.size_local + vmap.num_ghosts
         gvert = vmap.local_to_global(np.arange(n_vloc, dtype=np.int32)).astype(np.int64)
         # vertex positions, through the geometry (affine cells: a node a vertex)
-        import dolfinx.mesh
         vx = mesh.geometry.x[dolfinx.mesh.entities_to_geometry(
             mesh, 0, np.arange(n_vloc, dtype=np.int32)).reshape(-1)]
-        n_vert = vmap.size_global
-        conn = gvert[corners]
-        rows = [gvert[:vmap.size_local]]
-        coords = [vx[:vmap.size_local]]
         # each local node's dof (block) through the dof layout's entity dofs, over every
         # local cell (an owned node may lie in ghost cells alone)
         dm = V.dofmap
         cell_dofs = np.asarray(dm.list)
         vdof = [dm.dof_layout.entity_dofs(0, j)[0] for j in range(tdim + 1)]
-        node_dofs = np.full(n_vloc, -1, dtype=np.int64)
-        node_dofs[c2v] = cell_dofs[:, vdof]
-        dofs = [node_dofs[:vmap.size_local]]
+        vertex_dofs = np.full(n_vloc, -1, dtype=np.int64)
+        vertex_dofs[c2v] = cell_dofs[:, vdof]
+        edges = edge_dofs = None
         if degree == 2:
-            emap = mesh.topology.index_map(1)
             pairs = EDGES_PER_CELL[tdim]
-            edges = _edges_of_cells(mesh, n_cells, pairs)
+            cells = _edges_of_cells(mesh, n_cells, pairs)
+            emap = mesh.topology.index_map(1)
             n_eloc = emap.size_local + emap.num_ghosts
-            gedge = emap.local_to_global(np.arange(n_eloc, dtype=np.int32)).astype(np.int64)
-            conn = np.hstack([conn, gedge[edges] + n_vert])
             mesh.topology.create_connectivity(1, 0)
-            e2v = mesh.topology.connectivity(1, 0).array.reshape(-1, 2)
-            rows.append(gedge[:emap.size_local] + n_vert)
-            own_e = e2v[:emap.size_local]
-            coords.append(0.5 * (vx[own_e[:, 0]] + vx[own_e[:, 1]]))
-            n_edges = len(EDGES_PER_CELL[tdim])
-            c2e = mesh.topology.connectivity(tdim, 1).array.reshape(-1, n_edges)
-            edof = [dm.dof_layout.entity_dofs(1, k)[0] for k in range(n_edges)]
+            c2e = mesh.topology.connectivity(tdim, 1).array.reshape(-1, len(pairs))
+            edges = dict(
+                gedge=emap.local_to_global(np.arange(n_eloc, dtype=np.int32)).astype(np.int64),
+                cells=cells, ends=mesh.topology.connectivity(1, 0).array.reshape(-1, 2),
+                owned=np.arange(n_eloc) < emap.size_local, n=emap.size_global)
+            edof = [dm.dof_layout.entity_dofs(1, k)[0] for k in range(len(pairs))]
             edge_dofs = np.full(n_eloc, -1, dtype=np.int64)
             edge_dofs[c2e] = cell_dofs[:, edof]
-            dofs.append(edge_dofs[:emap.size_local])
-            self.n_nodes = n_vert + emap.size_global
-        else:
-            self.n_nodes = n_vert
-        self.conn = conn
-        self.n_cells = mesh.topology.index_map(tdim).size_global
-        self.cell_offset = comm.exscan(len(conn)) or 0
-        self.rows = np.concatenate(rows)
-        self.coords = np.vstack(coords)[:, :gdim]
-        self.topology = XDMF_TOPOLOGY[(CELL_NAMES[tdim], conn.shape[1])]
+        L = node_layout(mesh.comm, gvert, c2v[:n_cells], np.arange(n_vloc) < vmap.size_local,
+                        vmap.size_global, cmap.size_global, edges)
+        self.conn, self.rows = L["conn"], L["rows"]
+        self.n_nodes, self.n_cells, self.cell_offset = (L["n_nodes"], L["n_cells"],
+                                                        L["cell_offset"])
+        self.coords = node_positions(vx, L)[:, :gdim]
+        self.topology = XDMF_TOPOLOGY[(CELL_NAMES[tdim], self.conn.shape[1])]
         self.gdim = gdim
-        self.dofs = np.concatenate(dofs)
-        if agreed(comm, bool(np.any(self.dofs < 0))):
+        self.dofs = node_dofs(L, vertex_dofs, edge_dofs)[0]
+        if agreed(mesh.comm, bool(np.any(self.dofs < 0))):
             raise RuntimeError("XDMFSeries: an owned node in no local cell")
         self.bs = V.dofmap.index_map_bs
 

@@ -7,6 +7,7 @@ compressed (`compress`; dolfin's own writer has no compression).
     write_function(path, u, "u", dofs=("tables.h5", "V"))   # vector_0, the tables linked
     read_function(path, u, "u")            # any number of ranks, either backend's file
     write_mesh_arrays(path, x, cells)      # the mesh from arrays, serially, without dolfin
+    write_mesh_rows(path, name, comm, ...) # a mesh's datasets from either backend's arrays
 
 The same datasets, dtypes, values and attributes as dolfin writes on the same partition
 (`tests/test_dolfin_layout.py` holds the two to every bit on 1 and 3 ranks), so every
@@ -47,23 +48,29 @@ def _offsets(comm, n):
     return first, np.asarray(comm.allgather(first), dtype=np.uint64)
 
 
+def write_mesh_rows(path, name, comm, vertex_rows, x, n_vertices, cells, cell_ids, n_cells,
+                    cellname, mode="w"):
+    """A mesh's datasets in the group `name`: `coordinates` (rows `vertex_rows` of
+    `n_vertices`, values `x`), and this rank's own `cells` (a row a cell, as global vertex
+    indices) as `topology` (with `celltype` and `partition`) and their global ids
+    `cell_ids` as `cell_indices`, rank after rank in `n_cells` rows. Collective."""
+    first, partition = _offsets(comm, len(cells))
+    rows = first + np.arange(len(cells), dtype=np.int64)
+    write_ordered(path, name + "/coordinates", vertex_rows, x, n_vertices, comm, mode=mode)
+    write_ordered(path, name + "/topology", rows, cells, n_cells, comm,
+                  attrs={"celltype": np.bytes_(cellname), "partition": partition})
+    write_ordered(path, name + "/cell_indices", rows, cell_ids, n_cells, comm)
+
+
 def write_mesh(path, mesh, name="mesh", mode="w"):
     """The mesh as `HDF5File(path, mode).write(mesh, name)` writes it. Collective."""
-    comm = mesh.mpi_comm()
     tdim = mesh.topology().dim()
     own = mesh.topology().ghost_offset(tdim)
-    cells = np.asarray(mesh.cells())[:own]
     gv = np.asarray(mesh.topology().global_indices(0), dtype=np.int64)
     gc = np.asarray(mesh.topology().global_indices(tdim), dtype=np.int64)[:own]
-    first, partition = _offsets(comm, own)
-    rows = first + np.arange(own, dtype=np.int64)
-    n_c, n_v = mesh.num_entities_global(tdim), mesh.num_entities_global(0)
-    write_ordered(path, name + "/coordinates", gv, np.asarray(mesh.coordinates()), n_v, comm,
-                  mode=mode)
-    write_ordered(path, name + "/topology", rows, gv[cells], n_c, comm,
-                  attrs={"celltype": np.bytes_(mesh.ufl_cell().cellname()),
-                         "partition": partition})
-    write_ordered(path, name + "/cell_indices", rows, gc, n_c, comm)
+    write_mesh_rows(path, name, mesh.mpi_comm(), gv, np.asarray(mesh.coordinates()),
+                    mesh.num_entities_global(0), gv[np.asarray(mesh.cells())[:own]], gc,
+                    mesh.num_entities_global(tdim), mesh.ufl_cell().cellname(), mode)
 
 
 def _dof_tables(V):

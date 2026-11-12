@@ -57,6 +57,7 @@ from ufl import (  # noqa: F401
 
 from femtools import ksp  # noqa: F401
 from femtools.dolfinx import assembly as _assembly
+from femtools.dolfinx.boundary_markers import BoundaryMarkers, compiled_facets  # noqa: F401
 from femtools.dolfinx import mixed as _mixed
 from femtools.dolfinx.periodic import flat_collapse_map, periodic_box
 from femtools.dolfinx.unique import UniqueDofs
@@ -307,25 +308,19 @@ def write_mesh_h5(path, mesh):
 
 def extent(mesh):
     """`(lower, upper)`: the mesh's bounding box over all ranks, gdim components each."""
-    from femtools.dolfinx.periodic import box_extent
-    lo, hi = box_extent(mesh)
-    return lo[:mesh.geometry.dim], hi[:mesh.geometry.dim]
+    from femtools.hdf5_rows import extent
+    gdim = mesh.geometry.dim
+    return extent(mesh.geometry.x[:, :gdim], mesh.comm, gdim)
 
 
 def mark_walls(boundaries, mesh, marker=1, tol=1e-10):
     """Mark the walls of the obstacles inside the mesh's bounding box `marker`: every
     boundary facet except those on the box's faces, which are set to 0 (femtools.box's
     mark_walls)."""
+    from femtools.periodic_core import on_planes
     lo, hi = extent(mesh)
-
-    def on_box(x):
-        on = np.zeros(x.shape[1], dtype=bool)
-        for i in range(len(lo)):
-            on |= (np.abs(x[i] - lo[i]) < tol) | (np.abs(x[i] - hi[i]) < tol)
-        return on
-
     boundaries.mark(lambda x: np.ones(x.shape[1], dtype=bool), marker)
-    boundaries.mark(on_box, 0)
+    boundaries.mark(lambda x: on_planes(x.T, lo, hi, range(len(lo)), tol), 0)
 
 
 class Faces:
@@ -971,93 +966,15 @@ def assemble(form, tensor=None):
     return tensor
 
 
-MATRIX_CAPACITY = 64
-_MATRICES = LRU(MATRIX_CAPACITY)
-
-
 def assemble_matrix(form, bcs=()):
     """The matrix of the bilinear `form` with the Dirichlet conditions `bcs` applied,
-    assembled once per equal form and conditions (femtools.fast_assembly's
-    assemble_matrix): the same Matrix is returned to every caller."""
-    key = (form, tuple(bcs))
-    A = _MATRICES.get(key)
-    if A is None:
-        if len(form.arguments()) != 2:
-            raise ValueError("assemble_matrix takes a bilinear form")
-        A = assemble(form)
-        for bc in bcs:
-            bc.apply(A)
-        _MATRICES[key] = A
-    return A
+    assembled once per equal form and conditions (femtools.fast_assembly.constant_matrix):
+    the same Matrix is returned to every caller."""
+    from femtools.fast_assembly import constant_matrix
+    return constant_matrix(form, bcs, assemble)
 
 
 # --- boundaries and Dirichlet conditions -----------------------------------------------
-
-class BoundaryMarkers:
-    """Integer markers on the facets of a mesh, as dolfin's facet MeshFunction:
-    set_all(value), mark(where, value) with `where` a vectorized predicate of the
-    coordinates (an array of shape (3, n)) or an object with such an `inside_points`;
-    a boundary facet is marked when its vertices and its midpoint satisfy it. `meshtags()` gives
-    the boundary facets' markers for DOLFINx (Measure takes the BoundaryMarkers)."""
-
-    def __init__(self, mesh, value=0):
-        self.mesh = mesh
-        tdim = mesh.topology.dim
-        mesh.topology.create_entities(tdim - 1)
-        mesh.topology.create_connectivity(tdim - 1, tdim)
-        imap = mesh.topology.index_map(tdim - 1)
-        self.values = np.full(imap.size_local + imap.num_ghosts, value, dtype=np.int32)
-        self.boundary = dolfinx.mesh.exterior_facet_indices(mesh.topology)
-        self._tags = None
-        self.version = 0      # counts the changes, for the forms compiled with them
-
-    def set_all(self, value):
-        self.values[:] = value
-        self._changed()
-
-    def _changed(self):
-        self._tags = None
-        self.version += 1
-
-    def mark(self, where, value):
-        """Mark `value` on the boundary facets where `where` holds at every vertex and
-        at the midpoint (as dolfin's SubDomain.mark checks them)."""
-        predicate = getattr(where, "inside_points", where)
-        fdim = self.mesh.topology.dim - 1
-        facets = dolfinx.mesh.locate_entities_boundary(self.mesh, fdim, predicate)
-        if len(facets):
-            mid = dolfinx.mesh.compute_midpoints(self.mesh, fdim, facets)
-            facets = facets[np.asarray(predicate(mid.T), dtype=bool)]
-        self.values[facets] = value
-        self._changed()
-
-    def array(self):
-        """The local facets' markers (owned and ghost), as dolfin's MeshFunction.array();
-        written through set_values."""
-        return self.values
-
-    def set_values(self, values):
-        self.values[:] = values
-        self._changed()
-
-    def where(self, value):
-        """The local facets (owned and ghost) marked `value`."""
-        return np.flatnonzero(self.values == value).astype(np.int32)
-
-    def write(self, path):
-        """`path` (.xdmf) and its .h5: the exterior facets with a nonzero marker, as
-        femtools.boundary_markers.BoundaryMarkers.write writes them (the file partrac
-        reads). Collective."""
-        from femtools.dolfinx.mesh import write_boundary_facets
-        return write_boundary_facets(path, self.mesh, self.values)
-
-    def meshtags(self):
-        if self._tags is None:
-            facets = np.sort(self.boundary).astype(np.int32)
-            self._tags = dolfinx.mesh.meshtags(self.mesh, self.mesh.topology.dim - 1,
-                                               facets, self.values[facets])
-        return self._tags
-
 
 # ufl.Measure, taking a BoundaryMarkers as subdomain data, read when a form is compiled.
 Measure = ufl.Measure
@@ -1149,36 +1066,6 @@ class DirichletBC:
                     a[self._local] = self.values()
             else:
                 raise TypeError("DirichletBC.apply: a Matrix or a Vector")
-
-
-def compiled_facets(mesh, code):
-    """The local facets where `code` holds, as dolfin's CompiledSubDomain marks them: C++
-    in x[0], x[1], x[2] and `on_boundary` (true on exterior facets), compiled as an
-    Expression is (femtools.dolfinx.expression); a facet is in when the code holds at its
-    vertices and its midpoint."""
-    from femtools.dolfinx.expression import CompiledExpression
-    tdim = mesh.topology.dim
-    mesh.topology.create_entities(tdim - 1)
-    mesh.topology.create_connectivity(tdim - 1, tdim)
-    imap = mesh.topology.index_map(tdim - 1)
-    facets = np.arange(imap.size_local + imap.num_ghosts, dtype=np.int32)
-    nodes = dolfinx.mesh.entities_to_geometry(mesh, tdim - 1, facets)   # (n, tdim)
-    x = mesh.geometry.x[nodes]                                          # (n, tdim, 3)
-    points = np.concatenate([x, x.mean(axis=1, keepdims=True)], axis=1)
-    boundary = np.zeros(len(facets), bool)
-    boundary[dolfinx.mesh.exterior_facet_indices(mesh.topology)] = True
-    on = "on_boundary" in code
-    expr = CompiledExpression(code, mesh.comm, **({"on_boundary": 0.0} if on else {}))
-    inside = np.zeros(points.shape[:2], bool)
-    for flag in ((True, False) if on else (None,)):
-        rows = slice(None) if flag is None else (boundary if flag else ~boundary)
-        if on:
-            expr.on_boundary = 1.0 if flag else 0.0
-        pts = points[rows]
-        if len(pts):
-            inside[rows] = (np.asarray(expr(pts.reshape(-1, 3).T)).reshape(pts.shape[:2])
-                            != 0.0)
-    return facets[inside.all(axis=1)]
 
 
 def compiled_dofs(V, code):

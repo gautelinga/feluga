@@ -21,7 +21,7 @@ by position before comparing (a rank-boundary vertex is ghosted onto more than o
 
 import dolfin as df
 
-from femtools.periodic_core import TOL
+from femtools.periodic_core import TOL, dorfler_threshold_values
 
 
 def congruent(mesh, box, axes, exempt=None, lower=None):
@@ -53,30 +53,11 @@ def compute_box(mesh):
 
 
 def dorfler_threshold(indicator_, theta, comm=None, iterations=60):
-    """The largest t with sum of the indicator over {eta_K > t} at least theta of all.
-
-    Bulk chasing (Doerfler 1996): refine the smallest set of cells carrying a fixed
-    share of the total. Scale free, so it does not care what units the indicator is in,
-    and it responds to how concentrated the error is rather than to how large. For an
-    indicator carrying a sign it sums |eta|: a share of the total contribution, not of
-    the estimate.
-
-    Found by bisection on the threshold rather than by sorting, so nothing is gathered
-    and the cost is a fixed number of small reductions. `df.MPI.sum/max` are
-    allreduces, so every rank leaves with the same answer; a bisection where the ranks
-    disagree about the branch does not terminate together.
-    """
-    comm = comm or df.MPI.comm_world
-    a = abs(indicator_.vector().get_local())
-    total = df.MPI.sum(comm, float(a.sum()))
-    lo, hi = 0.0, df.MPI.max(comm, float(a.max()) if len(a) else 0.0)
-    if total <= 0.0:
-        return 0.0
-    for _ in range(iterations):
-        mid = 0.5 * (lo + hi)
-        got = df.MPI.sum(comm, float(a[a > mid].sum()))
-        lo, hi = (mid, hi) if got >= theta * total else (lo, mid)
-    return lo
+    """The bulk-chasing threshold of a DG0 indicator Function
+    (`periodic_core.dorfler_threshold_values` of its local values; `comm` default the
+    world)."""
+    return dorfler_threshold_values(indicator_.vector().get_local(), theta,
+                                    comm or df.MPI.comm_world, iterations)
 
 
 def refine_congruent(mesh, cell_markers, box, axes, redistribute=False, max_cells=None,

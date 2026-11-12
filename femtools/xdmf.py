@@ -20,9 +20,9 @@ padded to three components, as dolfin pads it (XDMF's Vector has three).
 
 ## What `XDMFFile2` covers
 
-It is a drop-in for `dolfin.XDMFFile`, not just for the one case it was written for,
-and it writes the *same file layout* legacy dolfin writes -- so dolfin reads back
-what it produces, and a reader that copes with one copes with the other:
+It is a drop-in for `dolfin.XDMFFile`, and it writes the *same file layout* legacy
+dolfin writes -- so dolfin reads back what it produces, and a reader that copes with one
+copes with the other:
 
     write(Function)                write(Function, t)
     write(Mesh)                    write(MeshFunction)      write(MeshValueCollection)
@@ -40,7 +40,7 @@ It differs from `dolfin.XDMFFile` in exactly four ways, all of them deliberate:
   each other, and the mesh is stored once instead of once per field.
 - **A MeshFunction and a Function can share a file.** `dolfin.XDMFFile` *segfaults*
   on that combination -- `write(mf)` followed by `write(u)` takes the process down,
-  in that order only -- which is measured in `tests/test_xdmf.py`.
+  in that order only (`tests/test_xdmf.py`).
 - **A MeshFunction can share a *grid*, as cell data.** `write((u, p, tags))` writes
   the MeshFunction as a `Center="Cell"` attribute on the one grid the fields are on,
   which is what a value per cell is; dolfin has no call for this and rejects a tuple
@@ -128,9 +128,8 @@ MESHIO_TOPOLOGY = {'tetra': 'Tetrahedron', 'tetra10': 'Tetrahedron_10',
 class Encoding(object):
     """`XDMFFile.Encoding` -- the arrays go to HDF5 beside the XML.
 
-    dolfin also has an ASCII encoding, inlining the arrays into the XML. Support
-    for it was removed: nothing here wrote it, and it is refused loudly rather
-    than quietly written as HDF5.
+    dolfin also has an ASCII encoding, inlining the arrays into the XML. It is
+    refused rather than quietly written as HDF5.
     """
     HDF5 = 'HDF5'
 
@@ -141,7 +140,7 @@ class Encoding(object):
             return Encoding.HDF5
         name = str(getattr(value, 'name', value)).upper()
         if name == 'ASCII':
-            raise ValueError('ASCII encoding is no longer supported; '
+            raise ValueError('ASCII encoding is not supported; '
                              'the arrays go to HDF5')
         if name != 'HDF5':
             raise ValueError('{!r} is not an XDMF encoding'.format(value))
@@ -413,11 +412,10 @@ class XdmfDocument(object):
                 'Name': 'TimeSeries', 'GridType': 'Collection',
                 'CollectionType': 'Temporal'})
             self._changed.add(self.series)      # not a step: the file is rewritten
-        # A grid written before the first timed one stays where it is. It used to be
-        # moved in here, which put a grid carrying no <Time> inside a temporal
-        # collection -- ambiguous to a reader, and it misrepresents a static mesh as a
-        # time step. dolfin does something worse with the same sequence: measured,
-        # `write(mesh)` then `write(u, t)` **drops the mesh grid altogether**.
+        # A grid written before the first timed one stays where it is: a grid with no
+        # <Time> inside a temporal collection would be ambiguous to a reader and make a
+        # static mesh a time step. (dolfin, given `write(mesh)` then `write(u, t)`,
+        # drops the mesh grid.)
         return self.series
 
     # -- output ----------------------------------------------------------------
@@ -690,8 +688,7 @@ class XDMFFile2(object):
 
         The trailing `encoding` argument dolfin takes is accepted in the same place,
         and `time=`/`encoding=` keywords as well. A time on anything but a Function
-        is refused the way dolfin refuses it -- there is no grid to hang it on, and
-        accepting it silently is the class of silence this module exists to remove.
+        is refused the way dolfin refuses it: there is no grid to hang it on.
         Several functions written together share one grid, the highest degree among
         them, so a P1 pressure beside a P2 velocity is carried onto the quadratic
         nodes. That is exact -- linear interpolation of a linear field -- but it does
@@ -726,16 +723,13 @@ class XDMFFile2(object):
             encoding = _merge_write_arg(encoding, e, 'encoding')
         if isinstance(obj, (tuple, list)) and obj and any(
                 isinstance(o, df.Function) for o in obj):
-            # any position, not just the first: the docstring says order does not
-            # matter, and dispatching on obj[0] made `write((tags, u))` fall through
-            # to "does not write a tuple", which names the wrong problem
+            # a Function in any position: the tuple's order does not matter
             functions, tags = _split_cell_tags(list(obj))
             return self._write_functions(functions, time, encoding, tags)
         if isinstance(obj, df.Function):
             return self._write_functions([obj], time, encoding)
         if time is not None:
-            # dolfin has no write(Mesh, t) overload and says so; dropping the
-            # time quietly wrote a grid with no <Time> and no error
+            # dolfin has no write(Mesh, t) overload and says so
             raise TypeError('write({}, t) takes no time; only a Function does'
                             .format(type(obj).__name__))
         if isinstance(obj, df.Mesh):
@@ -777,10 +771,11 @@ class XDMFFile2(object):
             store = self._stored.get((mesh.id(), degree))
             if store is None or self.parameters['rewrite_function_mesh']:
                 group = doc.mesh_group(time is not None)
-                coords = _node_positions(mesh, info['layout'], info['coord_masks'])
+                coords = node_positions(_geometry(mesh.coordinates()), info['layout'])
                 store = (doc.slab(group + '/topology', info['cell_offset'],
                                   _int32(conn), n_cells),
-                         doc.rows(group + '/geometry', info['coord_rows'], coords, n_nodes))
+                         doc.rows(group + '/geometry', info['layout']['rows'], coords,
+                                  n_nodes))
                 self._stored[(mesh.id(), degree)] = store
             doc.topology(grid, conn, topology_type, ref=store[0],
                          shape=(n_cells, conn.shape[1]))
@@ -985,9 +980,8 @@ class XDMFFile2(object):
         lost and there is nothing here to improve on. It has a file layout of its own,
         though, so a file cannot hold both a checkpoint and visualisation grids;
         asking for both says so. The parameters are dolfin's, names included
-        (`function_name`, `time_step`), and `append` is forwarded: dropping it made
-        a time series keep only its last step, since dolfin truncates the file on
-        every non-appending call.
+        (`function_name`, `time_step`), and `append` is forwarded: dolfin truncates the
+        file on every call that does not append.
         """
         import dolfin as df
         if self._doc is not None:
@@ -1151,10 +1145,9 @@ def _is_points(obj):
 def _mvc_dtype(mvc):
     """The dtype a MeshValueCollection's values really have, off its class name.
 
-    They were all forced to uint64, which floors a double collection's values and
-    wraps a -1 'unmarked' int to 2**64-1 -- dolfin writes each value type
-    faithfully, so must this. dolfin's classes are MeshValueCollection_sizet,
-    _double, _int and _bool.
+    dolfin writes each value type as it is -- a uint64 would floor a double
+    collection's values and wrap a -1 'unmarked' int to 2**64-1 -- and so does this.
+    dolfin's classes are MeshValueCollection_sizet, _double, _int and _bool.
     """
     name = type(mvc).__name__
     if name.endswith('_double'):
@@ -1273,21 +1266,14 @@ def _cpp():
     """The JIT-compiled C++ helpers. Raises if they will not build.
 
     `dolfin.compile_cpp_code` needs a compiler and the dolfin headers
-    (`libdolfin-dev`); the first call compiles (~4 s) and dijitso caches the
-    result, so every later process pays milliseconds. Both are assumed present,
-    as they are by dolfin itself, which JIT-compiles every
-    variational form -- so this is only reached where all of that already worked.
+    (`libdolfin-dev`); the first call compiles and dijitso caches the result for
+    later processes. Both are assumed present, as they are by dolfin itself, which
+    JIT-compiles every variational form. The fallbacks below are about argument types
+    the pybind casters refuse, not about the compiler.
 
-    A `np.fromiter` fallback for the connectivity used to stand behind this, with
-    `XDMF2_NO_CPP=1` to reach it. It is gone: nothing in production could take it,
-    it existed for a machine this project cannot run on anyway, and a branch whose
-    only evidence of correctness is a test that forces it is a liability rather
-    than a safety net. The two fallbacks that remain below are not about the
-    compiler at all -- they are about *argument types* the pybind casters refuse,
-    which happens with a working helper.
-
-    This is reached only from the dolfin-facing paths; the document core read HDF5 with numpy and h5py and never come here, so the module
-    is still usable with no dolfin at all.
+    This is reached only from the dolfin-facing paths; the document core reads HDF5
+    with numpy and h5py and never comes here, so the module is usable with no dolfin
+    at all.
     """
     global _CPP_MODULE
     if _CPP_MODULE is False:
@@ -1299,13 +1285,10 @@ def _cpp():
 def _connectivity(mesh, dim, of_dim=0):
     """The entity-to-vertex table of `dim`, as an array rather than a Python list.
 
-    `mesh.topology()(d, 0)()` hands back a **list** of ints -- 295200 of them for the
-    facets of a 48k-cell mesh -- and walking it was most of the cost of writing a
-    MeshFunction, at about 4.5x dolfin's time. The C++ storage behind that list is
-    one contiguous vector, so the JIT helper above reads it in one copy (measured
-    96x quicker than the list at 777k facets) and the ratio drops to about one.
-    The two dimensions that have a real array behind them avoid the question
-    altogether.
+    `mesh.topology()(d, 0)()` hands back a Python list of ints, slow to walk on a large
+    mesh. The C++ storage behind it is one contiguous vector, which the JIT helper
+    above reads in one copy. The two dimensions that have a real array behind them
+    avoid the question altogether.
     """
     tdim = mesh.topology().dim()
     if of_dim == 0 and dim == tdim:
@@ -1352,18 +1335,11 @@ def _plain_space(mesh, degree, width, cache):
     """An unconstrained Lagrange space, built once per mesh, degree and width and kept in
     `cache`, which is a file's (`XDMFFile2._nodes`) and goes when the file closes.
 
-    Only reading needs one now (`_read_nodal`): the file's nodes are matched to its
-    distinct dof coordinates and the field interpolated from it onto the caller's
-    space. Writing reads a field's own dofs (`_node_dofs`) and builds none -- it used
-    to interpolate every field not already of this kind onto one, and the transfer's
-    point-search trees took a 611 M-dof periodic Stokes write past its nodes' memory
-    (`_function_nodes_distributed`).
-
-    Building one is not cheap -- 48 ms for a P2 space on 48k cells -- and a series read
-    step by step would otherwise build an identical one for every step. Kept in a
-    module-wide cache instead, the space and its transfers (`fast_interpolation`)
-    outlived every file: at 224 M dofs on 128 ranks they sat beside the next Stokes
-    solves and took the job past its node's memory (stokes-beadpack, 2026-11-12).
+    Reading needs one (`_read_nodal`): the file's nodes are matched to its distinct dof
+    coordinates and the field interpolated from it onto the caller's space. Writing
+    reads a field's own dofs (`_node_dofs`) and builds none. A series read step by step
+    builds it once; it goes with the file rather than with the process, since the space
+    and its transfers (`fast_interpolation`) are as large as the field's.
     """
     import dolfin as df
     key = ('plain', mesh.id(), degree, width)
@@ -1379,12 +1355,9 @@ def _plain_space(mesh, degree, width, cache):
 
 def _release_plain(cache):
     """Let go of what `cache` holds -- its unconstrained spaces, the transfers onto and
-    from them, the node layouts and node dofs -- and hand the heap back.
-
-    The heap goes back whenever the file held anything, not only spaces: a write's
-    own transients (the dofmap's entity lists, the compressed chunks) otherwise stay
-    resident once dolfin is imported (`femtools.memory`) -- 153 MiB of the 618 a
-    serial write of the 1.36 M-dof bead pack field left behind."""
+    from them, the node layouts and node dofs -- and hand the heap back
+    (`femtools.memory`) whenever it held anything: a write's own transients (the dofmap's
+    entity lists, the compressed chunks) otherwise stay resident."""
     from femtools import fast_interpolation
     from femtools.memory import drop
     held = [v for k, v in cache.items() if isinstance(k, tuple) and k[:1] == ('plain',)]
@@ -1526,15 +1499,9 @@ def _check_functions(functions):
 
 
 def _entity_dofs(dofmap, mesh, dim):
-    """`dofmap.entity_dofs` as an integer array, empty or not.
-
-    It hands back a Python list, and `np.asarray([])` is float64 -- which cannot
-    index anything, so a rank owning no entities of this dimension died with
-    "arrays used as indices must be of integer type" while every other rank sat in
-    the collective HDF5 open waiting for it. Nothing dolfin partitions leaves a rank
-    empty, so this only shows up on a mesh built by hand -- the no-slip surface of a
-    flow, whose facets can miss a rank entirely -- and it shows up as a hang.
-    """
+    """`dofmap.entity_dofs` as an integer array, empty or not: it hands back a list, and
+    `np.asarray([])` is float64, which cannot index -- on a rank with no entities of the
+    dimension (a mesh built by hand can leave one so) that would raise there alone."""
     return np.asarray(dofmap.entity_dofs(mesh, dim), dtype=np.int64)
 
 
@@ -1547,10 +1514,8 @@ def owned_entities(mesh, dim):
     value is read from the vector's ghosts where the dof is another rank's
     (`_node_dofs`). The rule is the lowest rank among those sharing the entity, read off
     `mesh.topology().shared_entities(dim)`. It needs no communication -- each rank
-    already knows who else holds the entity -- and it partitions exactly: measured on
-    a 6x6x6 cube over three ranks, 143 + 120 + 80 = 343 vertices and
-    673 + 640 + 541 = 1854 edges, against those global counts. `hdf5_rows.write_rows`
-    checks that claim on every write rather than trusting it.
+    already knows who else holds the entity -- and it partitions the entities exactly,
+    which `hdf5_rows.write_rows` checks on every write.
     """
     import dolfin as df
     from femtools.hdf5_rows import agreed
@@ -1609,62 +1574,106 @@ def _owned_cells(mesh):
     return np.asarray(mesh.cells())[:mesh.topology().ghost_offset(tdim)]
 
 
+def node_layout(comm, gvert, cells, owned_vertices, n_vertices, n_cells, edges=None):
+    """What a write of a degree-1 or 2 field takes of the mesh's topology, from either
+    backend's arrays: `gvert` each local vertex's global id, `cells` this rank's own cells
+    as local vertices, `owned_vertices` which local vertices this rank writes, and the
+    global vertex and cell counts. At degree 2 `edges` holds `gedge` (each local edge's
+    global id), `cells` (the own cells' local edges), `ends` (each local edge's two local
+    vertices), `owned` (which local edges this rank writes), `n` (the global edge count)
+    and `order` (a cell's vertex then edge columns put in XDMF's order, or None).
+
+    Returns a dict: `conn` the own cells' global node numbers (a node's number is its
+    vertex's global id, or `n_vertices` plus its edge's), `rows` the numbers of the nodes
+    this rank writes, `owned` their masks (vertices, then edges), `ends`, the counts
+    `n_nodes` and `n_cells`, and `cell_offset`, the cells' first row in the rank-major
+    topology."""
+    gvert = np.asarray(gvert)
+    conn = gvert[cells]
+    owned, rows = [owned_vertices], [gvert[owned_vertices]]
+    n_nodes, ends = n_vertices, None
+    if edges is not None:
+        gedge = np.asarray(edges['gedge'])
+        conn = np.hstack((conn, gedge[edges['cells']] + n_vertices))
+        if edges.get('order') is not None:
+            conn = conn[:, edges['order']]
+        owned.append(edges['owned'])
+        rows.append(gedge[edges['owned']] + n_vertices)
+        n_nodes += edges['n']
+        ends = edges['ends']
+    return dict(conn=conn, rows=np.concatenate(rows), owned=owned, ends=ends,
+                n_nodes=n_nodes, n_cells=n_cells, cell_offset=_exscan(comm, len(conn)))
+
+
+def node_positions(x, layout):
+    """The positions of the nodes a rank writes (`node_layout`): its vertices' of `x`
+    (the local vertices' coordinates), then its edges' midpoints."""
+    owned = layout['owned']
+    out = [x[owned[0]]]
+    if len(owned) > 1:
+        ends = layout['ends'][owned[1]]
+        out.append(0.5 * (x[ends[:, 0]] + x[ends[:, 1]]))
+    return np.vstack(out)
+
+
+def node_dofs(layout, vertex_dofs, edge_dofs=None):
+    """`(direct, ends)`: the dofs of the nodes a rank writes (`node_layout`), from each
+    local vertex's dofs (`vertex_dofs`, a row a vertex) and at degree 2 each local edge's
+    (`edge_dofs`). `direct` holds a row a node with dofs of its own; a linear field on
+    the quadratic nodes (`edge_dofs` None) has none at the edges, which take the mean of
+    their ends' dofs, `ends` (two arrays of rows, else None)."""
+    owned = layout['owned']
+    direct, ends = [vertex_dofs[owned[0]]], None
+    if len(owned) > 1 and edge_dofs is not None:
+        direct.append(edge_dofs[owned[1]])
+    elif len(owned) > 1:
+        pairs = layout['ends'][owned[1]]
+        ends = (vertex_dofs[pairs[:, 0]], vertex_dofs[pairs[:, 1]])
+    return np.concatenate(direct), ends
+
+
 def _node_layout(mesh, degree, cache):
-    """What a write of a degree-`degree` field on `mesh` needs of its topology, the
-    same every step: the owned cells' global node numbers in XDMF's order, the
-    vertices' and edges' global ids and the edges' ends, the counts, the cells'
-    offset in the rank-major topology, and which vertices and edges this rank writes
-    (`owned`, a mask per dimension, `owned_entities`) under which node ids (`rows`).
-    Kept in `cache` by (mesh id, degree); the coordinates are not, a mesh may move
-    between writes (`_node_positions`). Collective (`owned_entities`)."""
+    """`node_layout` of a dolfin mesh, kept in `cache` by (mesh id, degree); the
+    coordinates are not, a mesh may move between writes (`node_positions`). dolfin
+    numbers a cell's edges by the vertex pairs QUADRATIC names, which is checked on the
+    local cells (`_check_midsides`). Collective (`owned_entities`)."""
     key = ('mesh', mesh.id(), degree)
     if key in cache:
         return cache[key]
     tdim = mesh.topology().dim()
-    gvert = np.asarray(mesh.topology().global_indices(0))
-    n_vert = mesh.num_entities_global(0)
-    vertices = np.asarray(mesh.coordinates())
     cells = _owned_cells(mesh)
-    conn = gvert[cells]
-    n_nodes, gedge, mid = n_vert, None, None
+    owned = owned_entities(mesh, 0)
+    edges = None
     if degree == 2:
         mesh.init(1)
         mesh.init(tdim, 1)
         mesh.init(1, 0)
         mesh.init_global(1)
-        gedge = np.asarray(mesh.topology().global_indices(1))
-        n_nodes = n_vert + mesh.num_entities_global(1)
         ends = _connectivity(mesh, 1)
-        mid = 0.5 * (vertices[ends[:, 0]] + vertices[ends[:, 1]])
-        # dolfin numbers a cell's local edges by the vertex pairs DOLFIN_EDGES (or
-        # DOLFIN_TRIANGLE_EDGES) names -- checked here on the local cells, not
-        # assumed: a midside named for the wrong edge writes a plausible, wrong cell
         cellname = mesh.ufl_cell().cellname()
         order = QUADRATIC[cellname][2]
         cell_edges = _connectivity(mesh, tdim, 1)[:len(cells)]
         if len(cells):
+            vertices = np.asarray(mesh.coordinates())
+            mid = 0.5 * (vertices[ends[:, 0]] + vertices[ends[:, 1]])
             _check_midsides(np.vstack((vertices, mid)),
                             np.hstack((cells, cell_edges + len(vertices)))[:, order],
                             cellname)
-        conn = np.hstack((conn, gedge[cell_edges] + n_vert))[:, order]
-    owned = [owned_entities(mesh, 0)] + ([owned_entities(mesh, 1)] if degree == 2 else [])
-    rows = np.concatenate([gvert[owned[0]]] +
-                          ([gedge[owned[1]] + n_vert] if degree == 2 else []))
-    layout = dict(gvert=gvert, gedge=gedge, ends=ends if degree == 2 else None, conn=conn,
-                  n_vert=n_vert, n_nodes=n_nodes,
-                  n_cells=mesh.num_entities_global(tdim),
-                  cell_offset=_exscan(mesh.mpi_comm(), len(conn)),
-                  owned=owned, rows=rows)
+        edges = dict(gedge=mesh.topology().global_indices(1), cells=cell_edges, ends=ends,
+                     owned=owned_entities(mesh, 1), n=mesh.num_entities_global(1),
+                     order=order)
+    layout = node_layout(mesh.mpi_comm(), mesh.topology().global_indices(0), cells, owned,
+                         mesh.num_entities_global(0), mesh.num_entities_global(tdim), edges)
     cache[key] = layout
     return layout
 
 
 def _node_dofs(V, mesh, degree, width, layout, cache):
-    """Where each component's values at this rank's nodes (`layout['owned']`) sit in
-    the local form of a V Function's vector -- owned dofs, then ghosts -- as a pair per
-    component: the local dof of each node that has one of its own, and, for a linear
-    field on the quadratic node set, the dofs at the two ends of each edge (its midside
-    value is their mean, which is exact for a linear field), None otherwise.
+    """Where each component's values at this rank's nodes sit in the local form of a V
+    Function's vector -- owned dofs, then ghosts -- as a pair per component (`node_dofs`):
+    the local dof of each node that has one of its own, and, for a linear field on the
+    quadratic node set, the dofs at the two ends of each edge (its midside value is their
+    mean, which is exact for a linear field), None otherwise.
 
     The dof is the one V's dofmap gives the entity, so a periodic V needs nothing
     else: a slave vertex or edge is mapped to its master's dof, whose value is the
@@ -1673,17 +1682,14 @@ def _node_dofs(V, mesh, degree, width, layout, cache):
     it in their own cells), so its value is either owned or one of the vector's ghosts.
 
     The components come from V's own dofmap, which lists an entity's dofs component by
-    component -- its `width` columns are what `V.sub(c).dofmap()` gives, checked on
-    vector, tensor and mixed-component spaces (tests/test_xdmf.py) -- rather than from
-    the sub-dofmaps: each `V.sub(c)` is a space V keeps for its own lifetime, with a
-    copy of the cell table, 12 MB a component on the 291k-cell bead pack. A component
-    of a mixed Function (`Function.split()`) is read the same way, its dofmap indexing
-    the mixed vector. Kept in `cache` by (V's id, degree): a time series writes the
-    same space every step."""
+    component -- its `width` columns are what `V.sub(c).dofmap()` gives -- rather than
+    from the sub-dofmaps, each of which V keeps for its own lifetime with a copy of the
+    cell table. A component of a mixed Function (`Function.split()`) is read the same
+    way, its dofmap indexing the mixed vector. Kept in `cache` by (V's id, degree): a
+    time series writes the same space every step."""
     key = ('space', V.id(), degree)
     if key in cache:
         return cache[key]
-    owned = layout['owned']
     linear = degree == 2 and V.ufl_element().degree() == 1
 
     def entity_dofs(dim):
@@ -1694,14 +1700,8 @@ def _node_dofs(V, mesh, degree, width, layout, cache):
                                  len(dofs), mesh.num_entities(dim), dim, width))
         return dofs.reshape(-1, width)
 
-    vertex = entity_dofs(0)
-    direct, ends = [vertex[owned[0]]], None
-    if degree == 2 and not linear:
-        direct.append(entity_dofs(1)[owned[1]])
-    elif linear:
-        pairs = layout['ends'][owned[1]]
-        ends = (vertex[pairs[:, 0]], vertex[pairs[:, 1]])
-    direct = np.concatenate(direct)
+    direct, ends = node_dofs(layout, entity_dofs(0),
+                             entity_dofs(1) if degree == 2 and not linear else None)
     takes = [(np.ascontiguousarray(direct[:, c]),
               None if ends is None else tuple(np.ascontiguousarray(e[:, c]) for e in ends))
              for c in range(width)]
@@ -1750,46 +1750,19 @@ def _node_values(func, takes):
     return _node_values(copy, takes)
 
 
-def _node_positions(mesh, layout, masks):
-    """The positions of the nodes `masks` select (`layout['owned']`): vertices, then
-    edge midpoints, from the mesh's coordinates now."""
-    x = _geometry(mesh.coordinates())
-    out = [x[masks[0]]]
-    if len(masks) > 1:
-        ends = layout['ends'][masks[1]]
-        out.append(0.5 * (x[ends[:, 0]] + x[ends[:, 1]]))
-    return np.vstack(out)
-
-
 def _function_nodes_distributed(functions, cache=None):
     """The functions' node set -- the mesh's vertices, then (at degree 2) one per edge
     -- left where it already is: every rank returns only the nodes it owns, so nothing
     is gathered. Node ids are the global entity ids -- vertex index, then `n_vert +`
     edge index -- whose order is the file's row order (`XdmfDocument.rows`).
 
-    A node is written by the rank that owns its **entity** (`owned_entities`), and its
-    value is read straight off the field's own dofmap: the dof the space gives that
-    vertex or edge, from the vector's local form, ghosts included (`_node_dofs`,
-    `_node_values`). A linear field on the quadratic node set takes its midsides as
-    the mean of the edge's ends.
-
-    That is what makes a periodic field cheap. Its slave entities share their masters'
-    dofs, so dof ownership cannot say who writes the nodes on both sides of the period,
-    and the field used to be interpolated onto an unconstrained space first
-    (`fast_interpolation`, dolfin's transfer matrix) and read from that space's owned
-    dofs -- which builds point-search trees on every rank. Writing a 611 M-dof periodic
-    Taylor-Hood solution on 256 ranks, that took a job whose three solves had peaked at
-    981 GB to 1753 GiB, over its two nodes' 1480, and it was killed inside the write
-    (stokes-beadpack, 2026-11-12). Read directly, a write holds this rank's entities'
-    dof numbers and values and nothing the size of a space: writing u and p of the
-    291k-cell bead pack (1.36 M dofs) raised the resident size by 180 MiB serially and
-    339 summed over 8 ranks, where the transfer raised it by 525 and 684, and it took
-    1.6 s where that took 10 (1.4 and 3.5 on 8 ranks). The file is the same --
-    geometry and topology bit for bit, on 1 to 4 ranks -- and its values are the dofs'
-    own, where the transfer's were the basis functions evaluated at the nodes, good to
-    rounding: a P2 velocity's agree to 4.4e-16 of its largest value (on the bead pack
-    bit for bit), and a P1 pressure's midsides, now exactly the mean of their ends,
-    differ from the transfer's by up to 1.4e-15 of its largest value.
+    A node is written by the rank that owns its entity (`owned_entities`), and its value
+    is read straight off the field's own dofmap: the dof the space gives that vertex or
+    edge, from the vector's local form, ghosts included (`_node_dofs`, `_node_values`).
+    A linear field on the quadratic node set takes its midsides as the mean of the
+    edge's ends. A periodic field needs nothing more: its slave entities share their
+    masters' dofs, so both sides of the period are written from the same values, and
+    nothing the size of a space is built.
 
     What depends on the mesh and the spaces alone is kept in `cache` (`_node_layout`,
     `_node_dofs`), so a step of a time series costs its values.
@@ -1804,7 +1777,6 @@ def _function_nodes_distributed(functions, cache=None):
                        layout['rows'], _node_values(func, takes)))
     return {'n_nodes': layout['n_nodes'], 'n_cells': layout['n_cells'],
             'degree': degree, 'mesh': mesh, 'layout': layout,
-            'coord_rows': layout['rows'], 'coord_masks': layout['owned'],
             'conn': layout['conn'], 'cell_offset': layout['cell_offset'],
             'fields': fields}
 
@@ -1830,23 +1802,52 @@ def _block_of(path, item, comm):
     return np.asarray(block).reshape((b - a,) + tuple(shape[1:]))
 
 
+def read_nodes_at(path, grid, name, x, comm):
+    """The values of the node attribute `name` of `grid` (a grid of `path`, `grids`) at
+    the points `x` (rows of gdim coordinates), a row a point: each point's value is the
+    one at the file's node within `1e-9` of the nodes' extent (at least 1) of it. Each
+    rank reads one block of the file's nodes, and nodes and points meet by position
+    (`hdf5_rows.match_nodes`), so nothing is read whole. Refused on every rank when the
+    file's nodes leave the points' space or a point has no node. Collective on comm
+    (None for one rank)."""
+    from femtools.hdf5_rows import agreed, as_rows, extent, match_nodes
+    x = as_rows(np.asarray(x, dtype=float))
+    gdim = x.shape[1]
+    coords = as_rows(np.asarray(_block_of(path, grid['geometry_item'], comm), dtype=float))
+    values = as_rows(_block_of(path, grid['attributes'][name], comm))
+    # a file of three coordinates on a 2D mesh: its z is zero, or it is another mesh
+    extra = (np.abs(coords[:, gdim:]).max() if len(coords) and coords.shape[1] > gdim
+             else 0.0)
+    if agreed(comm, extra > 0.0):
+        raise ValueError(
+            "{}: the file's nodes leave the plane of this {}D mesh, so it is not the mesh "
+            'the field was written on'.format(path, gdim))
+    if coords.shape[1] < gdim:
+        coords = np.hstack((coords, np.zeros((len(coords), gdim - coords.shape[1]))))
+    coords = np.ascontiguousarray(coords[:, :gdim])
+    lo, hi = extent(coords, comm, gdim)
+    tol = 1e-9 * max(float(np.max(hi - lo)) if len(lo) else 0.0, 1.0)
+    found, distance = match_nodes(comm, coords, values, x, tol, lo)
+    if agreed(comm, bool(len(distance)) and float(distance.max()) > tol):
+        raise ValueError(
+            '{}: a point sits farther than {:.1e} from every node, so the mesh is not the '
+            'one the field was written on'.format(path, tol))
+    return found
+
+
 def _scatter_nodes(target, space, path, grid, name, width, degree):
     """Puts the nodal values of grid's attribute `name` onto an unconstrained space's
-    dofs, matched by position.
+    dofs, matched by position (`read_nodes_at`).
 
     The space is unconstrained, so its dof coordinates are distinct and a nearest
     match is unambiguous -- which is exactly what is *not* true of a periodic space,
     and why the caller interpolates from here rather than writing into one directly.
-    Nothing is read whole: each rank reads one block of the file's nodes, and nodes and
-    dofs meet by position (`match_nodes`). A dof without a node in the file raises on
-    every rank, before the vector is assembled. Collective.
+    Collective.
     """
-    from femtools.hdf5_rows import agreed, as_rows, extent
     mesh = space.mesh()
     comm = mesh.mpi_comm() if mesh.mpi_comm().Get_size() > 1 else None
-    # `dofmap().dofs()` numbers dofs **globally**, while `tabulate_dof_coordinates`
-    # and `get_local` hold this rank's owned rows -- so the global numbers have to be
-    # brought back to local ones, or rank one indexes a 180-row array at 342.
+    # `dofmap().dofs()` numbers dofs globally, while `tabulate_dof_coordinates` and
+    # `get_local` hold this rank's owned rows: the global numbers are made local
     first = space.dofmap().ownership_range()[0]
     gdim = mesh.geometry().dim()
     if width > 1:
@@ -1856,87 +1857,13 @@ def _scatter_nodes(target, space, path, grid, name, width, degree):
     else:
         sub_dofs = [np.asarray(space.dofmap().dofs()) - first]
         x = space.tabulate_dof_coordinates().reshape(-1, gdim)
-
-    coords = as_rows(_block_of(path, grid['geometry_item'], comm))
-    values = as_rows(_block_of(path, grid['attributes'][name], comm))
-    # A file of three coordinates matched to a 2D mesh's dofs: its z must be zero, or
-    # this is a 2D mesh being matched against a 3D one (one of two, against a 3D mesh,
-    # leaves the dofs' z without a match and fails the distance check below)
-    extra = (np.abs(coords[:, gdim:]).max() if len(coords) and coords.shape[1] > gdim
-             else 0.0)
-    if agreed(comm, extra > 0.0):
-        raise ValueError(
-            "the file's nodes leave the plane of this {}D mesh, so it is not the mesh "
-            'the field was written on'.format(gdim))
-    if coords.shape[1] < gdim:
-        coords = np.hstack((coords, np.zeros((len(coords), gdim - coords.shape[1]))))
-    coords = np.ascontiguousarray(coords[:, :gdim])
-    lo, hi = extent(coords, comm, gdim)
-    tol = 1e-9 * max(float(np.max(hi - lo)) if len(lo) else 0.0, 1.0)
-
-    found, far = match_nodes(comm, coords, values, x, tol, lo)
-    if agreed(comm, far > tol):
-        raise ValueError(
-            'a dof sits farther than {:.1e} from every node in the file, so the mesh is '
-            'not the one the field was written on'.format(tol))
+    found = read_nodes_at(path, grid, name, x, comm)
     vector = target.vector()
     local = vector.get_local()
     for c, dofs in enumerate(sub_dofs):
         local[dofs] = found[:, c]
     vector.set_local(local)
     vector.apply('insert')
-
-
-def match_nodes(comm, coords, values, x, tol, lower):
-    """The rows of `values` at the points `x`: each point matched to the node of
-    `coords` (`values` row for row) within `tol` of it, the nodes spread over the ranks
-    as each holds a block of a file's. Returns `(found, far)`: `found` aligned with `x`,
-    and how far the farthest point here is from its node (inf where none is within
-    `tol`). Collective on comm (None for one rank).
-
-    Under MPI nodes and points meet by position, not by partition boxes: space is cut
-    into cubes of side h (much more than `tol`, from `lower`), a point goes to the rank
-    its cube hashes to (`hdf5_rows.rank_of`), and a node to the ranks of every cube
-    within `tol` of it -- one, or a few for a node by a cube's face. Each node and
-    point is sent about once, however the ranks' boxes overlap."""
-    from scipy.spatial import cKDTree
-    from femtools.hdf5_rows import as_rows, rank_of, reply, route
-    coords, values = np.asarray(coords, float), as_rows(values)
-    x = np.asarray(x, float)
-    width = values.shape[1]
-    if comm is not None and comm.Get_size() > 1:
-        size = comm.Get_size()
-        h = 1e3 * tol
-        lower = np.asarray(lower, float)
-        lo_bin = np.floor((coords - tol - lower) / h).astype(np.int64)
-        spread = np.floor((coords + tol - lower) / h).astype(np.int64) - lo_bin   # 0 or 1
-        d = coords.shape[1]
-        bins, rows = [], []
-        for offset in np.ndindex(*(2,) * d):
-            offset = np.asarray(offset, dtype=np.int64)
-            keep = np.nonzero((spread >= offset).all(axis=1))[0]
-            bins.append(lo_bin[keep] + offset)
-            rows.append(keep)
-        bins, rows = np.concatenate(bins), np.concatenate(rows)
-        nodes = route(comm, rank_of(bins, size), coords[rows], values[rows])
-        coords, values = nodes.received
-        values = values.reshape(len(values), width)
-        x_bins = np.floor((x - lower) / h).astype(np.int64)
-        asked = route(comm, rank_of(x_bins, size), x)
-        points = asked.received[0].reshape(-1, d)
-    else:
-        asked, points = None, x
-    if len(points) and len(coords):
-        distance, index = cKDTree(coords).query(points)
-        found = values[index]
-    else:
-        distance = np.full(len(points), np.inf)
-        found = np.zeros((len(points), width))
-    if asked is not None:
-        found, distance = reply(comm, asked, found, distance)
-        found = found.reshape(len(x), width)
-    far = float(distance.max()) if len(distance) else 0.0
-    return found, far
 
 
 def _check_midsides(coords, conn, cellname='tetrahedron', sample=200):

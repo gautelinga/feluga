@@ -12,6 +12,11 @@ MODE:
                            helper's and the DOLFINx extension's (FEMTOOLS_JIT_DIR fresh)
   pairing                  DOLFINx's periodic_box on faces that do not match raises on
                            every rank; on a periodic unit square every slave pairs
+  taylor_hood              periodic_box on a Taylor-Hood space: every slave's master is
+                           the dof of the same component at its image
+  zero_cells_dolfin        plaza_periodic on dolfin with ranks holding no cells raises on
+                           every rank (dolfin's refinement hangs there)
+  zero_cells_dolfinx       femtools.dolfinx.refine there: refines, pairs, congruent
 Each rank writes its part; rank 0 merges them into out.json.
 """
 import json
@@ -118,6 +123,78 @@ def pairing():
                                          periodic=(False, True)))
     return {"n_slaves": int(n_slaves), "wrong": wrong,
             "masters_known": bool(COMM.allreduce(int(np.all(masters >= 0)), op=MPI.MIN))}
+
+
+def taylor_hood():
+    import basix.ufl
+    import dolfinx.fem as fem
+    import dolfinx.mesh as dm
+    from femtools.dolfinx.periodic import flat_collapse_map, periodic_box
+
+    def leaves(V):
+        n = V.element.num_sub_elements
+        return [V] if n == 0 else [w for i in range(n) for w in leaves(V.sub(i))]
+    mesh = dm.create_unit_square(COMM, 5, 5)
+    P2 = basix.ufl.element("Lagrange", mesh.basix_cell(), 2, shape=(2,))
+    P1 = basix.ufl.element("Lagrange", mesh.basix_cell(), 1)
+    W = fem.functionspace(mesh, basix.ufl.mixed_element([P2, P1]))
+    slaves, masters = periodic_box(W, upper=(1, 1), periodic=(True, True))
+    imap = W.dofmap.index_map
+    n_loc = imap.size_local + imap.num_ghosts
+    l2g = imap.local_to_global(np.arange(n_loc, dtype=np.int32)).astype(np.int64)
+    # every local dof's position and leaf, by global index, over all ranks
+    where, leaf_of = {}, {}
+    for k, leaf in enumerate(leaves(W)):
+        Vi, parent = leaf.collapse()
+        parent = flat_collapse_map(parent)
+        X = Vi.tabulate_dof_coordinates()
+        for j, p in enumerate(parent):
+            where[int(l2g[p])] = X[j]
+            leaf_of[int(l2g[p])] = k
+    allw, alll = {}, {}
+    for w, lf in zip(COMM.allgather(where), COMM.allgather(leaf_of)):
+        allw.update(w)
+        alll.update(lf)
+    worst, same_leaf = 0.0, True
+    for s_, m in zip(slaves, masters):
+        g = int(l2g[s_])
+        image = np.array(allw[g])
+        image[:2] = np.where(np.isclose(image[:2], 1.0), 0.0, image[:2])
+        worst = max(worst, float(np.abs(image - allw[int(m)]).max()))
+        same_leaf &= alll[g] == alll[int(m)]
+    n_slaves = COMM.allreduce(len(slaves))
+    # P2 x 2 and P1 nodes on the upper faces: 2*(2*10+1) + (2*5+1)
+    return {"n_slaves_owned_or_ghost": int(n_slaves),
+            "worst": COMM.allreduce(worst, op=MPI.MAX),
+            "same_leaf": bool(COMM.allreduce(int(same_leaf), op=MPI.MIN)),
+            "n_unique": len({int(l2g[s_]) for s_ in slaves})}
+
+
+def zero_cells_dolfin():
+    import dolfin as df
+    from femtools.plaza_periodic import refine_periodic
+    from femtools.refine_periodic import refine_congruent
+    mesh = df.UnitSquareMesh(COMM, 1, 1)
+    m = df.MeshFunction("bool", mesh, 2, True)
+    return {"cells": mesh.num_cells(),
+            "periodic": _raised(lambda: refine_periodic(mesh, m, [1.0, 1.0], [0, 1])),
+            "plain": _raised(lambda: refine_congruent(mesh, m, [1.0, 1.0], []))}
+
+
+def zero_cells_dolfinx():
+    import dolfinx.mesh as dm
+    from femtools.dolfinx.refine import congruent, refine_congruent, refine_periodic
+    mesh = dm.create_rectangle(COMM, [[0, 0], [1, 1]], [1, 1], dm.CellType.triangle)
+    out = {"cells": int(mesh.topology.index_map(2).size_local)}
+    new, npair, parent = refine_periodic(mesh, None, [1.0, 1.0], [0, 1], redistribute=False)
+    out["periodic"] = [int(new.topology.index_map(2).size_global), npair, len(parent)]
+    out["congruent"] = bool(congruent(new, [1.0, 1.0], [0, 1]))
+    new, _, _ = refine_congruent(mesh, None, [1.0, 1.0], [0, 1], max_cells=100,
+                                 frozen=np.zeros(0, np.int32))
+    out["capped"] = int(new.topology.index_map(2).size_global)
+    new, _, _ = refine_periodic(mesh, None, [1.0, 1.0], [], redistribute=True)
+    out["plain"] = int(new.topology.index_map(2).size_global)
+    return out
 
 
 def main():

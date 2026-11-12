@@ -6,7 +6,10 @@
 - Ghost cells among DOLFINx markers (`locate_entities` returns them) are dropped, their
   owners marking them; indices outside the local cells raise on every rank.
 - A build failing on rank 0 raises on every rank instead of leaving the others waiting.
-- DOLFINx's dof pairing raises on every rank when slaves find no master.
+- DOLFINx's dof pairing raises on every rank when slaves find no master, and pairs a
+  Taylor-Hood space component by component.
+- Ranks holding no cells: DOLFINx refines; dolfin, whose refinement hangs there, raises
+  on every rank.
 - The pairing of face edges is O(n log n) whichever axis is periodic (it was quadratic
   along x).
 - The congruence check matches partners that straddle a rounding boundary of its keys.
@@ -123,3 +126,35 @@ def test_congruence_across_a_rounding_boundary():
     ok, axis, _, _ = faces_congruent_arrays(MPI.COMM_SELF, x, None, [1.0, 1.0], [0], tol,
                                             lower=[0.0, 0.0])
     assert ok, axis
+
+
+@pytest.mark.dolfinx
+@pytest.mark.parametrize("ranks", [1, pytest.param(3, marks=pytest.mark.mpi)])
+def test_taylor_hood_pairing(tmp_path, ranks):
+    pytest.importorskip("dolfinx")
+    rs = _run("taylor_hood", tmp_path, ranks)
+    # the dofs on the upper faces: 2 x 21 P2 nodes (velocity) and 11 P1 ones (pressure)
+    assert sum(r["n_unique"] for r in rs) >= 2 * 21 + 11
+    for r in rs:
+        assert r["worst"] < 1e-12 and r["same_leaf"], r
+
+
+@pytest.mark.dolfin
+@pytest.mark.mpi
+def test_zero_cell_ranks_dolfin(tmp_path):
+    pytest.importorskip("dolfin")
+    rs = _run("zero_cells_dolfin", tmp_path, 4)
+    assert any(r["cells"] == 0 for r in rs)
+    for r in rs:
+        assert r["periodic"] == "ValueError" and r["plain"] == "ValueError", r
+
+
+@pytest.mark.dolfinx
+@pytest.mark.mpi
+def test_zero_cell_ranks_dolfinx(tmp_path):
+    pytest.importorskip("dolfinx")
+    rs = _run("zero_cells_dolfinx", tmp_path, 4)
+    assert any(r["cells"] == 0 for r in rs)
+    for r in rs:
+        assert r["periodic"][:2] == [8, 4] and r["congruent"], r
+        assert r["capped"] == 8 and r["plain"] == 8, r

@@ -17,7 +17,8 @@ slave hears its master's global index back. `tol` is relative to the box
     slaves, masters = periodic_box(V, upper=(Lx, Ly), periodic=(True, False))
 
 `slaves` are local dof indices (owned and ghost, unrolled for blocked spaces), `masters`
-the global dof index of each one's master. Scalar, blocked and mixed Lagrange spaces.
+the global dof index of each one's master. Scalar, blocked and mixed Lagrange spaces
+(Taylor-Hood's too).
 """
 import numpy as np
 
@@ -118,6 +119,15 @@ def _near_bins(y, near):
     return keys, index
 
 
+def _scalar_leaves(V):
+    """V's scalar sub-spaces, depth first: a mixed space's components, and a vector
+    (blocked) component's own components."""
+    n = V.element.num_sub_elements
+    if n == 0:
+        return [V]
+    return [leaf for i in range(n) for leaf in _scalar_leaves(V.sub(i))]
+
+
 def periodic_box(V, upper=None, periodic=None, lower=None, tol=1e-8):
     """Slave dofs of `V` and their masters on a periodic box.
 
@@ -144,11 +154,13 @@ def periodic_box(V, upper=None, periodic=None, lower=None, tol=1e-8):
     bs = V.dofmap.index_map_bs
     n_loc = imap.size_local + imap.num_ghosts
     num_sub = V.element.num_sub_elements
-    if num_sub > 0 and bs == 1:  # mixed space: pair each collapsed component
+    if num_sub > 0 and bs == 1:
+        # a mixed space: pair each scalar leaf, collapsed (a vector sub-space, as
+        # Taylor-Hood's velocity, by its components: its collapse is blocked)
         l2g = imap.local_to_global(np.arange(n_loc, dtype=np.int32)).astype(np.int64)
         S, M = [], []
-        for i in range(num_sub):
-            Vi, parent = V.sub(i).collapse()
+        for leaf in _scalar_leaves(V):
+            Vi, parent = leaf.collapse()
             parent = flat_collapse_map(parent)
             owned = parent < imap.size_local
             order = np.argsort(~owned, kind="stable")  # owned first

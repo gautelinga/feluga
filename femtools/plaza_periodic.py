@@ -429,6 +429,21 @@ def _cpp():
     return _MODULE[0]
 
 
+def require_cells_on_every_rank(mesh, what):
+    """Raise on every rank if some rank holds no cells of `mesh`: dolfin's distributed
+    refinement (`df.refine` too) numbers edges collectively through
+    DistributedMeshTools, which a rank with an empty mesh skips, and the job hangs.
+    Collective."""
+    comm = mesh.mpi_comm()
+    empty = comm.allreduce(int(mesh.num_cells() == 0))
+    if empty:
+        raise ValueError(
+            "{}: {} of {} ranks hold no cells, and dolfin's refinement (df.refine's too) "
+            "hangs there; run on fewer ranks, or on a mesh with cells on every rank "
+            "(DOLFINx's refinement, femtools.dolfinx.refine, runs either way)".format(
+                what, empty, comm.size))
+
+
 def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
                     max_cells=None, max_rank_cells=None, frozen=None, report=None,
                     lower=None):
@@ -459,8 +474,12 @@ def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
     Collective: give it on every rank, empty where a rank holds none. `report`, a dict,
     receives `unmarked` (the marked cells so left) and `frozen_cells` (the cells holding
     a frozen edge), summed over ranks.
+
+    Every rank must hold cells (dolfin's refinement hangs otherwise): a rank holding none
+    raises ValueError on every rank.
     """
     import numpy as np
+    require_cells_on_every_rank(mesh, "refine_periodic")
     new_mesh = df.Mesh()
     cap, rank_cap = int(max_cells or 0), int(max_rank_cells or 0)
     if cap < 0 or rank_cap < 0:

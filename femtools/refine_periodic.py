@@ -130,6 +130,8 @@ def refine_congruent(mesh, cell_markers, box, axes, redistribute=False, max_cell
         if max_cells or max_rank_cells or frozen is not None:
             raise ValueError("max_cells and frozen need periodic axes: df.refine can "
                              "neither count nor freeze before it refines")
+        from femtools.plaza_periodic import require_cells_on_every_rank
+        require_cells_on_every_rank(mesh, "refine_congruent")
         new_mesh = df.refine(mesh, cell_markers)
         npair, parent_cell = 0, None
     return new_mesh, npair, parent_cell

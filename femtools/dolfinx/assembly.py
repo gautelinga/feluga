@@ -18,9 +18,12 @@ import numpy as np
 
 def create_matrix(a, rows, cols=None):
     """The matrix of bilinear form `a` over unique dofs (`rows`, `cols`: UniqueDofs),
-    preallocated exactly: one plain assembly gives the pattern, which is folded."""
+    preallocated exactly: one plain assembly gives the pattern (DOLFINx's sparsity
+    pattern does not expose the global columns of the ghost entries it adds), which is
+    folded onto unique dofs, each entry sent to the rank owning its row. Collective."""
     from dolfinx.fem import petsc
     from petsc4py import PETSc
+    from femtools.hdf5_rows import route, unique_rows
 
     cols = rows if cols is None else cols
     if rows.bs != 1 or cols.bs != 1:
@@ -29,27 +32,21 @@ def create_matrix(a, rows, cols=None):
     A = petsc.create_matrix(a)
     petsc.assemble_matrix(A, a)  # values do not matter, the pattern does
     A.assemble()
-    indptr, gcols, _ = A.getValuesCSR()
+    indptr, gcols, values = A.getValuesCSR()
     A.destroy()
-    indptr = np.asarray(indptr, dtype=np.int64)
-    n_own_rows = len(indptr) - 1
-    local_rows = np.repeat(np.arange(n_own_rows), np.diff(indptr))
-    crow = rows.compact[local_rows]
+    del values
+    local_rows = np.repeat(np.arange(len(indptr) - 1), np.diff(indptr))
     # An owned row may hold columns that are not local dofs here (entries another rank
     # assembled for its ghost row), so the columns are looked up globally.
-    ccol = cols.compact_of_global(gcols)
-    key = crow * cols.n_global + ccol
-    # Entries of folded rows owned elsewhere go to their owner.
-    starts = np.array(comm.allgather(rows.start), dtype=np.int64)
-    owner = np.searchsorted(starts, crow, side="right") - 1
-    if comm.size > 1:
-        mine = owner == comm.rank
-        out = [np.unique(key[owner == r]) if r != comm.rank else None for r in range(comm.size)]
-        recv = comm.alltoall(out)
-        key = np.concatenate([key[mine]] + [k for r, k in enumerate(recv) if r != comm.rank])
-    key = np.unique(key)
-    r = key // cols.n_global - rows.start
-    c = key % cols.n_global
+    pairs = unique_rows(np.stack([np.asarray(rows.compact, np.int64)[local_rows],
+                                  cols.compact_of_global(gcols).astype(np.int64)], axis=1))
+    del indptr, gcols, local_rows
+    if comm.size > 1:   # entries of folded rows owned elsewhere to their owner
+        starts = np.array(comm.allgather(rows.start), dtype=np.int64)
+        owner = np.searchsorted(starts, pairs[:, 0], side="right") - 1
+        pairs = unique_rows(route(comm, owner, pairs).received[0])
+    r = pairs[:, 0] - rows.start
+    c = pairs[:, 1]
     diag = (c >= cols.start) & (c < cols.start + cols.n_owned)
     d_nnz = np.bincount(r[diag], minlength=rows.n_owned)
     o_nnz = np.bincount(r[~diag], minlength=rows.n_owned)

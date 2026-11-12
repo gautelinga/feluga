@@ -20,7 +20,10 @@ A space's tables, for this rank's own cells, one row a cell:
   2 the edges (edge i of a triangle opposite vertex i, a tetrahedron's in UFC's order), a
   mixed space's components one after the other, a vector space's unrolled; the dofmap's
   integer type;
-- `components`: (first column, count, degree) per component;
+- `components`: (first column, count, degree) per scalar component, in the order the
+  cell's dofs hold them: a mixed space's components one after the other, a vector space's
+  or vector sub-space's unrolled (a Taylor-Hood space in 2D has three: u_x, u_y, p) --
+  the same on both backends;
 - `owned` (lo, hi), `n_global`: the vector's range on this rank and size; `comm` (mpi4py);
   `n_cells`: the mesh's cells over all ranks; `signature`: dolfin's of the element.
 
@@ -78,11 +81,13 @@ def _dolfin_space(t, V):
     dm = V.dofmap()
     to_global = np.asarray(dm.tabulate_local_to_global_dofs(), dtype=np.int64)
     # every cell has the element's dofs (Lagrange and mixed spaces of them): one compiled
-    # call for all, not a pybind call a cell
+    # call for all, not a pybind call a cell -- on every rank, a rank without cells too,
+    # since the first call compiles (dolfin's JIT is collective)
     n = V.element().space_dimension()
-    per_cell = cell_dofs(dm, np.arange(own), n) if own else np.zeros((0, n), np.int64)
+    per_cell = cell_dofs(dm, np.arange(own), n)
     # the dofmap's integer type, from a rank that has a cell
-    dtype = next(k for k in comm.allgather(dm.cell_dofs(0).dtype.str if own else None) if k)
+    dtype = next((k for k in comm.allgather(dm.cell_dofs(0).dtype.str if own else None) if k),
+                 np.dtype(np.int32).str)
     t.gc = np.asarray(mesh.topology().global_indices(d), dtype=np.uint64)[:own]
     t.dofs = to_global[per_cell].astype(dtype)
     cells = mesh.cells()[:own]
@@ -93,13 +98,18 @@ def _dolfin_space(t, V):
     t.comm = comm
     t.n_cells = int(mesh.num_entities_global(d))
     t.signature = V.element().signature()
-    subs = [V.sub(i) for i in range(V.num_sub_spaces())] or [V]
     t.components, first = [], 0
-    for S in subs:
+    for S in _dolfin_leaves(V):
         degree = int(S.ufl_element().degree())
         k = S.element().space_dimension()
         t.components.append((first, k, degree))
         first += k
+
+
+def _dolfin_leaves(V):
+    """V's scalar components, a vector sub-space's unrolled, in the cell dofs' order."""
+    n = V.num_sub_spaces()
+    return [V] if n == 0 else [leaf for i in range(n) for leaf in _dolfin_leaves(V.sub(i))]
 
 
 def _dolfinx_space(t, V, U):
@@ -122,7 +132,7 @@ def _dolfinx_space(t, V, U):
     t.n_cells = int(mesh.topology.index_map(d).size_global)
     t.signature = signature(V)
     t.components, first = [], 0
-    for S in _components(V):          # a vector space's components too, unrolled
+    for S in _components(V):          # a vector (sub-)space's components too, unrolled
         degree = _lagrange_degree(S)
         k = _n_nodes(d, degree)
         t.components.append((first, k, degree))
@@ -169,9 +179,11 @@ def read_values(path, name, t):
     """The Function `name` in `path` (dolfin's layout: written by dolfin, by
     femtools.dolfin_layout or femtools.dolfinx.checkpoint, on any number of ranks and
     either backend) on the space whose tables `t` are: this rank's owned vector entries.
-    Through the file's own cells, cell dofs and vector, cell by cell. Collective."""
+    Through the file's own cells, cell dofs and vector, cell by cell; under MPI each rank
+    reads its blocks of the four datasets in one opening of the file. Collective."""
     import h5py
-    from femtools.hdf5_rows import agreed, fetch_rows, rows_of_labels
+    from femtools.hdf5_rows import (
+        _AHEAD, _ahead_key, agreed, fetch_rows, read_ahead, rows_of_labels)
     comm = t.comm
     found = None
     if comm.rank == 0:
@@ -182,21 +194,30 @@ def read_values(path, name, t):
     if found is not None and found != t.signature:
         raise ValueError("{}:{} holds {}, not {}".format(path, name, found, t.signature))
     n, k = t.dofs.shape
-    rows = rows_of_labels(path, name + "/cells", t.gc.astype(np.int64), comm)
-    starts = fetch_rows(path, name + "/x_cell_dofs", rows, comm).astype(np.int64)
-    ends = fetch_rows(path, name + "/x_cell_dofs", rows + 1, comm).astype(np.int64)
-    if agreed(comm, bool(np.any(ends - starts != k))):
-        raise ValueError("{}:{} has another number of dofs a cell than {}".format(
-            path, name, t.signature))
-    flat = (starts[:, None] + np.arange(k)).reshape(-1)
-    file_dofs = fetch_rows(path, name + "/cell_dofs", flat, comm).astype(np.int64)
-    vals = fetch_rows(path, name + "/vector_0", file_dofs, comm)
+    datasets = [name + s for s in ("/cells", "/x_cell_dofs", "/cell_dofs", "/vector_0")]
+    read_ahead(comm, [(path, d) for d in datasets], stagger=False)
+    try:
+        rows = rows_of_labels(path, name + "/cells", t.gc.astype(np.int64), comm)
+        bounds = fetch_rows(path, name + "/x_cell_dofs", np.r_[rows, rows + 1],
+                            comm).astype(np.int64)
+        starts, ends = bounds[:n], bounds[n:]
+        if agreed(comm, bool(np.any(ends - starts != k))):
+            raise ValueError("{}:{} has another number of dofs a cell than {}".format(
+                path, name, t.signature))
+        flat = (starts[:, None] + np.arange(k)).reshape(-1)
+        file_dofs = fetch_rows(path, name + "/cell_dofs", flat, comm).astype(np.int64)
+        vals = fetch_rows(path, name + "/vector_0", file_dofs, comm)
+    finally:
+        for d in datasets:            # a block not served (an error) is not kept
+            _AHEAD.pop(_ahead_key(path, d), None)
     lo, hi = t.owned
     mine = t.dofs.reshape(-1).astype(np.int64)
     own = (mine >= lo) & (mine < hi)
-    out = np.full(hi - lo, np.nan)
+    out = np.empty(hi - lo)
     out[mine[own] - lo] = vals[own]
-    if agreed(comm, bool(np.any(np.isnan(out)))):
+    covered = np.zeros(hi - lo, dtype=bool)
+    covered[mine[own] - lo] = True
+    if agreed(comm, not covered.all()):
         raise RuntimeError("{}:{}: some owned dofs are in none of this rank's cells".format(
             path, name))
     return out

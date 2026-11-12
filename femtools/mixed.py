@@ -1,7 +1,8 @@
 """Components of mixed Functions as Functions of their own, and vector Functions put
 together from scalar ones.
 
-    phi = subfunction(q, 0)          # component 0 of q, on its collapsed space
+    phi = subfunction(q, 0)          # component 0 of q, on its collapsed space (shared)
+    subfunction(q, 0, out=mine)      # into a Function of one's own on subspace(W, 0)
     set_subfunction(q, 0, value)     # and back
     uv = AssignedVectorFunction(as_vector((u0, u1)))
     uv()                             # the components copied in
@@ -43,13 +44,19 @@ def subspace(W, i):
     return _component(W, i).space
 
 
-def subfunction(q, i):
+def subfunction(q, i, out=None):
     """Component i of the mixed Function q, copied into a Function on its collapsed
-    space (subspace). The same Function is returned, with the current values, on
-    every call for the same mixed space and component."""
+    space (subspace): `out` if given, else the component's shared Function -- the same
+    one, with the current values, on every call for the same mixed space and
+    component, so its values last until the next such call (pass `out` for a Function
+    of your own). Returns it."""
     c = _component(q.function_space(), i)
-    c.get.assign(c.f, q.sub(i))
-    return c.f
+    if out is None:
+        out = c.f
+    elif out.function_space().id() != c.space.id():
+        raise ValueError("subfunction: out must be on subspace(W, {})".format(i))
+    c.get.assign(out, q.sub(i))
+    return out
 
 
 def set_subfunction(q, i, value):

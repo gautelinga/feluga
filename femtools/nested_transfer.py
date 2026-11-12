@@ -150,12 +150,13 @@ class Nested:
 
     def _fine_nodes(self, tf, tc, degree):
         """The barycentric coordinates in their ancestor of the nodes of degree `degree`
-        of each fine cell, (n_fine, n_nodes, d+1)."""
+        of each fine cell, (n_fine, n_nodes, d+1). Collective (its checks are agreed)."""
+        from femtools.hdf5_rows import agreed
         if degree not in self._lam:
-            if len(self.ancestors) != len(tf.x):
-                raise ValueError("nested_transfer: {} ancestors for {} fine cells".format(
-                    len(self.ancestors), len(tf.x)))
-            if len(self.ancestors) and self.ancestors.max() >= len(tc.x):
+            if agreed(tf.comm, len(self.ancestors) != len(tf.x)):
+                raise ValueError("nested_transfer: as many ancestors as fine cells, on "
+                                 "every rank")
+            if agreed(tf.comm, len(self.ancestors) and self.ancestors.max() >= len(tc.x)):
                 raise ValueError("nested_transfer: an ancestor beyond the coarse mesh's own "
                                  "cells (were the children redistributed?)")
             K = tc.x[self.ancestors]
@@ -164,9 +165,12 @@ class Nested:
             self._lam[degree] = ufc_nodes(lam_v, degree)
         return self._lam[degree]
 
-    def _multi_index(self, lam, N):
+    def _multi_index(self, lam, N, comm):
+        """The lattice multi-indices of barycentric coordinates `lam`, denominator N.
+        Collective on comm (its check is agreed)."""
+        from femtools.hdf5_rows import agreed
         m = np.rint(lam * N)
-        if len(m) and np.abs(lam * N - m).max() > 1e-6:
+        if agreed(comm, len(m) and np.abs(lam * N - m).max() > 1e-6):
             raise RuntimeError("nested_transfer: a fine node off its ancestor's lattice "
                                "(is the refinement uniform, and passes right?)")
         return m.astype(np.int64)
@@ -201,8 +205,8 @@ class Nested:
             raise ValueError("nested_transfer: degree {} nodes are not among the fine "
                              "degree {} nodes after {} passes".format(cdeg, fdeg, self.passes))
         d = tc.x.shape[2]
-        m_f = self._multi_index(self._fine_nodes(tf, tc, fdeg), N)   # (nf, nnf, d+1)
-        m_c = self._multi_index(ufc_nodes(np.eye(d + 1)[None], cdeg)[0], N)  # (nnc, d+1)
+        m_f = self._multi_index(self._fine_nodes(tf, tc, fdeg), N, tc.comm)   # (nf, nnf, d+1)
+        m_c = self._multi_index(ufc_nodes(np.eye(d + 1)[None], cdeg)[0], N, None)  # (nnc, d+1)
         weights = (N + 1) ** np.arange(d + 1)
         key_f, key_c = m_f @ weights, m_c @ weights
         rows, cols = [], []
@@ -240,9 +244,9 @@ class Lattice:
         tf = _Tables(fine_space)
         tc = _Tables(_coarse_space_like(nest.coarse, fine_space))
         self.comm, self.owned, self.gc = tf.comm, tf.owned, tc.gc
+        self._scatter = None
         self.passes = nest.passes
-        self.n_cells = self.comm.allreduce(int(tc.gc.max()) + 1 if len(tc.gc) else 0,
-                                           op=_mpi_max())
+        self.n_cells = tc.n_cells
         d = tc.x.shape[2]
         # each coarse cell's vertices ordered by global id: the canonical order
         perm = np.argsort(tc.vgid, axis=1, kind="stable")[nest.ancestors]   # (nf, d+1)
@@ -251,7 +255,7 @@ class Lattice:
         for i in range(len(tf.components)):
             fdofs, fdeg = tf.component(i)
             N = fdeg * 2 ** nest.passes
-            m = nest._multi_index(nest._fine_nodes(tf, tc, fdeg), N)       # (nf, nnf, d+1)
+            m = nest._multi_index(nest._fine_nodes(tf, tc, fdeg), N, tf.comm)       # (nf, nnf, d+1)
             m = np.take_along_axis(m, perm[:, None, :], axis=2)
             pts = lattice_points(d, N)
             weights = (N + 1) ** np.arange(d + 1)[::-1]
@@ -276,9 +280,12 @@ class Lattice:
         """This rank's own coarse cells' rows from the fine vector `x` (a petsc4py Vec),
         (n_cells, width)."""
         from petsc4py import PETSc
-        idx = PETSc.IS().createGeneral(self.dof.astype(PETSc.IntType), comm=PETSc.COMM_SELF)
-        y = PETSc.Vec().createSeq(len(self.dof), comm=PETSc.COMM_SELF)
-        scatter = PETSc.Scatter().create(x, idx, y, None)
+        if self._scatter is None:           # built once: any vector of the fine layout
+            idx = PETSc.IS().createGeneral(self.dof.astype(PETSc.IntType),
+                                           comm=PETSc.COMM_SELF)
+            y = PETSc.Vec().createSeq(len(self.dof), comm=PETSc.COMM_SELF)
+            self._scatter = (PETSc.Scatter().create(x, idx, y, None), y)
+        scatter, y = self._scatter
         scatter.scatter(x, y, PETSc.InsertMode.INSERT_VALUES, PETSc.ScatterMode.FORWARD)
         rows = np.empty((len(self.gc), self.width))
         rows[self.cell_of, self.slot] = y.getArray()
@@ -315,11 +322,6 @@ class Lattice:
             raise ValueError("{}:{}: a fine field of {} passes and rows of {}, not {} and {}"
                              .format(path, name, found[0], found[1], self.passes, self.width))
         self.scatter(fetch_rows(path, name, self.gc.astype(np.int64), self.comm), x)
-
-
-def _mpi_max():
-    from mpi4py import MPI
-    return MPI.MAX
 
 
 def _coarse_space_like(coarse, fine_space):

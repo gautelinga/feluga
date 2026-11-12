@@ -60,3 +60,29 @@ def test_read_on_dolfinx(tmp_path, ranks):
     res = _run("read-dolfinx", tmp_path, ranks, tmp_path / "res.json")
     for name in FIELDS:
         assert res[name] < 1e-13, name
+
+
+def test_read_refuses_other_components(tmp_path):
+    """A field of another number of components than u, or a mixed u, is refused, not
+    read through its first column."""
+    import basix.ufl
+    from dolfinx import fem, mesh as dmesh
+    from mpi4py import MPI
+    from femtools.dolfinx.xdmf import XDMFSeries
+    from femtools.dolfinx.xdmf_read import read_nodal
+    msh = dmesh.create_unit_square(MPI.COMM_SELF, 3, 3)
+    v = fem.Function(fem.functionspace(msh, ("Lagrange", 2, (2,))), name="v")
+    s = fem.Function(fem.functionspace(msh, ("Lagrange", 2)), name="s")
+    path = str(tmp_path / "f.xdmf")
+    with XDMFSeries(MPI.COMM_SELF, path) as f:
+        f.write(v, 0.0)
+        f.write(s, 0.0)
+    with pytest.raises(ValueError):
+        read_nodal(path, "v", -1, fem.Function(s.function_space))
+    with pytest.raises(ValueError):
+        read_nodal(path, "s", -1, fem.Function(v.function_space))
+    el = basix.ufl.element("Lagrange", "triangle", 2)
+    W = fem.functionspace(msh, basix.ufl.mixed_element([el, el]))
+    with pytest.raises(NotImplementedError):
+        read_nodal(path, "s", -1, fem.Function(W))
+    read_nodal(path, "v", -1, fem.Function(v.function_space))

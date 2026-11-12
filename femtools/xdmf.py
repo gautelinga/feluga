@@ -1836,16 +1836,13 @@ def _scatter_nodes(target, space, path, grid, name, width, degree):
     The space is unconstrained, so its dof coordinates are distinct and a nearest
     match is unambiguous -- which is exactly what is *not* true of a periodic space,
     and why the caller interpolates from here rather than writing into one directly.
-    Nothing is read whole: each rank reads one block of the file's nodes, sends each
-    node to every rank whose dofs' bounding box (padded by the tolerance) holds it, and
-    matches its own dofs among what it received. A dof without a node in the file
-    raises on every rank, before the vector is assembled. Collective.
+    Nothing is read whole: each rank reads one block of the file's nodes, and nodes and
+    dofs meet by position (`match_nodes`). A dof without a node in the file raises on
+    every rank, before the vector is assembled. Collective.
     """
-    from scipy.spatial import cKDTree
-    from femtools.hdf5_rows import agreed, extent, route
+    from femtools.hdf5_rows import agreed, as_rows, extent
     mesh = space.mesh()
     comm = mesh.mpi_comm() if mesh.mpi_comm().Get_size() > 1 else None
-    size = 1 if comm is None else comm.Get_size()
     # `dofmap().dofs()` numbers dofs **globally**, while `tabulate_dof_coordinates`
     # and `get_local` hold this rank's owned rows -- so the global numbers have to be
     # brought back to local ones, or rank one indexes a 180-row array at 342.
@@ -1859,10 +1856,8 @@ def _scatter_nodes(target, space, path, grid, name, width, degree):
         sub_dofs = [np.asarray(space.dofmap().dofs()) - first]
         x = space.tabulate_dof_coordinates().reshape(-1, gdim)
 
-    coords = _block_of(path, grid['geometry_item'], comm)
-    coords = coords.reshape(len(coords), -1)
-    values = np.asarray(_block_of(path, grid['attributes'][name], comm))
-    values = values.reshape(len(coords), -1)
+    coords = as_rows(_block_of(path, grid['geometry_item'], comm))
+    values = as_rows(_block_of(path, grid['attributes'][name], comm))
     # A file of three coordinates matched to a 2D mesh's dofs: its z must be zero, or
     # this is a 2D mesh being matched against a 3D one (one of two, against a 3D mesh,
     # leaves the dofs' z without a match and fails the distance check below)
@@ -1878,25 +1873,7 @@ def _scatter_nodes(target, space, path, grid, name, width, degree):
     lo, hi = extent(coords, comm, gdim)
     tol = 1e-9 * max(float(np.max(hi - lo)) if len(lo) else 0.0, 1.0)
 
-    if size > 1:
-        # every node to each rank whose dofs' box holds it: compact partitions overlap
-        # little, so a node goes to one rank or a few
-        box_lo = x.min(axis=0) - tol if len(x) else np.full(gdim, np.inf)
-        box_hi = x.max(axis=0) + tol if len(x) else np.full(gdim, -np.inf)
-        boxes = comm.allgather((box_lo, box_hi))
-        rows, dest = [], []
-        for r, (b_lo, b_hi) in enumerate(boxes):
-            inside = np.nonzero(((coords >= b_lo) & (coords <= b_hi)).all(axis=1))[0]
-            rows.append(inside)
-            dest.append(np.full(len(inside), r, np.int64))
-        rows = np.concatenate(rows)
-        coords, values = route(comm, np.concatenate(dest), coords[rows],
-                               values[rows]).received
-    if len(x) and len(coords):
-        distance, index = cKDTree(coords).query(x)
-        far = float(distance.max())
-    else:
-        index, far = np.zeros(len(x), np.int64), (np.inf if len(x) else 0.0)
+    found, far = match_nodes(comm, coords, values, x, tol, lo)
     if agreed(comm, far > tol):
         raise ValueError(
             'a dof sits farther than {:.1e} from every node in the file, so the mesh is '
@@ -1904,9 +1881,61 @@ def _scatter_nodes(target, space, path, grid, name, width, degree):
     vector = target.vector()
     local = vector.get_local()
     for c, dofs in enumerate(sub_dofs):
-        local[dofs] = values[index, c]
+        local[dofs] = found[:, c]
     vector.set_local(local)
     vector.apply('insert')
+
+
+def match_nodes(comm, coords, values, x, tol, lower):
+    """The rows of `values` at the points `x`: each point matched to the node of
+    `coords` (`values` row for row) within `tol` of it, the nodes spread over the ranks
+    as each holds a block of a file's. Returns `(found, far)`: `found` aligned with `x`,
+    and how far the farthest point here is from its node (inf where none is within
+    `tol`). Collective on comm (None for one rank).
+
+    Under MPI nodes and points meet by position, not by partition boxes: space is cut
+    into cubes of side h (much more than `tol`, from `lower`), a point goes to the rank
+    its cube hashes to (`hdf5_rows.rank_of`), and a node to the ranks of every cube
+    within `tol` of it -- one, or a few for a node by a cube's face. Each node and
+    point is sent about once, however the ranks' boxes overlap."""
+    from scipy.spatial import cKDTree
+    from femtools.hdf5_rows import as_rows, rank_of, reply, route
+    coords, values = np.asarray(coords, float), as_rows(values)
+    x = np.asarray(x, float)
+    width = values.shape[1]
+    if comm is not None and comm.Get_size() > 1:
+        size = comm.Get_size()
+        h = 1e3 * tol
+        lower = np.asarray(lower, float)
+        lo_bin = np.floor((coords - tol - lower) / h).astype(np.int64)
+        spread = np.floor((coords + tol - lower) / h).astype(np.int64) - lo_bin   # 0 or 1
+        d = coords.shape[1]
+        bins, rows = [], []
+        for offset in np.ndindex(*(2,) * d):
+            offset = np.asarray(offset, dtype=np.int64)
+            keep = np.nonzero((spread >= offset).all(axis=1))[0]
+            bins.append(lo_bin[keep] + offset)
+            rows.append(keep)
+        bins, rows = np.concatenate(bins), np.concatenate(rows)
+        nodes = route(comm, rank_of(bins, size), coords[rows], values[rows])
+        coords, values = nodes.received
+        values = values.reshape(len(values), width)
+        x_bins = np.floor((x - lower) / h).astype(np.int64)
+        asked = route(comm, rank_of(x_bins, size), x)
+        points = asked.received[0].reshape(-1, d)
+    else:
+        asked, points = None, x
+    if len(points) and len(coords):
+        distance, index = cKDTree(coords).query(points)
+        found = values[index]
+    else:
+        distance = np.full(len(points), np.inf)
+        found = np.zeros((len(points), width))
+    if asked is not None:
+        found, distance = reply(comm, asked, found, distance)
+        found = found.reshape(len(x), width)
+    far = float(distance.max()) if len(distance) else 0.0
+    return found, far
 
 
 def _check_midsides(coords, conn, cellname='tetrahedron', sample=200):

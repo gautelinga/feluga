@@ -14,7 +14,8 @@ HDF5 are flushed after each step. Every rank writes its own cells and the nodes 
 (`XdmfDocument.rows`): nothing is gathered.
 
 Node numbers are DOLFINx's (global vertex and edge indices), not dolfin's; a reader
-matches nodes by position (`XDMFFile2.read_checkpoint`), so it does not care. Scalar and
+matches nodes by position (`XDMFFile2.read_checkpoint`), so it does not care. A node's
+value comes from its dof through the dof layout (no point search). Scalar and
 vector Lagrange Functions of degree 1 or 2 (not mixed: write their components).
 """
 import numpy as np
@@ -22,23 +23,17 @@ import numpy as np
 from femtools.xdmf import (QUADRATIC, XDMF_TOPOLOGY, XdmfDocument, _int32, _pad3)
 
 
-def _edges_of_cells(mesh, n_cells, corners, pairs):
+def _edges_of_cells(mesh, n_cells, pairs):
     """For each of the first n_cells cells, its edges (local indices) in the order of
-    the vertex pairs `pairs`, the cell's vertices being `corners` (local)."""
+    the reference vertex pairs `pairs`: a cell's local edge e joins the reference
+    vertices of edge e of the reference cell (basix's, UFC's)."""
+    from femtools.dolfinx.checkpoint import _edge_index
     tdim = mesh.topology.dim
     mesh.topology.create_entities(1)
     mesh.topology.create_connectivity(tdim, 1)
-    mesh.topology.create_connectivity(1, 0)
-    c2e = mesh.topology.connectivity(tdim, 1)
-    e2v = mesh.topology.connectivity(1, 0)
-    n_edges_cell = len(EDGES_PER_CELL[tdim])
-    E = c2e.array.reshape(-1, n_edges_cell)[:n_cells]
-    ends = np.sort(e2v.array.reshape(-1, 2)[E], axis=2)          # (n, k, 2)
-    want = np.sort(np.stack([corners[:, [a, b]] for a, b in pairs], axis=1), axis=2)
-    match = np.all(want[:, :, None, :] == ends[:, None, :, :], axis=3)   # (n, k, k)
-    if n_cells and not np.all(match.sum(axis=2) == 1):
-        raise RuntimeError("XDMFSeries: a cell's edges do not match its vertex pairs")
-    return np.take_along_axis(E, match.argmax(axis=2), axis=1)
+    E = mesh.topology.connectivity(tdim, 1).array.reshape(-1, len(pairs))[:n_cells]
+    index = _edge_index(tdim)
+    return E[:, [index[a, b] for a, b in pairs]]
 
 
 EDGES_PER_CELL = {2: QUADRATIC["triangle"][1], 3: QUADRATIC["tetrahedron"][1]}
@@ -51,7 +46,7 @@ class _Layout:
     positions, and the local dof (block) at each owned node."""
 
     def __init__(self, V):
-        from scipy.spatial import cKDTree
+        from femtools.hdf5_rows import agreed
         mesh = V.mesh
         comm = mesh.comm
         tdim, gdim = mesh.topology.dim, mesh.geometry.dim
@@ -67,7 +62,8 @@ class _Layout:
         mesh.topology.create_connectivity(0, tdim)
         vmap = mesh.topology.index_map(0)
         n_cells = mesh.topology.index_map(tdim).size_local
-        corners = mesh.topology.connectivity(tdim, 0).array.reshape(-1, tdim + 1)[:n_cells]
+        c2v = mesh.topology.connectivity(tdim, 0).array.reshape(-1, tdim + 1)  # all local
+        corners = c2v[:n_cells]
         n_vloc = vmap.size_local + vmap.num_ghosts
         gvert = vmap.local_to_global(np.arange(n_vloc, dtype=np.int32)).astype(np.int64)
         # vertex positions, through the geometry (affine cells: a node a vertex)
@@ -78,17 +74,32 @@ class _Layout:
         conn = gvert[corners]
         rows = [gvert[:vmap.size_local]]
         coords = [vx[:vmap.size_local]]
+        # each local node's dof (block) through the dof layout's entity dofs, over every
+        # local cell (an owned node may lie in ghost cells alone)
+        dm = V.dofmap
+        cell_dofs = np.asarray(dm.list)
+        vdof = [dm.dof_layout.entity_dofs(0, j)[0] for j in range(tdim + 1)]
+        node_dofs = np.full(n_vloc, -1, dtype=np.int64)
+        node_dofs[c2v] = cell_dofs[:, vdof]
+        dofs = [node_dofs[:vmap.size_local]]
         if degree == 2:
             emap = mesh.topology.index_map(1)
             pairs = EDGES_PER_CELL[tdim]
-            edges = _edges_of_cells(mesh, n_cells, corners, pairs)
+            edges = _edges_of_cells(mesh, n_cells, pairs)
             n_eloc = emap.size_local + emap.num_ghosts
             gedge = emap.local_to_global(np.arange(n_eloc, dtype=np.int32)).astype(np.int64)
             conn = np.hstack([conn, gedge[edges] + n_vert])
+            mesh.topology.create_connectivity(1, 0)
             e2v = mesh.topology.connectivity(1, 0).array.reshape(-1, 2)
             rows.append(gedge[:emap.size_local] + n_vert)
             own_e = e2v[:emap.size_local]
             coords.append(0.5 * (vx[own_e[:, 0]] + vx[own_e[:, 1]]))
+            n_edges = len(EDGES_PER_CELL[tdim])
+            c2e = mesh.topology.connectivity(tdim, 1).array.reshape(-1, n_edges)
+            edof = [dm.dof_layout.entity_dofs(1, k)[0] for k in range(n_edges)]
+            edge_dofs = np.full(n_eloc, -1, dtype=np.int64)
+            edge_dofs[c2e] = cell_dofs[:, edof]
+            dofs.append(edge_dofs[:emap.size_local])
             self.n_nodes = n_vert + emap.size_global
         else:
             self.n_nodes = n_vert
@@ -99,12 +110,9 @@ class _Layout:
         self.coords = np.vstack(coords)[:, :gdim]
         self.topology = XDMF_TOPOLOGY[(CELL_NAMES[tdim], conn.shape[1])]
         self.gdim = gdim
-        # each owned node's dof (block), by position among this rank's dofs
-        X = V.tabulate_dof_coordinates()[:, :gdim]
-        dist, self.dofs = cKDTree(X).query(self.coords)
-        span = float(np.max(mesh.geometry.x.max(axis=0) - mesh.geometry.x.min(axis=0)))
-        if len(dist) and dist.max() > 1e-9 * max(span, 1.0):
-            raise RuntimeError("XDMFSeries: a node of the mesh has no dof of the space")
+        self.dofs = np.concatenate(dofs)
+        if agreed(comm, bool(np.any(self.dofs < 0))):
+            raise RuntimeError("XDMFSeries: an owned node in no local cell")
         self.bs = V.dofmap.index_map_bs
 
 

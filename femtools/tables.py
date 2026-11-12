@@ -2,7 +2,8 @@
 code that works on arrays (checkpoints, nested transfers, the dual mesh's markers) asks
 of either backend, in one place.
 
-    t = space_tables(V)              # dolfin; on DOLFINx space_tables((V, U)), U its UniqueDofs
+    t = space_tables(V)              # dolfin, or femtools.backend.dolfinx; on plain
+                                     # DOLFINx space_tables((V, U)), U its UniqueDofs
     t.gc, t.x, t.vgid, t.dofs        # this rank's own cells, UFC's order
     t.component(i)                   # (dofs of component i, its degree)
     values = read_values(path, "u", t)   # a Function in dolfin's layout, this rank's dofs
@@ -58,8 +59,8 @@ class SpaceTables:
 
 
 def space_tables(space):
-    """The tables of `space`: a dolfin FunctionSpace, or a DOLFINx one with its UniqueDofs
-    as `(V, U)`. Collective (dolfin's integer type is agreed over the ranks)."""
+    """The tables of `space`: a dolfin or femtools.backend.dolfinx FunctionSpace, or a
+    plain DOLFINx one with its UniqueDofs as `(V, U)`. Collective (dolfin's integer type is agreed over the ranks)."""
     V, U = space if isinstance(space, tuple) else (space, None)
     t = SpaceTables()
     if _is_dolfinx(V):
@@ -115,6 +116,8 @@ def _dolfin_leaves(V):
 def _dolfinx_space(t, V, U):
     from femtools.dolfinx.cells import (
         components, dolfin_cell_dofs, lagrange_degree, signature, ufc_vertices)
+    if U is None and hasattr(V, "unique_dofs"):     # a femtools.backend.dolfinx space
+        U = V.unique_dofs()
     if U is None:
         raise ValueError("tables: a DOLFINx space comes with its UniqueDofs, as (V, U)")
     mesh = V.mesh

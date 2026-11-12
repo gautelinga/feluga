@@ -1,9 +1,9 @@
-"""dolfin's object API on DOLFINx, over unique dofs: code written for legacy dolfin
-(spaces with a constrained_domain, Functions with vector(), DirichletBC, assemble,
-facet markers, Expressions in C++, PETScKrylovSolver, ...) runs on DOLFINx with these
-names, the periodicity included, and no dolfinx_mpc.
+"""The names of femtools.backend on DOLFINx: dolfin's object API over unique dofs. Code
+written for legacy dolfin (spaces with a constrained_domain, Functions with vector(),
+DirichletBC, assemble, facet markers, Expressions in C++, PETScKrylovSolver, ...) runs
+on DOLFINx with these names, the periodicity included, and no dolfinx_mpc.
 
-    from femtools.dolfinx.legacy import *
+    from femtools.backend.dolfinx import *
     V = FunctionSpace(mesh, "CG", 2, constrained_domain=PeriodicBox({0: (0, 1)}))
     u = Function(V); u.vector()[:] = 1.0
     bc = DirichletBC(V, 0.0, markers, 2)          # markers: a BoundaryMarkers
@@ -34,8 +34,7 @@ against `mesh.geometry.dim`), code calls the neutral helpers: `space_mesh`,
 Supported: scalar and mixed Lagrange spaces (and DG), periodic boxes given as a box
 spec (`lower`, `upper`, `periodic`), Dirichlet conditions on facets marked in a
 `BoundaryMarkers` or by C++ code (or pointwise), with a number, a `Constant` or a
-Function on the space as value. Made from twoasis's DOLFINx backend, which re-exports
-it (with its dual-mesh hooks).
+Function on the space as value.
 """
 import time
 import weakref
@@ -63,6 +62,7 @@ from femtools.dolfinx.periodic import flat_collapse_map, periodic_box
 from femtools.dolfinx.unique import UniqueDofs
 from femtools.lru import LRU
 
+name = "dolfinx"
 dx = ufl.dx
 # What dolfin calls a Coefficient: a Function or a Constant (a ufl.Constant in DOLFINx),
 # for isinstance checks.
@@ -111,10 +111,6 @@ class MPI:
     def max(comm, value):
         return comm.allreduce(value, op=_MPI.MAX)
 
-    @staticmethod
-    def avg(comm, value):
-        return comm.allreduce(value, op=_MPI.SUM) / comm.size
-
 
 # --- timers ----------------------------------------------------------------------------
 
@@ -147,10 +143,6 @@ class Timer:
         self._total = 0.0
         self._t0 = time.perf_counter()
 
-    def resume(self):
-        if self._t0 is None:
-            self._t0 = time.perf_counter()
-
     def stop(self):
         if self._t0 is not None:
             self._total += time.perf_counter() - self._t0
@@ -172,11 +164,6 @@ class Timer:
         running = time.perf_counter() - self._t0 if self._t0 is not None else 0.0
         wall = self._total + running
         return wall, wall, 0.0
-
-
-def timings():
-    """{task: (repetitions, total wall time)} on this process."""
-    return {task: tuple(v) for task, v in _TIMINGS.items()}
 
 
 def list_timings(clear=TimingClear.keep, types=(TimingType.wall,)):
@@ -266,6 +253,15 @@ def RectangleMesh(p0, p1, nx, ny, diagonal="right"):
     return _first(dolfinx.mesh.create_rectangle(
         MPI.comm_world, [[p0[0], p0[1]], [p1[0], p1[1]]], [int(nx), int(ny)],
         dolfinx.mesh.CellType.triangle, diagonal=kind))
+
+
+def repair_partition(mesh, box, log=None):
+    """The mesh: DOLFINx pairs periodic dofs by their coordinates, on any partition."""
+    return mesh
+
+
+def check_periodic_pairing(box, spaces):
+    """Nothing to check: DOLFINx pairs periodic dofs by their coordinates."""
 
 
 def read_mesh_file(fname, periodic=None):
@@ -392,6 +388,9 @@ class _Space(fem.FunctionSpace):
     def sub(self, i):
         return _space(super().sub(i), self._box, parent=self)
 
+    def unique_dofs(self):
+        return unique_dofs(self)
+
 
 def _space(V, box, parent=None):
     """DOLFINx's space V as a backend space, periodic as `box` (a box spec or None)."""
@@ -416,7 +415,7 @@ def unique_dofs(V):
         if hasattr(V, "_parent"):
             raise ValueError("unique_dofs: a component W.sub(i) has W's unique dofs")
         if not hasattr(V, "_box"):
-            raise ValueError("a space not made by femtools.dolfinx.legacy (FunctionSpace or "
+            raise ValueError("a space not made by femtools.backend.dolfinx (FunctionSpace or "
                              "subspace): its periodicity is unknown")
         box = V._box
         # Mixed spaces numbered node by node, as dolfin numbers them (ILU depends on it).
@@ -440,12 +439,6 @@ def unique_dofs(V):
 def mesh_id(mesh):
     """A key for the mesh, the same while it exists."""
     return id(mesh)
-
-
-def femtools_space(V):
-    """V as femtools' array code (tables, nested_transfer) takes a space: with its unique
-    dofs."""
-    return (V, unique_dofs(V))
 
 
 def function_space(u):
@@ -823,10 +816,7 @@ class Expression(Function):
 
     def __init__(self, cpp_code, degree=2, element=None, domain=None, **params):
         from femtools.dolfinx.expression import CompiledExpression
-        object.__setattr__(self, "_c", CompiledExpression(cpp_code, MPI.comm_world, **params))
-        object.__setattr__(self, "_dirty", True)
-        object.__setattr__(self, "_twins", {})
-        object.__setattr__(self, "_element", element)
+        self._share(CompiledExpression(cpp_code, MPI.comm_world, **params), element)
         mesh = _DEFAULT_MESH[0] if domain is None else domain
         if mesh is None:
             raise RuntimeError("Expression: no mesh yet (make a FunctionSpace first)")
@@ -838,13 +828,15 @@ class Expression(Function):
         twin = self._twins.get(id(mesh))
         if twin is None:
             twin = object.__new__(Expression)
-            object.__setattr__(twin, "_c", self._c)
-            object.__setattr__(twin, "_dirty", True)
-            object.__setattr__(twin, "_twins", {})
-            object.__setattr__(twin, "_element", self._element)
+            twin._share(self._c, self._element)
             twin._on(mesh, self._degree)
             self._twins[id(mesh)] = twin
         return twin
+
+    def _share(self, compiled, element):
+        for key, value in (("_c", compiled), ("_dirty", True), ("_twins", {}),
+                           ("_element", element)):
+            object.__setattr__(self, key, value)
 
     def _on(self, mesh, degree):
         object.__setattr__(self, "_degree", degree)
@@ -902,12 +894,6 @@ _FORMS = LRU(CAPACITY)         # by form object: (form, its _Compiled)
 _BY_CONTENT = LRU(CAPACITY)    # by equal form (UFL's equality: the same coefficients)
 
 
-def _markers_of(form):
-    """The BoundaryMarkers the form's integrals are over."""
-    return [itg.subdomain_data() for itg in form.integrals()
-            if isinstance(itg.subdomain_data(), BoundaryMarkers)]
-
-
 def _for_dolfinx(form):
     """The form as DOLFINx compiles it: the global quadrature degree on every integral
     that sets none (as dolfin does), and the BoundaryMarkers its measures were made with
@@ -934,7 +920,10 @@ def _jit_options():
 
 class _Compiled:
     def __init__(self, form):
-        self.markers = [(m, m.version) for m in _markers_of(form)]
+        # the BoundaryMarkers the integrals are over, as they were when compiled
+        self.markers = [(itg.subdomain_data(), itg.subdomain_data().version)
+                        for itg in form.integrals()
+                        if isinstance(itg.subdomain_data(), BoundaryMarkers)]
         self.cpp = fem.form(_for_dolfinx(form), jit_options=_jit_options())
         self.coefficients = [c for c in form.coefficients()
                              if isinstance(c, Function) or hasattr(c, "_parent")]
@@ -964,12 +953,6 @@ def compiled(form):
     return entry
 
 
-def _new_matrix(c):
-    rows = unique_dofs(c.spaces[0])
-    cols = unique_dofs(c.spaces[1])
-    return Matrix(_assembly.create_matrix(c.cpp, rows, cols))
-
-
 def assemble(form, tensor=None):
     """dolfin's assemble: a Matrix, a Vector or a number, into `tensor` if given (a
     Matrix made for the same spaces, or a Vector over the test space's unique dofs)."""
@@ -981,9 +964,11 @@ def assemble(form, tensor=None):
         b = Vector(U.create_vector()) if tensor is None else tensor
         _assembly.assemble_vector(b._v, c.cpp, U)
         return b
-    A = _new_matrix(c) if tensor is None else tensor
-    _assembly.assemble_matrix(A._m, c.cpp)
-    return A
+    if tensor is None:
+        tensor = Matrix(_assembly.create_matrix(c.cpp, unique_dofs(c.spaces[0]),
+                                                unique_dofs(c.spaces[1])))
+    _assembly.assemble_matrix(tensor._m, c.cpp)
+    return tensor
 
 
 MATRIX_CAPACITY = 64
@@ -1136,9 +1121,6 @@ class DirichletBC:
 
     def homogenize(self):
         self.value = 0.0
-
-    def set_value(self, value):
-        self.value = value
 
     def global_rows(self):
         return (self._local + self._unique.owned_range[0]).astype(PETSc.IntType)
@@ -1374,7 +1356,7 @@ class PETScKrylovSolver:
         if method is not None:
             # dolfin's PETScKrylovSolver(method, preconditioner), by femtools.ksp's names
             self._COUNT[0] += 1
-            ksp.configure(self._ksp, "legacy_krylov_{}_".format(self._COUNT[0]),
+            ksp.configure(self._ksp, "krylov_{}_".format(self._COUNT[0]),
                           ksp.solver_options(method, preconditioner or "default"))
 
     def ksp(self):
@@ -1383,27 +1365,11 @@ class PETScKrylovSolver:
     def set_reuse_preconditioner(self, reuse):
         self._reuse = bool(reuse)
 
-    def _update(self):
-        p, k = self.parameters, self._ksp
-        if p.get("nonzero_initial_guess") is not None:
-            k.setInitialGuessNonzero(bool(p["nonzero_initial_guess"]))
-        rtol, atol, dtol, maxit = k.getTolerances()
-        k.setTolerances(rtol=p.get("relative_tolerance", rtol),
-                        atol=p.get("absolute_tolerance", atol),
-                        divtol=p.get("divergence_limit", dtol),
-                        max_it=p.get("maximum_iterations", maxit))
-        if p.get("monitor_convergence") and not getattr(self, "_monitoring", False):
-            def monitor(ksp, its, rnorm):
-                if MPI.comm_world.rank == 0:
-                    print("  {} KSP Residual norm {:.12e}".format(its, rnorm))
-            k.setMonitor(monitor)
-            self._monitoring = True
-
     def solve(self, A, x, b):
         k = self._ksp
         k.setOperators(A._m)
         k.getPC().setReusePreconditioner(self._reuse)  # what KSPSetReusePreconditioner does
-        self._update()
+        ksp.apply_parameters(k, self.parameters)
         k.solve(b._v, x._v)
         reason = k.getConvergedReason()
         its = k.getIterationNumber()
@@ -1594,26 +1560,5 @@ def weighted_gradient_matrix(V, S, i):
     return Matrix(A.matMult(dP))
 
 
-__all__ = [
-    "ufl", "Coefficient", "as_vector", "split", "dot", "inner", "grad", "nabla_grad", "div",
-    "lhs", "rhs", "solve", "dx", "Measure", "FacetNormal", "TrialFunction", "TrialFunctions",
-    "TestFunction", "TestFunctions", "FiniteElement", "MixedElement",
-    "FunctionSpace", "Function", "Constant", "DirichletBC", "Vector", "Matrix",
-    "as_backend_type",
-    "assemble", "assemble_matrix", "apply_bc", "interpolate", "constant_nullspace",
-    "AssignedVectorFunction", "set_subfunction", "subfunction", "subspace",
-    "norm", "normalize", "PETScKrylovSolver", "ksp",
-    "MPI", "parameters", "Timer", "list_timings", "TimingClear", "TimingType", "XDMFFile",
-    "DOLFIN_EPS", "DOLFIN_EPS_LARGE", "BoundaryMarkers",
-    "set_default_mesh", "mesh_id", "femtools_space", "function_space", "space_mesh",
-    "mesh_comm", "geometric_dimension", "element_degree",
-    "is_lagrange", "owned_dofs", "fixed_dofs", "nodal_values", "sync", "TimeSeriesFile",
-    "write_dof_tables", "write_function_h5", "space_id",
-    "read_function_h5", "read_vector_function_h5", "read_series_step",
-    "read_vector_series_step", "weighted_gradient_matrix",
-    "read_mesh_file", "write_mesh_h5", "extent", "mark_walls", "UnitSquareMesh", "BoxMesh",
-    "mesh_coordinates", "hmax",
-    "Mesh", "RectangleMesh", "Point", "Expression", "SpatialCoordinate", "Faces", "PeriodicBox",
-    "SubDomain", "conditional", "cos", "exp", "ge", "gt", "le", "lt", "sin", "sqrt",
-    "BoxSpec", "unique_dofs", "compiled_facets", "compiled_dofs",
-]
+from femtools.backend import NAMES  # noqa: E402
+__all__ = list(NAMES)

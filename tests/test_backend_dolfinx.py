@@ -1,9 +1,9 @@
-"""`femtools.dolfinx.legacy`: dolfin's object API on DOLFINx. A Function's DOLFINx writes
+"""`femtools.backend.dolfinx`: dolfin's object API on DOLFINx. A Function's DOLFINx writes
 reach its compact vector, a Dirichlet condition on periodic slaves constrains their
 masters on any number of ranks, and a periodic Poisson solve through dolfin's names
 gives the exact quadratic -- on one rank and on three.
 
-    python3 -m pytest tests/test_dolfinx_legacy.py [-m mpi]
+    python3 -m pytest tests/test_backend_dolfinx.py [-m mpi]
 """
 import json
 import os
@@ -21,8 +21,8 @@ ROOT = os.path.dirname(HERE)
 
 
 def _run(tmp_path, ranks):
-    out = tmp_path / "legacy.{}.json".format(ranks)
-    support.run([sys.executable, os.path.join(HERE, "dolfinx_legacy_worker.py"), str(out)],
+    out = tmp_path / "backend.{}.json".format(ranks)
+    support.run([sys.executable, os.path.join(HERE, "backend_dolfinx_worker.py"), str(out)],
                 ranks, env={"PYTHONPATH": ROOT})
     return json.loads(out.read_text())
 

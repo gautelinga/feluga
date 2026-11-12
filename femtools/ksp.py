@@ -95,3 +95,23 @@ def scoped(prefix, options):
                 db.delValue(name)
             else:
                 db[name] = before[name]
+
+
+def apply_parameters(ksp, parameters):
+    """Apply dolfin's Krylov solver parameters to the petsc4py KSP `ksp`:
+    nonzero_initial_guess, relative_tolerance, absolute_tolerance, divergence_limit,
+    maximum_iterations and monitor_convergence (residuals printed on rank 0). Absent
+    ones leave the KSP's settings as they are."""
+    p = parameters
+    if p.get("nonzero_initial_guess") is not None:
+        ksp.setInitialGuessNonzero(bool(p["nonzero_initial_guess"]))
+    rtol, atol, dtol, maxit = ksp.getTolerances()
+    ksp.setTolerances(rtol=p.get("relative_tolerance", rtol),
+                      atol=p.get("absolute_tolerance", atol),
+                      divtol=p.get("divergence_limit", dtol),
+                      max_it=p.get("maximum_iterations", maxit))
+    if p.get("monitor_convergence") and not ksp.getMonitor():
+        def monitor(k, its, rnorm):
+            if k.getComm().tompi4py().rank == 0:
+                print("  {} KSP Residual norm {:.12e}".format(its, rnorm))
+        ksp.setMonitor(monitor)

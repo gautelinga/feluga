@@ -27,10 +27,6 @@
                                (quadratic grids kept), the same files as dolfin's
     femtools.dolfinx.xdmf_read read_nodal: a step of such a series (either backend's) into
                                a DOLFINx Function, nodes matched by position
-    femtools.dolfinx.legacy    dolfin's object API on all of these: FunctionSpace with a
-                               constrained_domain, Function.vector(), DirichletBC,
-                               assemble, BoundaryMarkers, Expression, PETScKrylovSolver...,
-                               so that code written for legacy dolfin runs on DOLFINx
 
 A solver algorithm built on these sees PETSc vectors and matrices over unique dofs only,
 as dolfin's constrained_domain gives it, whatever the periodicity. `import

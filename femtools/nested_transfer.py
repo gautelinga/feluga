@@ -12,8 +12,8 @@ the coarse one).
     fine_values = nest.facet_values(coarse_values)   # facet markers on the fine mesh
 
 The matrices are petsc4py Mats over the spaces' vectors: dolfin's global dofs, or on
-DOLFINx a space's unique dofs as its `UniqueDofs` numbers them (pass `(V, U)` for a
-space). Periodic spaces need nothing more: every cell's dofs are its own, a slave's being
+DOLFINx a space's unique dofs as its `UniqueDofs` numbers them (a
+femtools.backend.dolfinx space knows them; pass `(V, U)` for a plain DOLFINx one). Periodic spaces need nothing more: every cell's dofs are its own, a slave's being
 its master's.
 
 A uniform refinement puts every node of a fine Lagrange space of degree q, after k

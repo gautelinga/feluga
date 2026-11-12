@@ -26,6 +26,7 @@
     femtools.abort       a command's entry point: one rank's failure ends the MPI job
     femtools.memory      freed heap handed back to the operating system
     femtools.dolfinx     the DOLFINx side: periodic_box, unique dofs, assembly over them
+    femtools.backend     one finite-element API, dolfin's, on dolfin and on DOLFINx
 
 `import femtools` imports none of them; xdmf, compress, hdf5_rows, boundaries, facets,
 dolfin_layout and hierarchical_transfer need numpy and h5py alone, abort, memory, swap and

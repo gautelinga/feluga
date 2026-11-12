@@ -8,8 +8,6 @@
     eval_through_chain, eval_p2_through_chain    a source at a refined mesh's P1 or P2 nodes
     transfer_p1_field(old, values, new, parent)  a P1 field onto its one-pass refinement
     as_p1_function, as_p2_function               node values as a Function, ghost-guarded
-    barycentric_simplex, ufc_nodes, ufc_basis    triangles and tetrahedra, in UFC's dof order
-                                                 (femtools.nested_transfer builds on them)
 
 `femtools.plaza_periodic.refine_periodic` returns the parent-cell map, and composing those
 maps across passes gives every cell's ancestor in the original mesh. Evaluation is then
@@ -33,7 +31,7 @@ numpy alone at import; dolfin in the functions that take a Mesh, h5py in
 """
 import numpy as np
 
-from femtools.ufc import UFC_EDGES
+from femtools.ufc import barycentric_from_vertices
 
 # midside columns 4..9 of the 10-node connectivity, as (vertex, vertex) pairs, in the
 # XDMF order (`femtools.xdmf.XDMF_ORDER` puts dolfin's cell dofs in it)
@@ -61,66 +59,21 @@ def first_incident_cell(cells, n_vertices):
     return owner
 
 
-def barycentric_from_vertices(v, points):
-    """Barycentric coordinates of each point in the tetrahedron whose four vertex
-    coordinates are given as `v`, shape (n, 4, 3), no search. Each 3x3 system
-    [e1 e2 e3] lam = p - v0 is solved by Cramer's rule: the rows of the inverse are
-    the cross products of the other two edges over the volume, e1 . (e2 x e3)."""
-    v0 = v[:, 0]
-    e1, e2, e3 = (v[:, k] - v0 for k in (1, 2, 3))
-    r = np.asarray(points) - v0
-    c23, c31, c12 = _cross(e2, e3), _cross(e3, e1), _cross(e1, e2)
-    det = np.einsum("ij,ij->i", e1, c23)
-    if not det.all():
-        raise np.linalg.LinAlgError("barycentric_from_vertices: a degenerate tetrahedron")
-    lam = np.empty((len(v0), 4))
-    lam[:, 1] = np.einsum("ij,ij->i", c23, r) / det
-    lam[:, 2] = np.einsum("ij,ij->i", c31, r) / det
-    lam[:, 3] = np.einsum("ij,ij->i", c12, r) / det
-    lam[:, 0] = 1.0 - lam[:, 1] - lam[:, 2] - lam[:, 3]
-    return lam
-
-
-def _cross(a, b):
-    """Row-wise cross product of two (n, 3) arrays (1.6x faster than np.cross)."""
-    out = np.empty_like(a)
-    out[:, 0] = a[:, 1] * b[:, 2] - a[:, 2] * b[:, 1]
-    out[:, 1] = a[:, 2] * b[:, 0] - a[:, 0] * b[:, 2]
-    out[:, 2] = a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]
-    return out
-
-
 # Points are evaluated in blocks of this many. Every routine below is a per-row gather
-# followed by a per-row contraction, so a block is bit-identical to the whole array --
-# what blocking bounds is the *transient*, and the transient is what runs out. Evaluating
-# a whole mesh at once expands the source's per-cell rows to one row per point
-# (`nodal[conn10[cell_rows]]` is (n, 10, 3) for the velocity, 240 bytes a point) and lays
-# the barycentric coordinates, the basis and the einsum on top of that.
-#
-# Measured, P2 velocity at 3M points over a 200k-cell source, peak RSS of the whole
-# process (the floor -- sources, points and result -- is about 283 MB):
-#
-#   chunk     whole      1M      500k     250k     100k      50k      25k
-#   time     1.90 s   2.00 s   2.05 s   2.01 s   1.85 s   1.94 s   2.09 s
-#   peak     1363 M    676 M    455 M    360 M    305 M    284 M    279 M
-#
-# So blocking costs nothing in time, and 100k is where the memory comes within a few
-# percent of its floor. Below that nothing more is bought.
-# This matters here and not elsewhere because it is the one evaluation whose point count
-# is the *refined* mesh's: `DistributedCellSource` goes to some trouble to keep the row
-# fetch bounded by the source mesh, and expanding to per-point in one array immediately
-# afterwards handed that back.
+# followed by a per-row contraction, so a block gives the same bits as the whole array;
+# blocking bounds the transient memory. Evaluating a whole mesh at once expands the
+# source's per-cell rows to one row per point (`nodal[conn10[cell_rows]]` is (n, 10, 3)
+# for the velocity) with the barycentric coordinates, the basis and the einsum on top.
+# A block of this size keeps that transient small next to the sources and points, at no
+# cost in time; it matters for the evaluations at a refined mesh's points, whose count
+# exceeds the source's.
 EVAL_CHUNK = 100_000
 
 
 def _in_blocks(n, evaluate, chunk=None):
-    """`evaluate(slice)` over `n` rows a block at a time, as one array.
-
-    Short-circuits below one block, so everything small -- every test, every fixture --
-    takes exactly the unblocked path it always did. `chunk` defaults to `EVAL_CHUNK`
-    read *here* rather than bound as a default argument, which would freeze it at import
-    and make the module constant untunable -- including by the measurement that set it.
-    """
+    """`evaluate(slice)` over `n` rows a block at a time, as one array; one call when
+    `n` fits in a block. `chunk` defaults to the module's `EVAL_CHUNK` as it is at the
+    call, so that it can be tuned."""
     chunk = EVAL_CHUNK if chunk is None else chunk
     if n <= chunk:
         return evaluate(slice(0, n))
@@ -372,65 +325,6 @@ class DistributedCellSource:
         return _in_blocks(len(points),
                           lambda sl: evaluate(xyz[inverse[sl]], nodal[inverse[sl]],
                                               points[sl]))
-
-
-# --- triangles and tetrahedra in UFC's dof order -------------------------------------
-#
-# What femtools.nested_transfer needs, for both backends' dof tables (dolfin's own, and
-# DOLFINx's put in dolfin's order by femtools.dolfinx.checkpoint): a cell's vertices,
-# then for degree 2 its edges, edge i of a triangle opposite vertex i and a tetrahedron's
-# in UFC's order (femtools.ufc.UFC_EDGES) -- not the XDMF order of P2_EDGE_PAIRS above.
-
-
-def barycentric_simplex(vertices, points):
-    """Barycentric coordinates of each point in its triangle or tetrahedron: `vertices`
-    (n, d+1, d), `points` (n, d), d = 2 or 3 (the tetrahedron's is
-    `barycentric_from_vertices`). Returns (n, d+1)."""
-    vertices, points = np.asarray(vertices, float), np.asarray(points, float)
-    d = vertices.shape[2]
-    if d == 3:
-        return barycentric_from_vertices(vertices, points)
-    if d != 2 or vertices.shape[1] != 3:
-        raise ValueError("barycentric_simplex: triangles in 2D or tetrahedra in 3D")
-    v0 = vertices[:, 0]
-    e1, e2 = vertices[:, 1] - v0, vertices[:, 2] - v0
-    r = points - v0
-    det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
-    if not det.all():
-        raise np.linalg.LinAlgError("barycentric_simplex: a degenerate triangle")
-    lam = np.empty((len(v0), 3))
-    lam[:, 1] = (r[:, 0] * e2[:, 1] - r[:, 1] * e2[:, 0]) / det
-    lam[:, 2] = (e1[:, 0] * r[:, 1] - e1[:, 1] * r[:, 0]) / det
-    lam[:, 0] = 1.0 - lam[:, 1] - lam[:, 2]
-    return lam
-
-
-def ufc_nodes(lam_vertices, degree):
-    """The barycentric coordinates of a Lagrange element's nodes, in UFC's order, from
-    those of its cell's vertices: `lam_vertices` (n, d+1, m), m coordinates each (in
-    another simplex, say). Returns (n, n_nodes, m)."""
-    lam_vertices = np.asarray(lam_vertices)
-    if degree == 1:
-        return lam_vertices
-    if degree != 2:
-        raise NotImplementedError("ufc_nodes: degree 1 or 2")
-    d = lam_vertices.shape[1] - 1
-    edges = [0.5 * (lam_vertices[:, a] + lam_vertices[:, b]) for a, b in UFC_EDGES[d]]
-    return np.concatenate([lam_vertices, np.stack(edges, axis=1)], axis=1)
-
-
-def ufc_basis(lam, degree):
-    """The Lagrange basis of degree 1 or 2 at barycentric `lam` (..., d+1), in UFC's
-    order: shape (..., n_nodes)."""
-    lam = np.asarray(lam)
-    if degree == 1:
-        return lam
-    if degree != 2:
-        raise NotImplementedError("ufc_basis: degree 1 or 2")
-    d = lam.shape[-1] - 1
-    vertex = lam * (2.0 * lam - 1.0)
-    edge = [4.0 * lam[..., a] * lam[..., b] for a, b in UFC_EDGES[d]]
-    return np.concatenate([vertex, np.stack(edge, axis=-1)], axis=-1)
 
 
 # --- the thin dolfin-facing layer -------------------------------------------------

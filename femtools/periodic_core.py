@@ -8,6 +8,8 @@ dolfin modules (`femtools.periodic`, `femtools.plaza_periodic`) and the DOLFINx 
     on_planes(x, lower, upper, axes, tol)  which points lie on an identified plane
     xyz(a)                                 padded to three components
     TooManyCells                           a refinement refused by max_cells
+    dorfler_threshold_values(values, theta, comm)
+                                           the bulk-chasing threshold of a cellwise indicator
     refine_congruent(mesh, markers, box, axes, *, comm, refine_periodic, ...)
                                            both backends' refine_congruent, their
                                            refinement and check given
@@ -204,6 +206,32 @@ def _at_positions(pts, where, tol):
     out = np.zeros(len(pts), bool)
     out[of[hit]] = True
     return out
+
+
+def dorfler_threshold_values(values, theta, comm=None, iterations=60):
+    """The largest t with the sum of |values| over {|value| > t} at least theta of all,
+    `values` this rank's share of a cellwise indicator (comm None for one rank).
+
+    Bulk chasing (Doerfler 1996): refine the smallest set of cells carrying a fixed
+    share of the total. Scale free, so it does not care what units the indicator is in,
+    and it responds to how concentrated the error is rather than to how large. An
+    indicator carrying a sign counts by |value|: a share of the total contribution, not
+    of the estimate.
+
+    Found by bisection on the threshold rather than by sorting, so nothing is gathered
+    and the cost is a fixed number of small reductions, every rank leaving with the same
+    answer. Collective."""
+    from femtools.hdf5_rows import allreduce, allsum
+    a = np.abs(np.asarray(values, dtype=float)).ravel()
+    total = float(allsum(comm, a.sum()))
+    lo, hi = 0.0, allreduce(comm, float(a.max()) if len(a) else 0.0, "max")
+    if total <= 0.0:
+        return 0.0
+    for _ in range(iterations):
+        mid = 0.5 * (lo + hi)
+        got = float(allsum(comm, a[a > mid].sum()))
+        lo, hi = (mid, hi) if got >= theta * total else (lo, mid)
+    return lo
 
 
 class TooManyCells(Exception):

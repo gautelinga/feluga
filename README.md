@@ -121,6 +121,14 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   global id in the file, a vertex's its row, so checkpoints name the same cells on both
   backends. `write_boundary_facets` writes marked boundary facets as
   `BoundaryMarkers.write` does (the file partrac reads).
+- **`dolfinx.refine`**: `refine_periodic`, `plaza_periodic`'s port to DOLFINx: DOLFINx's own
+  Plaza refinement (its rule propagation, `compute_refinement`, `create_mesh`), with ties
+  between longest edges broken by position and the marking propagated with the periodic
+  partner edges to a joint fixed point, so identified faces are bisected alike; frozen
+  edges, `max_cells`, and a parent map aligned with the new mesh's cells. Partners are
+  paired by a spatial hash over the ranks (nothing gathered). A C++ extension, built with
+  CMake against the installed DOLFINx and nanobind on first use. As fast as
+  `dolfinx.mesh.refine` (1.3 M tetrahedra with a refined band: 4.9 s against 6.1 s).
 - **`dolfinx.expression`**: `CompiledExpression`, dolfin's `Expression` for DOLFINx: the
   C++ code (in `x[i]` and named parameters, with `<cmath>`, `near`, `DOLFIN_EPS`, `pi`)
   compiled once into a cached library and called where `Function.interpolate` takes a

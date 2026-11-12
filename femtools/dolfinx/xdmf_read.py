@@ -13,9 +13,9 @@ one: read its components), with as many components as the file's field. Collecti
 """
 import numpy as np
 
-from femtools.dolfinx.checkpoint import _WeakCache
+from femtools.lru import WeakCache
 
-_PLAIN = _WeakCache()
+_PLAIN = WeakCache()
 
 
 def _plain_space(V, degree, bs):

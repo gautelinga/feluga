@@ -36,9 +36,10 @@ import os
 import numpy as np
 
 from femtools.hdf5_rows import extent, find_rows, unique_rows
+from femtools.ufc import UFC_EDGES
 
-EDGES = ((2, 3), (1, 3), (1, 2), (0, 3), (0, 2), (0, 1))     # dolfin's local edge order
-TRIANGLE_CELL_EDGES = ((1, 2), (0, 2), (0, 1))     # ... and a triangle's
+EDGES = UFC_EDGES[3]                               # dolfin's local edge order
+TRIANGLE_CELL_EDGES = UFC_EDGES[2]                 # ... and a triangle's
 TRIANGLE_EDGES = ((0, 1), (0, 2), (1, 2))          # a tetrahedron facet's, as a set
 
 #: "on a face" for the repair and the check when the caller gives no tolerance: this

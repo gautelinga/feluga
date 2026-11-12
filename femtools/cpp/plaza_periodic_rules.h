@@ -18,6 +18,11 @@
 // `Box::tol` is a length: the callers make it relative to the box (femtools'
 // `periodic_core.box_tol`), so a box far from the origin keeps its pairs.
 //  - Exchange: marks sent to partners over a neighbourhood communicator.
+//  - The loops both modules run, their storage and synchronisation given as callables
+//    (C++11, which dolfin's JIT compiles): fixed_point (rounds until no rank changes),
+//    partner_marks (a round's marks from the partners), close_under_long_edges (the
+//    freeze closure's step), cell_split_input and count_children (Plaza's children of
+//    a cell, counted before refining).
 //
 // Used by: femtools/plaza_periodic.py (inlined into the code dolfin compiles) and
 // femtools/dolfinx/cpp/plaza_periodic.cpp (by CMake's include path); both hash it, so an
@@ -496,5 +501,112 @@ private:
   std::vector<int> _ranks;
   MPI_Comm _comm;
 };
+
+// --- the loops both modules run --------------------------------------------------
+// Storage and synchronisation are the callers' (dolfin's ParallelRefinement, DOLFINx's
+// arrays and update_logical_edgefunction); these are the loops around them, once.
+
+// `round()` returns this rank's changes; repeated until no rank has any.
+template <typename Round>
+void fixed_point(MPI_Comm comm, Round round)
+{
+  std::int64_t changed = 1;
+  while (changed != 0)
+    changed = allsum(comm, round());
+}
+
+// A round's marks from the partners: each local item whose partner is marked is
+// `mark`ed, if it is not yet; returns how many.
+template <typename IsMarked, typename Mark>
+std::int64_t partner_marks(const Exchange& exchange, IsMarked is_marked, Mark mark)
+{
+  std::int64_t n = 0;
+  const std::vector<std::int32_t> in = exchange.incoming(is_marked);
+  for (std::size_t i = 0; i < in.size(); ++i)
+    if (!is_marked(in[i]))
+    {
+      mark(in[i]);
+      ++n;
+    }
+  return n;
+}
+
+// The freeze closure's local step under the longest-edge rule: a face whose long edge is
+// in the set puts its other edges in (bisecting one would bisect the long edge too).
+// `face_edge(f, k)`: edge k < 3 of face f. Returns how many were put in.
+template <typename FaceEdge, typename LongEdges, typename IsIn, typename Put>
+std::int64_t close_under_long_edges(std::int64_t n_faces, FaceEdge face_edge,
+                                    const LongEdges& long_edge, IsIn in, Put put)
+{
+  std::int64_t n = 0;
+  for (std::int64_t f = 0; f < n_faces; ++f)
+  {
+    if (!in(long_edge[f]))
+      continue;
+    for (int k = 0; k < 3; ++k)
+    {
+      const auto e = face_edge(f, k);
+      if (!in(e))
+      {
+        put(e);
+        ++n;
+      }
+    }
+  }
+  return n;
+}
+
+// What Plaza's get_simplices takes of cell c: `markers` (which of its 3*tdim-3 edges are
+// marked) and `longest` (each of its faces' long edge, as a position among the cell's
+// edges; a face is the cell itself in 2D). `cell_edge(c, i)`, `cell_face(c, k)` give
+// the cell's local edges and faces. Returns whether any edge is marked.
+template <typename Pos, typename CellEdge, typename CellFace, typename LongEdges,
+          typename Marked>
+bool cell_split_input(std::int64_t c, int tdim, CellEdge cell_edge, CellFace cell_face,
+                      const LongEdges& long_edge, Marked marked, std::vector<bool>& markers,
+                      std::vector<Pos>& longest)
+{
+  const int n_edges = 3 * tdim - 3, n_faces = tdim == 2 ? 1 : 4;
+  markers.assign(n_edges, false);
+  bool any = false;
+  for (int i = 0; i < n_edges; ++i)
+  {
+    markers[i] = marked(cell_edge(c, i));
+    any = any || markers[i];
+  }
+  longest.clear();
+  for (int k = 0; k < n_faces; ++k)
+  {
+    Pos p = static_cast<Pos>(long_edge[cell_face(c, k)]);
+    for (int j = 0; j < n_edges; ++j)
+      if (static_cast<Pos>(cell_edge(c, j)) == p)
+      {
+        p = static_cast<Pos>(j);
+        break;
+      }
+    longest.push_back(p);
+  }
+  return any;
+}
+
+// The children Plaza would make of this rank's first `n_cells` cells, from the marked
+// edges (its own loop, emitting nothing): a cell with no marked edge is one,
+// `children(c, markers, longest)` (get_simplices' count) the others.
+template <typename Pos, typename CellEdge, typename CellFace, typename LongEdges,
+          typename Marked, typename Children>
+std::int64_t count_children(std::int64_t n_cells, int tdim, CellEdge cell_edge,
+                            CellFace cell_face, const LongEdges& long_edge, Marked marked,
+                            Children children)
+{
+  std::vector<bool> markers;
+  std::vector<Pos> longest;
+  std::int64_t n = 0;
+  for (std::int64_t c = 0; c < n_cells; ++c)
+    n += cell_split_input<Pos>(c, tdim, cell_edge, cell_face, long_edge, marked, markers,
+                               longest)
+             ? children(c, markers, longest)
+             : 1;
+  return n;
+}
 
 } // namespace femtools_plaza

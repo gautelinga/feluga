@@ -9,6 +9,9 @@
                                during assembly; Dirichlet values; the constants' null space
     femtools.dolfinx.mixed     subfunction / set_subfunction / subspace /
                                AssignedVectorFunction, as femtools.mixed
+    femtools.dolfinx.checkpoint  Functions in dolfin's HDF5 layout (femtools.dolfin_layout),
+                               written and read: checkpoints across the backends and the
+                               numbers of ranks
 
 A solver algorithm built on these sees PETSc vectors and matrices over unique dofs only,
 as dolfin's constrained_domain gives it, whatever the periodicity. `import

@@ -111,6 +111,11 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 - **`dolfinx.mixed`**: `subfunction`, `set_subfunction`, `subspace` and
   `AssignedVectorFunction`, as in `mixed`, for DOLFINx Functions (index copies through
   the collapse dof maps, built once).
+- **`dolfinx.checkpoint`**: `write_dofs`, `write_function`, `read_function`: DOLFINx
+  Functions in dolfin's HDF5 layout (`dolfin_layout`), cell by cell through the original
+  cell and vertex indices and dolfin's local dof order, so a checkpoint written by
+  either backend, on any number of ranks, reads on the other. Values are a space's
+  unique dofs (`UniqueDofs`); Lagrange P1/P2, scalar or mixed.
 
 ## Requirements
 

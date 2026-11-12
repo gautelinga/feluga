@@ -15,6 +15,8 @@
     femtools.dolfinx.mesh      read_mesh / write_mesh: meshes in dolfin's HDF5 layout,
                                numbered as dolfin numbers them; write_boundary_facets, as
                                femtools.boundary_markers writes a facet MeshFunction
+    femtools.dolfinx.expression  CompiledExpression: dolfin's Expression, C++ compiled and
+                               cached, evaluated where DOLFINx interpolates
     femtools.dolfinx.xdmf      XDMFSeries: time series in femtools.xdmf.XDMFFile2's layout
                                (quadratic grids kept), the same files as dolfin's
 

@@ -121,6 +121,10 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   global id in the file, a vertex's its row, so checkpoints name the same cells on both
   backends. `write_boundary_facets` writes marked boundary facets as
   `BoundaryMarkers.write` does (the file partrac reads).
+- **`dolfinx.expression`**: `CompiledExpression`, dolfin's `Expression` for DOLFINx: the
+  C++ code (in `x[i]` and named parameters, with `<cmath>`, `near`, `DOLFIN_EPS`, `pi`)
+  compiled once into a cached library and called where `Function.interpolate` takes a
+  callable; parameters changed as attributes; a tuple of strings is a vector.
 - **`dolfinx.xdmf`**: `XDMFSeries`, time series of DOLFINx Functions in `XDMFFile2`'s
   layout -- the same XML word for word, quadratic cells for P2, the mesh stored once,
   every rank writing its own rows -- so `grids`, `merge_series` and

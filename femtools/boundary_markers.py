@@ -28,17 +28,20 @@ def _comm(mesh):
 
 def _exterior(mesh):
     """`(facets, vertices, owned)`: the local exterior facets, ghosts included, their
-    local vertices (a row each) and whether a regular cell here holds each."""
+    local vertices (a row each) and whether a regular cell here holds each. The
+    connectivities as compiled uint32 arrays (`femtools.periodic.connectivity`), the
+    facets' vertices for the exterior facets alone: dolfin's Python hands them back as
+    lists of every entity's."""
+    from femtools.periodic import connectivity
     D = mesh.topology().dim()
     mesh.init(D - 1, D)
-    mesh.init(D - 1, 0)
     on = df.MeshFunction("size_t", mesh, D - 1, 0)
     df.DomainBoundary().mark(on, 1)
     facets = np.flatnonzero(on.array())
-    vertices = np.array(mesh.topology()(D - 1, 0)(), dtype=np.int64).reshape(-1, D)[facets]
-    cell_facets = np.array(mesh.topology()(D, D - 1)(), dtype=np.int64).reshape(-1, D + 1)
+    on = None
+    vertices = connectivity(mesh, D - 1, 0, facets).astype(np.int64)
     regular = np.zeros(mesh.num_facets(), dtype=bool)
-    regular[cell_facets[:mesh.topology().ghost_offset(D)].ravel()] = True
+    regular[connectivity(mesh, D, D - 1)[:mesh.topology().ghost_offset(D)].ravel()] = True
     return facets, vertices, regular[facets]
 
 

@@ -7,7 +7,7 @@
     extent(mesh)                                the mesh's bounding box, over its ranks
     box_lower(mesh, axes, lower)                a box's lower corner, checked against the mesh
     cell_dofs(dofmap, cells, n)                 the first n dofs of many cells, one call
-    connectivity(mesh, d0, d1)                  a topology connectivity as one array
+    connectivity(mesh, d0, d1, rows)            a topology connectivity as one array
 
 The box runs from `lower` (default the origin) to `upper` along each axis; `periodic`
 says which axes are identified (default all of them). A master is a point on a lower
@@ -157,6 +157,31 @@ py::array_t<unsigned int> connectivity_of(const Mesh& mesh, std::size_t d0, std:
   return out;
 }
 
+// The same for the listed entities `rows` alone, (rows, k)
+py::array_t<unsigned int> connectivity_rows_of(const Mesh& mesh, std::size_t d0,
+                                               std::size_t d1, std::size_t k,
+                                               py::array_t<std::int64_t> rows)
+{
+  const MeshConnectivity& c = mesh.topology()(d0, d1);
+  const std::size_t n = mesh.num_entities(d0);
+  if (n && c.empty())
+    throw std::runtime_error("connectivity_rows_of: the connectivity is not built");
+  if (c.size() != n * k)
+    throw std::runtime_error("connectivity_rows_of: not k entries an entity");
+  auto r = rows.unchecked<1>();
+  py::array_t<unsigned int> out({(std::size_t) r.shape(0), k});
+  auto o = out.mutable_unchecked<2>();
+  for (py::ssize_t i = 0; i < r.shape(0); ++i)
+  {
+    if (r(i) < 0 || (std::size_t) r(i) >= n)
+      throw std::out_of_range("connectivity_rows_of: an entity beyond the mesh's");
+    const unsigned int* e = c(r(i));
+    for (std::size_t j = 0; j < k; ++j)
+      o(i, j) = e[j];
+  }
+  return out;
+}
+
 PYBIND11_MODULE(SIGNATURE, m)
 {
   py::class_<CppPeriodicBox, std::shared_ptr<CppPeriodicBox>, SubDomain>
@@ -165,6 +190,7 @@ PYBIND11_MODULE(SIGNATURE, m)
                   double>());
   m.def("cell_dofs_of", &cell_dofs_of);
   m.def("connectivity_of", &connectivity_of);
+  m.def("connectivity_rows_of", &connectivity_rows_of);
 }
 """
 
@@ -184,15 +210,20 @@ def cell_dofs(dofmap, cells, n):
         dofmap, np.ascontiguousarray(cells, dtype=np.int64), int(n)), dtype=np.int64)
 
 
-def connectivity(mesh, d0, d1):
-    """The d1-entities of every local d0-entity of a tetrahedral mesh (d0 > d1), as an
-    (entities, C(d0 + 1, d1 + 1)) uint32 array of local indices, built first if need be.
-    `mesh.topology()(d0, d1)()` is a Python list, about 36 B an entry where this is 4."""
+def connectivity(mesh, d0, d1, rows=None):
+    """The d1-entities of every local d0-entity of a triangle or tetrahedral mesh
+    (d0 > d1), or of the d0-entities `rows` alone, as an (entities, C(d0 + 1, d1 + 1))
+    uint32 array of local indices, built first if need be. `mesh.topology()(d0, d1)()`
+    is a Python list of them all, about 36 B an entry where this is 4."""
     from math import comb
     if not 0 <= d1 < d0 <= 3:
         raise ValueError("connectivity: d0 > d1, not ({}, {})".format(d0, d1))
     mesh.init(d0, d1)
-    return np.asarray(_module().connectivity_of(mesh, d0, d1, comb(d0 + 1, d1 + 1)))
+    k = comb(d0 + 1, d1 + 1)
+    if rows is None:
+        return np.asarray(_module().connectivity_of(mesh, d0, d1, k))
+    rows = np.ascontiguousarray(rows, dtype=np.int64).reshape(-1)
+    return np.asarray(_module().connectivity_rows_of(mesh, d0, d1, k, rows))
 
 
 def periodic_box(upper, tol=df.DOLFIN_EPS_LARGE, periodic=None, lower=None, map_tol=None):

@@ -105,6 +105,21 @@ def test_connectivity_is_dolfins_as_an_array():
         connectivity(mesh, 0, 3)
 
 
+def test_connectivity_of_listed_entities_is_those_rows():
+    """`connectivity` of the listed entities alone is those rows of the whole, on a
+    triangle mesh and a tetrahedral one; an entity beyond the mesh's is refused."""
+    for mesh in (df.UnitSquareMesh(4, 3), df.UnitCubeMesh(3, 2, 2)):
+        D = mesh.topology().dim()
+        for d0, d1 in ((D, D - 1), (D - 1, 0), (1, 0)):
+            whole = connectivity(mesh, d0, d1)
+            rows = np.array([len(whole) - 1, 0, 2, 2], dtype=np.int64)
+            got = connectivity(mesh, d0, d1, rows)
+            assert got.dtype == np.uint32 and np.array_equal(got, whole[rows])
+            assert connectivity(mesh, d0, d1, []).shape == (0, whole.shape[1])
+        with pytest.raises(IndexError):
+            connectivity(mesh, D, 0, [mesh.num_cells()])
+
+
 @pytest.mark.parametrize("n", [4, 5, 6])
 def test_faces_congruent_on_a_2d_mesh(n):
     """2D coordinates are padded, not reshaped as 3D rows."""

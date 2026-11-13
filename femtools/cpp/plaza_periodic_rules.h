@@ -11,9 +11,10 @@
 //    isosceles triangle does not hang on rounding).
 //  - pair: periodic partners of items (edges: two points; nodes: one point) on the
 //    identified faces, every axis in one round, without gathering a face anywhere: each
-//    item goes to the rank its periodic image's bin hashes to (splitmix64), partners
-//    meet there -- found through the bins, O(n log n) whatever the axis -- and are told
-//    of each other. The ranks to send to are found by NBX (non-blocking consensus).
+//    item goes to the rank its periodic image's block of bins hashes to (splitmix64),
+//    partners meet there -- found through the bins, O(n log n) whatever the axis -- and
+//    are told of each other. The ranks to send to are found by NBX (non-blocking
+//    consensus).
 //
 // `Box::tol` is a length: the callers make it relative to the box (femtools'
 // `periodic_core.box_tol`), so a box far from the origin keeps its pairs.
@@ -258,6 +259,12 @@ inline std::vector<std::int64_t> bins_near(double v, double h, double tol)
   return out;
 }
 
+// The block of `r` consecutive bins a bin is in (floor division)
+inline std::int64_t block_of(std::int64_t b, std::int64_t r)
+{
+  return b >= 0 ? b / r : -((-b + r - 1) / r);
+}
+
 // Periodic partners of items with K points (x: 3*K doubles an item), given by their
 // local ids: an item with all points on the upper plane of a periodic axis pairs with
 // the item at its image on the lower plane, every axis at once (an item on two upper
@@ -271,6 +278,11 @@ inline std::vector<std::int64_t> bins_near(double v, double h, double tol)
 // within tol may have (its own and, near a bin's edge, the neighbour's). There the
 // masters are sorted by (axis, bin, an in-plane coordinate) and each slave looks up its
 // bins and, within one, the in-plane coordinate within tol: O(n log n) on any face.
+// The plane's own coordinate, and one along which the box is flat (a 2D mesh's third),
+// is set to the box's lower one on both sides, so there an item has one bin. A bin's
+// rank is that of its block of bins (some as many blocks across a face as there are
+// ranks), so that the items of a patch of a face go to a few ranks, not to one rank a
+// bin.
 template <int K>
 Partners pair(MPI_Comm comm, const std::vector<std::int32_t>& ids,
               const std::vector<double>& x, const Box& box)
@@ -282,6 +294,27 @@ Partners pair(MPI_Comm comm, const std::vector<std::int32_t>& ids,
     extent = std::max(extent, box.upper[d] - box.lower[d]);
   // the bins items meet in: much wider than tol, small beside the box
   const double h = std::max(1e3 * box.tol, 1e-6 * extent);
+  // the axes along which the box is flat, and the blocks of bins ranks are given: about
+  // the rank count's root (in the face's dimension) blocks across the face
+  std::array<bool, 3> flat;
+  int in_face = 0;
+  for (int d = 0; d < 3; ++d)
+  {
+    flat[d] = box.upper[d] == box.lower[d];
+    in_face += flat[d] ? 0 : 1;
+  }
+  const double across = std::ceil(std::pow(static_cast<double>(size),
+                                           1.0 / std::max(1, in_face - 1)));
+  std::array<std::int64_t, 3> block;
+  for (int d = 0; d < 3; ++d)
+    block[d] = std::max<std::int64_t>(
+        1, static_cast<std::int64_t>((box.upper[d] - box.lower[d]) / across / h));
+  auto rank_of_bin = [&](int a, std::int64_t b0, std::int64_t b1, std::int64_t b2)
+  {
+    return rank_of(std::array<std::int64_t, 4>{a, block_of(b0, block[0]),
+                                               block_of(b1, block[1]),
+                                               block_of(b2, block[2])}, size);
+  };
   // role (0 slave, 1 master), axis, id, the image's K points
   constexpr int W = 3 + 3 * K;
   using Key = std::array<std::int64_t, 4>;   // axis, bin
@@ -310,8 +343,11 @@ Partners pair(MPI_Comm comm, const std::vector<std::int32_t>& ids,
       for (int k = 0; k < K; ++k)
       {
         pts[k] = {p[3 * k], p[3 * k + 1], p[3 * k + 2]};
-        if (up)
-          pts[k][a] = box.lower[a];   // the slave's image, on the lower plane
+        // the slave's image on the lower plane, the master on it exactly; and the
+        // coordinates along which the box is flat, alike on both sides
+        for (int d = 0; d < 3; ++d)
+          if (d == a or flat[d])
+            pts[k][d] = box.lower[d];
       }
       std::sort(pts.begin(), pts.end(),
                 [&](const std::array<double, 3>& u, const std::array<double, 3>& v)
@@ -320,14 +356,14 @@ Partners pair(MPI_Comm comm, const std::vector<std::int32_t>& ids,
       for (int d = 0; d < 3; ++d)
       {
         bins[d] = bins_near(centroid(pts[0].data(), d), h, box.tol);
-        if (!up)
-          bins[d].resize(1);         // a master: its own bin only
+        if (!up or d == a or flat[d])
+          bins[d].resize(1);         // a master, or a coordinate set alike: its own bin
       }
       std::set<int> dests;
       for (auto b0 : bins[0])
         for (auto b1 : bins[1])
           for (auto b2 : bins[2])
-            dests.insert(rank_of(Key{a, b0, b1, b2}, size));
+            dests.insert(rank_of_bin(a, b0, b1, b2));
       for (int dest : dests)
       {
         auto& s = send[dest];
@@ -391,7 +427,11 @@ Partners pair(MPI_Comm comm, const std::vector<std::int32_t>& ids,
     const int c = along(s.axis);
     std::array<std::vector<std::int64_t>, 3> bins;
     for (int d = 0; d < 3; ++d)
+    {
       bins[d] = bins_near(centroid(s.k.data(), d), h, box.tol);
+      if (d == s.axis or flat[d])
+        bins[d].resize(1);
+    }
     bool found = false;
     for (auto b0 : bins[0])
       for (auto b1 : bins[1])

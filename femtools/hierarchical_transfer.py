@@ -8,6 +8,7 @@
     eval_through_chain, eval_p2_through_chain    a source at a refined mesh's P1 or P2 nodes
     transfer_p1_field(old, values, new, parent)  a P1 field onto its one-pass refinement
     as_p1_function, as_p2_function               node values as a Function, ghost-guarded
+    entity_dofs(space, dim)                      a dofmap's entity dofs as an array
 
 `femtools.plaza_periodic.refine_periodic` returns the parent-cell map, and composing those
 maps across passes gives every cell's ancestor in the original mesh. Evaluation is then
@@ -453,7 +454,7 @@ def as_p2_function(mesh, values_by_dim, width=3, name="u"):
     f = df.Function(space, name=name)
     values = f.vector().get_local()
     for dim, vals in enumerate(values_by_dim):
-        block = np.asarray(space.dofmap().entity_dofs(mesh, dim)).reshape(-1, width)
+        block = entity_dofs(space, dim).reshape(-1, width)
         if width > 1 and len(block) and not np.array_equal(
                 block[:, 1:], block[:, :1] + np.arange(1, width)):
             raise ValueError(
@@ -466,6 +467,31 @@ def as_p2_function(mesh, values_by_dim, width=3, name="u"):
     f.vector().set_local(values)
     f.vector().apply("insert")
     return f
+
+
+def entity_dofs(space, dim):
+    """`space.dofmap().entity_dofs(mesh, dim)` as an array, without its Python list: each
+    local entity's dofs (ghosts included), in the order of the entities, taken from the
+    cell dofs (`femtools.periodic.cell_dofs`) of the first local cell holding it. An
+    entity that only ghost cells hold (`ghost_mode` other than "none") has its dofs too,
+    which another rank owns, where dolfin's, which looks at the regular cells alone,
+    gives 0s. A Lagrange space of a triangle or tetrahedron mesh, entities of dimension
+    0 or 1. Collective the first time (the cell dofs compile)."""
+    from femtools.periodic import cell_dofs, connectivity
+    mesh = space.mesh()
+    dm = space.dofmap()
+    D = mesh.topology().dim()
+    if dim not in (0, 1) or dim >= D:
+        raise ValueError("entity_dofs: vertices or edges, not dimension {}".format(dim))
+    held = (np.asarray(mesh.cells(), dtype=np.int64) if dim == 0
+            else connectivity(mesh, D, 1).astype(np.int64))       # (cells, entities)
+    n = mesh.num_entities(dim)
+    cell = first_incident_cell(held, n)
+    local = np.argmax(held[cell] == np.arange(n)[:, None], axis=1)
+    table = np.array([dm.tabulate_entity_dofs(dim, j) for j in range(held.shape[1])],
+                     dtype=np.int64).reshape(held.shape[1], dm.num_entity_dofs(dim))
+    dofs = cell_dofs(dm, cell, space.element().space_dimension(), mesh.mpi_comm())
+    return dofs[np.arange(n)[:, None], table[local]].ravel()
 
 
 def velocity_on_mesh_p2(source, mesh, ancestors, gcell0):

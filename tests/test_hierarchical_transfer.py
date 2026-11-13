@@ -7,6 +7,7 @@
   survives `as_p2_function`;
 - global cell ids round-trip through HDF5: a mesh refined and written on 3 ranks, read
   back on 1, 2 and 3, names the same tetrahedra by them;
+- `entity_dofs` is the dofmap's entity dofs, ghosted mesh or not;
 - every case passes again under `mpirun -n 3`.
 """
 import os
@@ -196,6 +197,39 @@ def _check_refined(out_dir):
           else 0.0)
     assert dx == 0.0, "coordinates are not indexed by global vertex id ({:.2e})".format(dx)
     print("all rows agree")
+
+
+@pytest.mark.parametrize("ghost", ["none", "shared_facet"])
+def test_entity_dofs_are_dolfins(ghost):
+    """`entity_dofs` is the dofmap's `entity_dofs` for every entity a regular cell holds
+    (P1 and P2, scalar and vector, 2D and 3D); one held by ghost cells alone has dofs
+    another rank owns."""
+    from femtools.hierarchical_transfer import entity_dofs
+    from femtools.periodic import connectivity
+    before = df.parameters["ghost_mode"]
+    df.parameters["ghost_mode"] = ghost
+    try:
+        for mesh in (df.UnitSquareMesh(6, 5), df.UnitCubeMesh(3, 3, 2)):
+            D = mesh.topology().dim()
+            regular_cells = mesh.topology().ghost_offset(D)
+            for V in (df.FunctionSpace(mesh, "CG", 2), df.VectorFunctionSpace(mesh, "CG", 2),
+                      df.VectorFunctionSpace(mesh, "CG", 1)):
+                owned = V.dofmap().index_map().size(df.IndexMap.MapSize.OWNED)
+                for dim in (0, 1):
+                    k = V.dofmap().num_entity_dofs(dim)
+                    got = entity_dofs(V, dim)
+                    if not k:
+                        assert len(got) == 0
+                        continue
+                    want = np.asarray(V.dofmap().entity_dofs(mesh, dim)).reshape(-1, k)
+                    got = got.reshape(-1, k)
+                    held = mesh.cells() if dim == 0 else connectivity(mesh, D, 1)
+                    regular = np.zeros(mesh.num_entities(dim), bool)
+                    regular[held[:regular_cells].ravel()] = True
+                    assert np.array_equal(got[regular], want[regular])
+                    assert (got[~regular] >= owned).all()
+    finally:
+        df.parameters["ghost_mode"] = before
 
 
 def _spawn(nranks, *args):

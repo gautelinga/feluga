@@ -4,6 +4,7 @@
     apply(bc, b)          # bc.apply(b)
     apply(bc, A)          # bc.apply(A), by dolfin
     apply(bc, A, b)       # bc.apply(A, b): A by dolfin, b here
+    apply([bc1, bc2], b)  # bc1.apply(b); bc2.apply(b), as one setting of the vector
 
 DirichletBC.apply searches the boundary facets and tabulates their dofs at every call.
 Here that is done once per condition: one dolfin apply onto a vector of NaNs gives
@@ -18,6 +19,11 @@ rows dolfin sets keeping its nonzero pattern. The dofs are found once per condit
 object, so a condition whose markers or mesh change in place needs a new object,
 and one made anew for every apply costs more than dolfin's apply. The cache keeps the
 256 most recently used conditions, with what they hold.
+
+Several conditions given as a list or tuple are applied in their order, as one call
+each would apply them (a later one's value wins on a dof both constrain), with one
+setting of the vector's values and one update of its ghosts for the cached ones in a
+row.
 """
 import numpy as np
 
@@ -58,20 +64,20 @@ class _Cached:
             self.component = values[self.dofs].astype(int)
         self.rows = (V.dofmap().ownership_range()[0] + self.dofs).astype(PETSc.IntType)
 
-    def apply(self, b):
+    def entries(self):
+        """`(rows, values)`: the owned global rows the condition sets and their current
+        values; None for a condition left to dolfin."""
         g = self.bc.value()
         if g.id() != self.value_id:                 # set_value gave it a new value
             self.__init__(self.bc)
         if self.kind is None:
-            self.bc.apply(b)
-            return
+            return None
         if self.kind == "constant":
             values = g.values()[self.component]
-        else:
-            values = g.vector().get_local()[self.dofs]
-        from dolfin import as_backend_type
-        as_backend_type(b).vec().setValues(self.rows, values)
-        b.apply("insert")
+        else:                                       # the owned values, read in place
+            from dolfin import as_backend_type
+            values = as_backend_type(g.vector()).vec().getArray(readonly=True)[self.dofs]
+        return self.rows, values
 
 
 def _cached(bc):
@@ -81,14 +87,40 @@ def _cached(bc):
     return entry
 
 
+def _apply_vector(bcs, b):
+    """The conditions `bcs` applied to the vector b in their order: the cached ones in
+    a row set in one call and the ghosts updated once, the others by dolfin."""
+    from dolfin import as_backend_type
+    rows, values = [], []
+
+    def flush():
+        if rows:
+            as_backend_type(b).vec().setValues(np.concatenate(rows), np.concatenate(values))
+            b.apply("insert")
+            del rows[:], values[:]
+    for bc in bcs:
+        found = _cached(bc).entries()
+        if found is None:
+            flush()
+            bc.apply(b)
+        else:
+            rows.append(found[0])
+            values.append(found[1])
+    flush()
+
+
 def apply(bc, *tensors):
-    """bc.apply(*tensors): a vector through the cached dofs, a matrix by dolfin."""
+    """bc.apply(*tensors): a vector through the cached dofs, a matrix by dolfin. `bc`
+    may be a list or tuple of conditions, applied in their order."""
     from dolfin.cpp.la import GenericMatrix, GenericVector
+    bcs = list(bc) if isinstance(bc, (list, tuple)) else [bc]
     if len(tensors) == 1 and isinstance(tensors[0], GenericVector):
-        _cached(bc).apply(tensors[0])
+        _apply_vector(bcs, tensors[0])
     elif len(tensors) == 2 and isinstance(tensors[0], GenericMatrix) \
-            and isinstance(tensors[1], GenericVector) and _cached(bc).kind is not None:
-        bc.apply(tensors[0])
-        _cached(bc).apply(tensors[1])
+            and isinstance(tensors[1], GenericVector):
+        for one in bcs:
+            one.apply(tensors[0])
+        _apply_vector(bcs, tensors[1])
     else:
-        bc.apply(*tensors)
+        for one in bcs:
+            one.apply(*tensors)

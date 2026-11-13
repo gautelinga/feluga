@@ -1,6 +1,7 @@
 """fast_bc.apply against DirichletBC.apply on any number of ranks, on a periodic P2
 space: a Constant, a Function changed in place and a vector Constant changed in
-place, owned and ghost values; rank zero writes the largest difference to argv[1].
+place, and a list of overlapping conditions, owned and ghost values; rank zero writes
+the largest difference to argv[1].
 
     mpirun -n 3 python3 tests/fast_bc_worker.py OUT.txt
 """
@@ -40,6 +41,20 @@ for step in range(2):
         bc.apply(a)
         apply(bc, b)
         err = max(err, np.abs(ghosted(a) - ghosted(b)).max(initial=0.))
+# several conditions at once, in order, overlapping, an Expression among them
+h = df.interpolate(df.Expression("2 + sin(x[0])", degree=2), V)
+several = [df.DirichletBC(V, df.Constant(0.3), "on_boundary"),
+           df.DirichletBC(V, df.Expression("x[1] - 4", degree=2), "near(x[0], 0)"),
+           df.DirichletBC(V, h, "near(x[1], 0)"),
+           df.DirichletBC(V, df.Constant(-1.), "near(x[1], 1)")]
+for step in range(2):
+    h.vector()[:] = step - 3.
+    f = df.interpolate(df.Expression("x[0]*x[1]", degree=2), V)
+    a, b = f.vector().copy(), f.vector().copy()
+    for bc in several:
+        bc.apply(a)
+    apply(several, b)
+    err = max(err, np.abs(ghosted(a) - ghosted(b)).max(initial=0.))
 err = MPI.COMM_WORLD.allreduce(err, op=MPI.MAX)
 if MPI.COMM_WORLD.rank == 0:
     open(sys.argv[1], "w").write(repr(err))

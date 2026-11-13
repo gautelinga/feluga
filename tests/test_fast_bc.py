@@ -1,7 +1,7 @@
 """`femtools.fast_bc`: apply gives DirichletBC.apply's vector for a Constant, a vector
 Constant and a Function value, follows changes to the value, leaves an Expression and
-a component to dolfin, sets a matrix as dolfin does, and agrees on three ranks, ghost
-values included."""
+a component to dolfin, sets a matrix as dolfin does, applies a list of conditions in
+its order, and agrees on three ranks, ghost values included."""
 import os
 import sys
 
@@ -93,6 +93,41 @@ def test_matrix_and_vector():
     assert np.array_equal(a.get_local(), b.get_local())
     fast_bc.apply(bc, B)
     assert np.array_equal(A.array(), B.array())
+
+
+def overlapping(V):
+    """Conditions in an order where later ones overwrite earlier ones: a Constant on the
+    whole boundary, an Expression on its left side (left to dolfin), a Function on the
+    bottom, a Constant on the right."""
+    g = df.interpolate(df.Expression("2 + sin(x[0])", degree=2), V)
+    return [df.DirichletBC(V, df.Constant(0.3), "on_boundary"),
+            df.DirichletBC(V, df.Expression("x[1] - 4", degree=2), "near(x[0], 0)"),
+            df.DirichletBC(V, g, "near(x[1], 0)"),
+            df.DirichletBC(V, df.Constant(-1.), "near(x[0], 2)")]
+
+
+@pytest.mark.parametrize("periodic", [False, True])
+def test_several_conditions_in_order(periodic):
+    """A list of conditions gives the vector of dolfin's applies one after another, the
+    later winning where they overlap, with an Expression among them; with a matrix too."""
+    V = space(periodic)
+    bcs = overlapping(V)
+    f = df.interpolate(df.Expression("x[0]*x[1]", degree=2), V)
+    a, b = f.vector().copy(), f.vector().copy()
+    for bc in bcs:
+        bc.apply(a)
+    fast_bc.apply(bcs, b)
+    assert np.array_equal(a.get_local(), b.get_local())
+    assert not np.array_equal(a.get_local(), f.vector().get_local())
+    u, v = df.TrialFunction(V), df.TestFunction(V)
+    form = df.inner(df.grad(u), df.grad(v)) * df.dx
+    A, B = df.assemble(form), df.assemble(form)
+    a, b = df.assemble(v * df.dx), df.assemble(v * df.dx)
+    for bc in bcs:
+        bc.apply(A, a)
+    fast_bc.apply(tuple(bcs), B, b)
+    assert np.array_equal(A.array(), B.array())
+    assert np.array_equal(a.get_local(), b.get_local())
 
 
 def test_found_once():

@@ -191,7 +191,6 @@ def assemble_matrix(K, a):
     here raises on every rank; in a row owned elsewhere, PETSc refuses it there.
     Collective."""
     from mpi4py import MPI
-    from petsc4py import PETSc
     from dolfinx.fem import petsc
 
     comm = K.comm.tompi4py()
@@ -204,9 +203,6 @@ def assemble_matrix(K, a):
         raise RuntimeError("assemble_matrix: {} values of the form fall outside the "
                            "matrix's pattern".format(comm.allreduce(missed, op=MPI.SUM)))
     K.assemble()
-    # The rows sent to other ranks are the same at every assembly, so PETSc can keep
-    # the communication pattern it set up instead of agreeing on it again each time.
-    K.setOption(PETSc.Mat.Option.SUBSET_OFF_PROC_ENTRIES, True)
     return K
 
 

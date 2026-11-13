@@ -46,13 +46,13 @@ def _node_keys(V, n_local):
     return keys, n_sub
 
 
-def _gps_order(V, owned_unique, rep, nodes):
-    """`owned_unique` reordered by the Gibbs-Poole-Stockmeyer ordering (DOLFINx's
-    bandwidth reduction) of the graph of their nodes, in which two nodes are joined when
-    a cell has dofs at both. `rep[i]` is the owned unique dof that local dof i stands
-    for (a slave its master), -1 if none; `nodes[i]` is the node of local dof i. The
-    dofs of a node keep their order in `owned_unique`."""
-    from dolfinx.cpp.graph import AdjacencyList_int32, reorder_gps
+def _rcm_order(V, owned_unique, rep, nodes):
+    """`owned_unique` reordered by the reverse Cuthill-McKee ordering (PETSc's) of the
+    graph of their nodes, in which two nodes are joined when a cell has dofs at both.
+    `rep[i]` is the owned unique dof that local dof i stands for (a slave its master),
+    -1 if none; `nodes[i]` is the node of local dof i. The dofs of a node keep their
+    order in `owned_unique`."""
+    from petsc4py import PETSc
 
     node_ids, node_of = np.unique(nodes[owned_unique], return_inverse=True)
     n_nodes = len(node_ids)
@@ -87,8 +87,17 @@ def _gps_order(V, owned_unique, rep, nodes):
     offsets = np.zeros(n_nodes + 1, dtype=np.int32)
     np.cumsum(np.bincount(src, minlength=n_nodes), out=offsets[1:])
     del src
-    place = np.asarray(reorder_gps(AdjacencyList_int32(dst, offsets)),
-                       dtype=np.int64)  # place[node]: its position in the new order
+    if n_nodes == 0:
+        return owned_unique
+    graph = PETSc.Mat().createAIJ((n_nodes, n_nodes), comm=PETSc.COMM_SELF, csr=(
+        offsets.astype(PETSc.IntType), dst.astype(PETSc.IntType), np.ones(len(dst))))
+    del dst, offsets
+    rows, cols = graph.getOrdering(PETSc.Mat.OrderingType.RCM)
+    order = rows.getIndices()                   # the nodes in their new order
+    for o in (rows, cols, graph):
+        o.destroy()
+    place = np.empty(n_nodes, dtype=np.int64)   # place[node]: its position in it
+    place[order] = np.arange(n_nodes)
     return owned_unique[np.argsort(place[node_of], kind="stable")]
 
 
@@ -141,10 +150,15 @@ class UniqueDofs:
             here = (masters >= lo) & (masters < lo + n_own)
             rep[slaves[here]] = masters[here] - lo
             nodes = np.arange(n_loc) if keys is None else keys // per_node
-            owned_unique = _gps_order(V, owned_unique, rep, nodes)
+            owned_unique = _rcm_order(V, owned_unique, rep, nodes)
         n_unique = len(owned_unique)
         start = self.comm.exscan(n_unique) or 0
         n_global = self.comm.allreduce(n_unique)
+        if n_global * bs > np.iinfo(PETSc.IntType).max:
+            raise OverflowError(
+                "{} unique dofs exceed this PETSc's {}-bit indices: a PETSc (and hypre) "
+                "built with 64-bit indices is needed".format(
+                    n_global * bs, 8 * np.dtype(PETSc.IntType).itemsize))
 
         # Compact index of every local block, and of every master, from their owners:
         # a vector over the space's own global numbering holds the owners' compact

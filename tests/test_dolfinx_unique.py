@@ -5,7 +5,9 @@ Against plain DOLFINx without periodicity (identical), against PᵀAP with an ex
 right-hand sides) with exact preallocation, against dolfinx_mpc (a periodic solve with
 nonzero Dirichlet data on the corners, applied by the backend's DirichletBC), on one rank
 and on three; and against dolfin's constrained_domain in one process (unique dofs, a
-periodic field, the operator).
+periodic field, the operator). The preallocation, counted from the dofmaps, against a
+plain assembly's pattern folded onto unique dofs (spaces, periodicity, integral kinds,
+rectangular forms, 2D and 3D) on one to four ranks.
 
     python3 -m pytest tests/test_dolfinx_unique.py [-m mpi]
 """
@@ -60,6 +62,21 @@ def test_unique_dofs_three_ranks(tmp_path):
     parallel = _run("dolfinx_unique_worker", tmp_path, 3)
     _check_unique(parallel)
     assert parallel["solution_norm"] == pytest.approx(serial["solution_norm"], rel=1e-12)
+
+
+def _check_pattern(r):
+    assert len(r) == 198
+    assert not {k: v for k, v in r.items() if v}
+
+
+def test_preallocation_serial(tmp_path):
+    _check_pattern(_run("dolfinx_pattern_worker", tmp_path, 1))
+
+
+@pytest.mark.mpi
+@pytest.mark.parametrize("ranks", [2, 3, 4])
+def test_preallocation_parallel(tmp_path, ranks):
+    _check_pattern(_run("dolfinx_pattern_worker", tmp_path, ranks))
 
 
 @pytest.mark.dolfin

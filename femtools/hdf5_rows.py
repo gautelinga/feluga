@@ -819,7 +819,8 @@ def mpio(comm):
     """Whether a write on `comm` goes through MPI-IO: more than one rank, and h5py's MPI
     build loaded (Debian's h5py loads it when `OMPI_COMM_WORLD_SIZE` or `MPI_LOCALNRANKS`
     is set, unless `H5PY_NEVER_USE_MPI` is; `H5PY_ALWAYS_USE_MPI` forces it). Without
-    it, rank zero writes every rank's rows, which does not scale: said once, on rank 0."""
+    it, rank zero writes every rank's rows, in turn, which does not scale: said once, on
+    rank 0, with what it costs and how to have MPI-IO."""
     if comm is None or comm.Get_size() == 1:
         return False
     import h5py
@@ -828,10 +829,14 @@ def mpio(comm):
         _SERIAL_WARNED[0] = True
         if comm.Get_rank() == 0:
             import sys
-            print("femtools: h5py has no MPI support, so rank 0 writes the HDF5 files of "
-                  "all {} ranks; install h5py built with MPI (Debian/Ubuntu: "
-                  "python3-h5py-mpi) for parallel I/O".format(comm.Get_size()),
-                  file=sys.stderr, flush=True)
+            print("femtools: h5py has no MPI support, so rank 0 writes every HDF5 dataset "
+                  "for all {} ranks, receiving their compressed rows one rank after "
+                  "another while the others wait: each write then takes as long as one "
+                  "process writing the whole file, at any number of ranks, and the run's "
+                  "output does not scale. Install h5py built with MPI (Debian/Ubuntu: "
+                  "python3-h5py-mpi; on a cluster, h5py built against its MPI and a "
+                  "parallel HDF5) for every rank to write its own block through MPI-IO."
+                  .format(comm.Get_size()), file=sys.stderr, flush=True)
     return parallel
 
 

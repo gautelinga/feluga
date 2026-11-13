@@ -68,11 +68,33 @@ def round_slices(counts, r, rounds):
     return (counts * r) // rounds, (counts * (r + 1)) // rounds
 
 
-def _agreed_layout(comm, a, n):
-    """The dtype and row shape every rank with rows passed for an array (rank zero's
-    when none has rows); a rank with none may pass any (an empty default). Disagreeing
-    ranks are refused on every rank:
-    received into its own dtype, a row would be another's bytes reinterpreted."""
+#: row dimensions a layout signature (`_signature`) carries; an array of more is agreed
+#: through `_gathered_layout`
+_SIGNATURE_DIMS = 4
+_BIG = np.iinfo(np.int64).max
+
+
+def _signature(a, n):
+    """`(fields, general)`: an array's dtype and row shape as int64 fields for a buffer
+    reduction (the dtype's `str` packed into one int64, the number of row dimensions,
+    each dimension), and whether they do not fit there (a structured or subarray dtype,
+    a long dtype string, more than `_SIGNATURE_DIMS` row dimensions). A rank with no rows
+    (n == 0) has no fields."""
+    if not n:
+        return None, False
+    dt, shape = a.dtype, tuple(a.shape[1:])
+    code = dt.str.encode()
+    if dt.fields is not None or dt.subdtype is not None or len(code) > 8 \
+            or len(shape) > _SIGNATURE_DIMS:
+        return None, True
+    packed = int(np.frombuffer(code.ljust(8, b"\0"), dtype="<i8")[0])
+    dims = list(shape) + [0] * (_SIGNATURE_DIMS - len(shape))
+    return np.array([packed, len(shape)] + dims, dtype=np.int64), False
+
+
+def _gathered_layout(comm, a, n):
+    """`_agreed_layout` through an allgather of every rank's dtype and row shape: for the
+    layouts a signature does not carry, and for the message naming disagreeing ones."""
     mine = (a.dtype.str, tuple(a.shape[1:])) if n else None
     seen = {t for t in comm.allgather(mine) if t is not None}
     if len(seen) > 1:
@@ -85,6 +107,49 @@ def _agreed_layout(comm, a, n):
     return np.dtype(dt), shape
 
 
+def _agreed_layout(comm, a, n):
+    """The dtype and row shape every rank with rows passed for an array (rank zero's
+    when none has rows); a rank with none may pass any (an empty default). Disagreeing
+    ranks are refused on every rank:
+    received into its own dtype, a row would be another's bytes reinterpreted.
+
+    One buffer Allreduce of each rank's `_signature`, its minimum and maximum: equal
+    means every rank with rows agrees. What a signature does not carry, a disagreement
+    (for its message) and no rank with rows go through `_gathered_layout`."""
+    from mpi4py import MPI
+    fields, general = _signature(a, n)
+    width = 2 + _SIGNATURE_DIMS
+    v = np.full(2 * width + 2, _BIG, dtype=np.int64)
+    if fields is not None:
+        v[:width], v[width:2 * width] = fields, -fields
+    v[-2:] = -int(bool(n)), -int(general)
+    out = np.empty_like(v)
+    comm.Allreduce(v, out, op=MPI.MIN)
+    lo, hi = out[:width], -out[width:2 * width]
+    if out[-1] < 0 or out[-2] == 0 or (lo != hi).any():
+        return _gathered_layout(comm, a, n)
+    code = lo[0:1].astype("<i8").tobytes().rstrip(b"\0").decode()
+    return np.dtype(code), tuple(int(d) for d in lo[2:2 + int(lo[1])])
+
+
+def _alltoall_counts(comm, counts):
+    """Every rank's `counts[r]` for this rank r, as int64: one buffer Alltoall."""
+    counts = np.ascontiguousarray(counts, dtype=np.int64)
+    recv = np.empty(comm.Get_size(), dtype=np.int64)
+    comm.Alltoall(counts, recv)
+    return recv
+
+
+def _int_reduce(comm, values, op):
+    """Integers reduced elementwise over the ranks by `op` ("max" or "sum"), as int64, in
+    one buffer Allreduce."""
+    from mpi4py import MPI
+    v = np.ascontiguousarray(np.atleast_1d(values), dtype=np.int64)
+    out = np.empty_like(v)
+    comm.Allreduce(v, out, op={"max": MPI.MAX, "sum": MPI.SUM}[op])
+    return out
+
+
 def exchange(comm, counts, *arrays):
     """Rows grouped by destination -- `counts[r]` rows for rank r, in rank order -- sent;
     returns `(recv_counts, [received])`, each array's rows grouped by source rank in rank
@@ -92,41 +157,54 @@ def exchange(comm, counts, *arrays):
     shapes are agreed over the ranks (`_agreed_layout`), and an array a rank would send
     or receive more than `ROUND` entries of goes in rounds, so MPI's 32-bit counts never
     wrap. Collective."""
-    from mpi4py import MPI
     counts = np.asarray(counts, dtype=np.int64)
-    recv_counts = np.array(comm.alltoall([int(c) for c in counts]), dtype=np.int64)
-    n_send, n_recv = int(counts.sum()), int(recv_counts.sum())
-    s_start = np.concatenate(([0], np.cumsum(counts)[:-1]))
-    r_start = np.concatenate(([0], np.cumsum(recv_counts)[:-1]))
+    recv_counts = _alltoall_counts(comm, counts)
+    n_send = int(counts.sum())
     out = []
     for a in arrays:
         a = np.asarray(a)
         dt, shape = _agreed_layout(comm, a, n_send)
-        width = int(np.prod(shape)) if shape else 1
-        flat = np.ascontiguousarray(a, dtype=dt).reshape(n_send, width)
-        recv = np.empty((n_recv, width), dtype=dt)
-        mpi_type = MPI._typedict[dt.char]
-        most = comm.allreduce(max(n_send, n_recv) * width, op=MPI.MAX)
-        rounds = n_rounds(most, most)
-        for r in range(rounds):
-            s_lo, s_hi = round_slices(counts, r, rounds)
-            r_lo, r_hi = round_slices(recv_counts, r, rounds)
-            if rounds == 1:
-                send, got = flat, recv
-            else:
-                send = flat[np.concatenate([np.arange(b + lo, b + hi) for b, lo, hi
-                                            in zip(s_start, s_lo, s_hi)])]
-                got = np.empty((int((r_hi - r_lo).sum()), width), dtype=dt)
-            sc = ((s_hi - s_lo) * width).astype(np.int32)
-            rc = ((r_hi - r_lo) * width).astype(np.int32)
-            sd = np.concatenate(([0], np.cumsum(sc)[:-1])).astype(np.int32)
-            rd = np.concatenate(([0], np.cumsum(rc)[:-1])).astype(np.int32)
-            comm.Alltoallv([send, sc, sd, mpi_type], [got, rc, rd, mpi_type])
-            if rounds > 1:
-                recv[np.concatenate([np.arange(b + lo, b + hi) for b, lo, hi
-                                     in zip(r_start, r_lo, r_hi)])] = got
-        out.append(recv.reshape((n_recv,) + shape))
+        flat = np.ascontiguousarray(a, dtype=dt).reshape((n_send,) + shape)
+        out.append(_send_rows(comm, counts, recv_counts, flat)[0])
     return recv_counts, out
+
+
+def _send_rows(comm, counts, recv_counts, send, rounds=None):
+    """`(received, rounds)`: `send` (rows grouped by destination, `counts[r]` for rank r)
+    exchanged for the rows this rank receives (`recv_counts[r]` from rank r), grouped by
+    source rank; in `rounds` rounds when a rank would send or receive more than `ROUND`
+    entries at once (worked out over the ranks when None). Collective."""
+    from mpi4py import MPI
+    shape = send.shape[1:]
+    width = int(np.prod(shape)) if shape else 1
+    dt = send.dtype
+    flat = send.reshape(len(send), width)
+    n_recv = int(recv_counts.sum())
+    recv = np.empty((n_recv, width), dtype=dt)
+    if rounds is None:
+        most = int(_int_reduce(comm, max(len(send), n_recv) * width, "max")[0])
+        rounds = n_rounds(most, most)
+    s_start = np.concatenate(([0], np.cumsum(counts)[:-1]))
+    r_start = np.concatenate(([0], np.cumsum(recv_counts)[:-1]))
+    mpi_type = MPI._typedict[dt.char]
+    for r in range(rounds):
+        s_lo, s_hi = round_slices(counts, r, rounds)
+        r_lo, r_hi = round_slices(recv_counts, r, rounds)
+        if rounds == 1:
+            out, got = flat, recv
+        else:
+            out = flat[np.concatenate([np.arange(b + lo, b + hi) for b, lo, hi
+                                       in zip(s_start, s_lo, s_hi)])]
+            got = np.empty((int((r_hi - r_lo).sum()), width), dtype=dt)
+        sc = ((s_hi - s_lo) * width).astype(np.int32)
+        rc = ((r_hi - r_lo) * width).astype(np.int32)
+        sd = np.concatenate(([0], np.cumsum(sc)[:-1])).astype(np.int32)
+        rd = np.concatenate(([0], np.cumsum(rc)[:-1])).astype(np.int32)
+        comm.Alltoallv([out, sc, sd, mpi_type], [got, rc, rd, mpi_type])
+        if rounds > 1:
+            recv[np.concatenate([np.arange(b + lo, b + hi) for b, lo, hi
+                                 in zip(r_start, r_lo, r_hi)])] = got
+    return recv.reshape((n_recv,) + shape), rounds
 
 
 class Routed:
@@ -245,8 +323,7 @@ def agreed(comm, flag):
     """
     if comm is None or comm.Get_size() == 1:
         return bool(flag)
-    from mpi4py import MPI
-    return bool(comm.allreduce(bool(flag), op=MPI.LOR))
+    return bool(_int_reduce(comm, int(bool(flag)), "max")[0])
 
 
 def check_range(path, dataset, wanted, n, comm=None):
@@ -831,25 +908,122 @@ def write_ordered(path, name, rows, values, n, comm=None, mode="a", attrs=None):
         _store(h5, name, blocks, comm, attrs)
 
 
-def write_rows(h5, name, rows, values, n, comm=None, attrs=None):
+def write_rows(h5, name, rows, values, n, comm=None, attrs=None, plans=None):
     """`write_ordered` into a file already open: `h5` opened by every rank under MPI-IO,
     by rank zero alone otherwise (None on the others), as `opened` gives it -- a writer
-    that keeps its file open across many datasets (a time series). Collective."""
+    that keeps its file open across many datasets (a time series). Collective.
+
+    `plans`: a dict kept beside `rows` by a caller writing the same rows again and again
+    (a time series' nodes, every step), in which the routing of the rows to the ranks
+    writing them is kept (`RowPlan`, by the row count and the chunk rows): a later write
+    then sends its values alone. `rows` must not change while the dict is kept."""
     from femtools.abort import aborting
-    blocks = _blocks(getattr(h5, "filename", ""), name, rows, values, n, comm)
+    blocks = _blocks(getattr(h5, "filename", ""), name, rows, values, n, comm, plans)
     with aborting(comm):
         _store(h5, name, blocks, comm, attrs)
 
 
-def _blocks(path, name, rows, values, n, comm):
+class RowPlan:
+    """How one rank's rows of a dataset reach the blocks of whole chunks their ranks write
+    (`compress.aligned_edges`), worked out once for rows written again and again: the
+    order that groups the rows by destination (`order`, None when they are already one
+    run in rank order, `_runs`), the counts each way, and where each received row goes
+    in this rank's block -- `place` when every row of the block arrives once, else `keep`
+    and `at` (the first copy of each row, and its place) with `rep_a`, `rep_b` (copies
+    to compare with the copy before them, which must agree to the bit). `repeats` (agreed
+    over the ranks) says whether any rank has copies to compare. Built by `plan_rows`,
+    used by `RowPlan.block`."""
+
+    def __init__(self, lo, hi, order, counts, recv_counts):
+        self.lo, self.hi = lo, hi
+        self.order, self.counts, self.recv_counts = order, counts, recv_counts
+        self.place = self.keep = self.at = self.rep_a = self.rep_b = None
+        self.repeats = False
+        self.rounds = {}            # row width -> the exchange's rounds (`_send_rows`)
+
+    def block(self, comm, values):
+        """`(block, differ)`: this rank's block of rows from every rank's `values` (aligned
+        with the rows the plan was made for), and whether two copies of a row differ
+        (on any rank). Collective."""
+        send = values if self.order is None else values[self.order]
+        width = int(np.prod(send.shape[1:])) if send.ndim > 1 else 1
+        got, self.rounds[width] = _send_rows(comm, self.counts, self.recv_counts,
+                                             np.ascontiguousarray(send),
+                                             self.rounds.get(width))
+        n = self.hi - self.lo
+        if self.order is None:
+            return got, False
+        if self.place is not None:
+            block = np.empty((n,) + got.shape[1:], dtype=got.dtype)
+            block[self.place] = got
+            return block, False
+        block = np.zeros((n,) + got.shape[1:], dtype=got.dtype)
+        differ = False
+        if len(self.rep_a):
+            flat = as_rows(got).view(np.uint8).reshape(len(got), -1)
+            differ = bool((flat[self.rep_a] != flat[self.rep_b]).any())
+        if self.repeats:
+            differ = agreed(comm, differ)
+        if not differ:
+            block[self.at] = got[self.keep]
+        return block, differ
+
+
+def _local_index(k):
+    """The narrowest integer type indexing k entries: a plan's index arrays live as long
+    as the rows they route."""
+    return np.int32 if k < np.iinfo(np.int32).max else np.int64
+
+
+def plan_rows(comm, rows, n, step):
+    """`(plan, bad)`: the `RowPlan` of this rank's `rows` of an `n`-row dataset of chunks
+    of `step` rows, and whether (on any rank) rows are missing or out of range. One
+    exchange of the row indices, unless the rows are runs (`_runs`). Collective."""
+    from femtools import compress
+    rows = np.asarray(rows, dtype=np.int64)
+    size, rank = comm.Get_size(), comm.Get_rank()
+    edges = compress.aligned_edges(n, size, step)
+    lo, hi = int(edges[rank]), int(edges[rank + 1])
+    start = _runs(comm, rows, n)
+    if start is not None:
+        counts = np.clip(np.minimum(start + len(rows), edges[1:])
+                         - np.maximum(start, edges[:-1]), 0, None)
+        return RowPlan(lo, hi, None, counts, _alltoall_counts(comm, counts)), False
+    dest = owner_of(edges, rows, comm)
+    order = rank_order(dest, size).astype(_local_index(len(rows)))
+    counts = np.bincount(dest, minlength=size).astype(np.int64)
+    plan = RowPlan(lo, hi, order, counts, _alltoall_counts(comm, counts))
+    r = _send_rows(comm, counts, plan.recv_counts, rows[order])[0] - lo
+    m = hi - lo
+    index = _local_index(max(len(r), 1))
+    if m and len(r) == m and r.min() >= 0 and r.max() < m:
+        seen = np.zeros(m, bool)
+        seen[r] = True
+        if seen.all():
+            plan.place = r.astype(index)
+    bad = False
+    if plan.place is None:
+        srt = np.argsort(r, kind="stable")
+        rs = r[srt]
+        first = np.ones(len(rs), bool)
+        first[1:] = rs[1:] != rs[:-1]
+        rep = np.nonzero(~first)[0]
+        plan.keep, plan.at = srt[first].astype(index), rs[first].astype(index)
+        plan.rep_a, plan.rep_b = srt[rep].astype(index), srt[rep - 1].astype(index)
+        bad = int(first.sum()) != m or bool(len(rs) and (rs[0] < 0 or rs[-1] >= m))
+    plan.repeats = agreed(comm, plan.rep_a is not None and len(plan.rep_a) > 0)
+    return plan, agreed(comm, bad)
+
+
+def _blocks(path, name, rows, values, n, comm, plans=None):
     """The rows moved to the ranks writing them: `(n, shape, dtype, lo, block, step)`,
     this rank's block of whole chunks (`step` rows each) from row `lo`. Refuses, on every
-    rank, rows missing or two copies that differ. Collective."""
+    rank, rows missing or two copies that differ. A plan from `plans` (`write_rows`) is
+    used when every rank has one, and one made is kept there. Collective."""
     from femtools import compress
     rows = np.asarray(rows, dtype=np.int64)
     values = np.asarray(values)
     size = 1 if comm is None else comm.Get_size()
-    rank = 0 if comm is None else comm.Get_rank()
     if size > 1:
         dt, shape = _agreed_layout(comm, values, len(rows))
         values = values.astype(dt, copy=False).reshape((len(rows),) + shape)
@@ -858,20 +1032,21 @@ def _blocks(path, name, rows, values, n, comm):
     if size == 1:
         lo, block, bad = 0, *_place(rows, values, 0, n)
     else:
-        edges = compress.aligned_edges(n, size, step)
-        lo = int(edges[rank])
-        runs = _runs(comm, rows, n)
-        if runs is not None:
-            first = int(runs[rank])
-            counts = np.clip(np.minimum(first + len(rows), edges[1:])
-                             - np.maximum(first, edges[:-1]), 0, None)
-            _, (block,) = exchange(comm, counts, values)
-            bad = False
-        else:
-            got, got_values = to_owners(comm, edges, rows, values)
-            block, bad = _place(got, got_values, lo, int(edges[rank + 1]))
-            got = got_values = None
-    if agreed(comm, bad):
+        # all ranks agree whether a plan is used: any rank without one makes it anew
+        key = (int(n), int(step))
+        plan = None if plans is None else plans.get(key)
+        if plans is not None and agreed(comm, plan is None):
+            plan = None
+        bad = False
+        if plan is None:
+            plan, bad = plan_rows(comm, rows, n, step)
+            if plans is not None and not bad:
+                plans[key] = plan
+        lo = plan.lo
+        block = None
+        if not bad:
+            block, bad = plan.block(comm, values)
+    if bad:                     # agreed over the ranks (`plan_rows`, `RowPlan.block`)
         raise ValueError("{}:{}: rows missing, or two copies of a row that differ".format(
             path, name))
     return n, shape, values.dtype, lo, block, step
@@ -947,23 +1122,21 @@ def put(d, lo, stored, step):
 
 
 def _runs(comm, rows, n):
-    """Each rank's first row when every rank's `rows` are one contiguous run (`first +
-    arange(k)`) and the runs, in rank order, are 0..n-1 exactly; else None, on every rank."""
+    """This rank's first row when every rank's `rows` are one contiguous run (`first +
+    arange(k)`) and the runs, in rank order, are 0..n-1 exactly; else None, on every rank.
+    One Exscan of the run lengths (where each run must start) and one Allreduce (whether
+    any rank's does not, and the total)."""
+    from mpi4py import MPI
     rows = np.asarray(rows)
     k = len(rows)
     run = k == 0 or bool(rows[0] >= 0 and rows[-1] - rows[0] == k - 1
                          and (np.diff(rows) == 1).all())
-    seen = comm.allgather((run, int(rows[0]) if k else 0, k))
-    if not all(r for r, _, _ in seen):
-        return None
-    at = 0
-    for _, first, k in seen:
-        if k and first != at:
-            return None
-        at += k
-    if at != n:
-        return None
-    return np.cumsum([0] + [k for _, _, k in seen[:-1]])
+    before = np.zeros(1, dtype=np.int64)
+    comm.Exscan(np.array([k], dtype=np.int64), before, op=MPI.SUM)
+    at = 0 if comm.Get_rank() == 0 else int(before[0])
+    ok = run and (k == 0 or int(rows[0]) == at)
+    bad, total = _int_reduce(comm, [int(not ok), k], "sum")
+    return at if bad == 0 and total == n else None
 
 
 def _place(rows, values, lo, hi):

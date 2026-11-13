@@ -2,7 +2,9 @@
 through MPI-IO or, with h5py's serial build, through rank zero with messages capped small,
 so a rank's block goes to rank zero in several batches; and
 rows already one run a rank in rank order (the path that sends no index), whose stored
-chunks are the scattered path's to the byte.
+chunks are the scattered path's to the byte; and `write_rows` with a dict of plans,
+written twice: the plan made once and used again, the datasets those without plans
+write, and copies that differ refused on every rank through a plan too.
 
     mpirun -n 3 python3 tests/compress_worker.py OUT_DIR
 """
@@ -38,6 +40,38 @@ def main(out):
     hdf5_rows.write_ordered(path, "runs", runs, a[runs], len(a), comm)
     assert hdf5_rows._runs(comm, runs, len(a)) is not None
     assert hdf5_rows._runs(comm, runs[::-1].copy(), len(a)) is None   # some rank holds two
+    # the same rows written again through a plan: scattered once each, scattered with
+    # repeats, and runs
+    made = []
+    plan_rows = hdf5_rows.plan_rows
+
+    def counted(*args):
+        made.append(1)
+        return plan_rows(*args)
+
+    hdf5_rows.plan_rows = counted
+    cases = {"once": (np.arange(len(whole["f"]))[comm.rank::comm.size], whole["f"]),
+             "repeats": (rows, whole["b"]), "run": (runs, whole["i"])}
+    with hdf5_rows.opened(path, "a", comm) as h5:
+        for name, (r, a) in cases.items():
+            plans = {}
+            for k in range(2):
+                hdf5_rows.write_rows(h5, "plan_{}_{}".format(name, k), r, a[r], len(a), comm,
+                                     plans=plans)
+            assert len(plans) == 1, (name, plans)
+        assert len(made) == len(cases), made
+        r, a = cases["repeats"]
+        plans = {}
+        hdf5_rows.write_rows(h5, "plan_bad", r, a[r], len(a), comm, plans=plans)
+        v = a[r].copy()
+        if comm.rank == 1:
+            v[-1] = not v[-1]
+        try:
+            hdf5_rows.write_rows(h5, "plan_bad_1", r, v, len(a), comm, plans=plans)
+            raise AssertionError("copies that differ were written")
+        except ValueError as e:
+            assert "differ" in str(e), e
+    hdf5_rows.plan_rows = plan_rows
     if comm.rank == 0:
         print("mpio" if hdf5_rows.mpio(comm) else "gather")
         with h5py.File(path, "r") as h:
@@ -48,6 +82,10 @@ def main(out):
             assert np.array_equal(d[()], whole["i"])
             for k in range(0, d.shape[0], d.chunks[0]):
                 assert d.id.read_direct_chunk((k, 0)) == e.id.read_direct_chunk((k, 0)), k
+            for name, (r, a) in cases.items():
+                for k in range(2):
+                    assert np.array_equal(h["plan_{}_{}".format(name, k)][()], a), name
+            assert "plan_bad_1" not in h
         print("ok")
 
 

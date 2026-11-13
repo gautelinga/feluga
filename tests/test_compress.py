@@ -171,35 +171,52 @@ def test_rewrite_under_mpi(tmp_path, h5py_build, vlen):
     assert proc.stdout.strip().splitlines() == [h5py_build, "0", "ok"], proc.stdout + proc.stderr
 
 
-class _Ranks:
-    """What `allgather` returns on every rank, for `_runs` without MPI."""
+class _World:
+    """Rank `rank` of ranks holding `rows` each, for `_runs` without MPI: its Exscan and
+    Allreduce (sums), computed from what every rank's `_runs` contributes."""
 
-    def __init__(self, seen):
-        self.seen = seen
+    def __init__(self, rows, rank, n, capture=False):
+        self.rows, self.rank, self.n, self.capture = rows, rank, n, capture
+        self.sent = None
 
-    def allgather(self, mine):
-        return self.seen
+    def Get_rank(self):
+        return self.rank
+
+    def Exscan(self, send, recv, op):
+        recv[...] = sum(len(r) for r in self.rows[:self.rank])
+
+    def Allreduce(self, send, recv, op):
+        from femtools.hdf5_rows import _runs
+        if self.capture:
+            self.sent = send.copy()
+            recv[...] = send
+            return
+        total = send.copy()
+        for q, rows in enumerate(self.rows):
+            if q != self.rank:
+                other = _World(self.rows, q, self.n, capture=True)
+                _runs(other, rows, self.n)
+                total += other.sent
+        recv[...] = total
 
 
 def test_runs_are_recognised_only_when_they_tile_the_rows():
     """`_runs`: every rank one contiguous run, in rank order, 0..n-1 exactly (a rank may
-    hold none) -- anything else is the general path."""
+    hold none) -- anything else is the general path, on every rank."""
     from femtools.hdf5_rows import _runs
-    rows = np.arange(5, 9)
-    assert _runs(_Ranks([(True, 0, 5), (True, 5, 4), (True, 0, 0), (True, 9, 3)]), rows,
-                 12).tolist() == [0, 5, 9, 9]
-    assert _runs(_Ranks([(True, 0, 5), (True, 5, 4)]), rows, 10) is None    # short of n
-    assert _runs(_Ranks([(True, 5, 4), (True, 0, 5)]), rows, 9) is None     # out of order
-    assert _runs(_Ranks([(True, 0, 5), (True, 6, 4)]), rows, 10) is None    # a gap
-    assert _runs(_Ranks([(True, 0, 5), (False, 5, 4)]), rows, 9) is None    # not a run
-    seen = []
-    for r in (np.arange(3), np.array([0, 2, 1]), np.array([4, 5, 7]), np.zeros(0, int)):
-        class Me:
-            def allgather(self, mine):
-                seen.append(mine[0])
-                return [mine]
-        _runs(Me(), r, 99)
-    assert seen == [True, False, False, True]
+
+    def runs(rows, n):
+        rows = [np.asarray(r, dtype=np.int64) for r in rows]
+        return [_runs(_World(rows, q, n), rows[q], n) for q in range(len(rows))]
+
+    a = np.arange
+    assert runs([a(0, 5), a(5, 9), a(0), a(9, 12)], 12) == [0, 5, 9, 9]
+    assert runs([a(0, 5), a(5, 9)], 10) == [None, None]                  # short of n
+    assert runs([a(5, 9), a(0, 5)], 9) == [None, None]                   # out of order
+    assert runs([a(0, 5), a(6, 10)], 10) == [None, None]                 # a gap
+    assert runs([a(0, 5), [5, 7, 6, 8]], 9) == [None, None]              # not a run
+    assert runs([a(0, 3), [3, 5, 4]], 6) == [None, None]
+    assert runs([a(0, 3), a(3, 6)], 6) == [0, 3]
 
 
 def test_place_is_what_it_was():

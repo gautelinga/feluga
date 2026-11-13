@@ -187,7 +187,11 @@ def refine_congruent(mesh, cell_markers, box, axes, redistribute=False, max_cell
     with its output checked before it is trusted (unless `deferred`, when the caller
     runs `check_congruent` itself). Returns `(new_mesh, npair, parent_cell)`. `exempt`:
     a callable `(new_mesh, parent_cell) ->` the nodes allowed no partner. Without
-    periodic axes, plain `dolfinx.mesh.refine` (which can neither count nor freeze)."""
+    periodic axes, plain `dolfinx.mesh.refine` (which can neither count nor freeze).
+
+    Without `redistribute`, children stay on their parents' ranks: balanced after a
+    uniform refinement, but a local one loads the ranks that hold the marked cells (up
+    to 2^tdim times their cells a level); redistribute unless the parent map is needed."""
     from femtools import periodic_core
 
     def refine_plain(mesh, cell_markers):

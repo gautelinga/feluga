@@ -164,13 +164,17 @@ def _preallocation(a, rows, cols):
 def _inserter(comm):
     """The C++ extension that adds element matrices straight into a matrix's AIJ arrays
     (cpp/folded_assembly.cpp), or None if it cannot be built here: then rank 0 warns
-    once and matrices are assembled through MatSetValuesLocal. Collective."""
+    once and matrices are assembled through MatSetValuesLocal, unless the environment
+    sets FEMTOOLS_REQUIRE_EXTENSIONS, when every rank raises. Collective."""
+    import os
     if _INSERTER:
         return _INSERTER[0]
     from femtools.dolfinx.compiled import module
     try:
         _INSERTER.append(module(comm, "folded_assembly", "femtools.dolfinx.assembly"))
     except RuntimeError as e:
+        if os.environ.get("FEMTOOLS_REQUIRE_EXTENSIONS"):
+            raise
         if comm.rank == 0:
             import sys
             print("femtools: assembling matrices through PETSc's MatSetValuesLocal, more "

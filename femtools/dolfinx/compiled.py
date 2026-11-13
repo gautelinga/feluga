@@ -7,6 +7,11 @@ nanobind, into femtools' cache folder (FEMTOOLS_JIT_DIR, else ~/.cache/femtools)
 a name that hashes its sources and the DOLFINx and Python versions: rank 0 builds into a
 fresh folder renamed into place when complete while the others wait, and a failed build
 or load raises on every rank (femtools.jit). Concurrent jobs share the cache.
+
+A build takes tens of seconds, which a large job spends waiting on rank 0, and compute
+nodes may have no CMake; build them all beforehand, with the job's FEMTOOLS_JIT_DIR:
+
+    python3 -m femtools.dolfinx.compiled
 """
 import hashlib
 import importlib.util
@@ -18,6 +23,7 @@ HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp")
 # What each extension's build reads besides CMakeLists.txt and its own source
 _HEADERS = {"plaza_periodic": [os.path.join(HERE, "..", "..", "cpp", "plaza_periodic_rules.h")]}
 _LOADED = {}
+EXTENSIONS = ("folded_assembly", "plaza_periodic")
 
 
 def module(comm, name, what):
@@ -78,3 +84,14 @@ def module(comm, name, what):
     _LOADED[name] = on_every_rank(comm, load, "{}: loading {}".format(what, so),
                                   wait_for=so)
     return _LOADED[name]
+
+
+def build_all():
+    """Build (or find in the cache) every extension, in this process alone."""
+    return {name: module(None, name, "femtools.dolfinx.compiled").__file__
+            for name in EXTENSIONS}
+
+
+if __name__ == "__main__":
+    for name, path in build_all().items():
+        print("{}: {}".format(name, path))

@@ -78,6 +78,7 @@ import numpy as np
 
 from femtools import compress
 from femtools.fast_interpolation import interpolate as fast_interpolate
+from femtools.lru import LRU
 from femtools.ufc import UFC_EDGES
 
 # XDMF's Tetrahedron_10: four corners, then the midsides of these edges in order.
@@ -1033,12 +1034,12 @@ class XDMFFile2(object):
         field with no error.
         """
         import dolfin as df
-        grids = _scan(self.path)
+        comm = self._mpi_comm()
+        grids = _scan(self.path, comm)
         if any(g['topology'] in _NODAL_DEGREE and
                (_NODAL_DEGREE[g['topology']] == 2
                 or g['centers'].get(function_name) == 'Node') for g in grids):
             return self._read_nodal(u, function_name, counter, grids)
-        comm = self.comm if self.comm is not None else df.MPI.comm_world
         with df.XDMFFile(comm, self.path) as f:
             f.read_checkpoint(u, function_name, counter)
 
@@ -1081,7 +1082,7 @@ class XDMFFile2(object):
         parse, is read here instead.
         """
         import dolfin as df
-        grids = _scan(self.path)
+        grids = _scan(self.path, self._mpi_comm())
         quadratic = any(g['topology'] in ('Tetrahedron_10', 'Triangle_6', 'Edge_3')
                         for g in grids)
         if not quadratic:
@@ -1909,14 +1910,62 @@ def _check_midsides(coords, conn, cellname='tetrahedron', sample=200):
 # reading an XDMF back, with no dolfin
 # ---------------------------------------------------------------------------
 
-def _scan(path):
+#: parsed XML files (`_scan`): real path -> ((inode, size, mtime), grids), the few last
+_SCANNED = LRU(4)
+
+
+def _scan(path, comm=None):
     """Every uniform grid of an XDMF file, in order, as dicts: 'topology' its type,
     'topology_item' and 'geometry_item' its arrays as (format, reference, shape),
     'attributes' each attribute's, 'centers' its Center, and 'time' (None if it has
     none). A grid that takes its mesh by xi:include, as the steps of dolfin's time series
     do, has the mesh of the grid before it; times listed once for a collection (older
     dolfin) go to its grids in order. The one parser of the XML here (`grids` is its
-    view as HDF5 paths)."""
+    view as HDF5 paths).
+
+    With a comm of more than one rank, collective: rank zero parses the file and the
+    others receive the grids, or the error it raised. A file parsed before and unchanged
+    since (the same inode, size and modification time) is not parsed again. The dicts
+    are shared with later calls: read them, do not change them."""
+    if comm is not None and comm.Get_size() > 1:
+        out = None
+        if comm.Get_rank() == 0:
+            try:
+                out = _scanned(path)
+            except Exception as e:      # noqa: BLE001 -- raised on every rank below
+                out = _sendable(e)
+        out = comm.bcast(out, root=0)
+        if isinstance(out, BaseException):
+            raise out
+        return out
+    return _scanned(path)
+
+
+def _sendable(e):
+    """The exception `e`, or one of its message when it does not pickle (to send)."""
+    import pickle
+    try:
+        pickle.loads(pickle.dumps(e))
+        return e
+    except Exception:                   # noqa: BLE001 -- any failure to pickle
+        return RuntimeError('{}: {}'.format(type(e).__name__, e))
+
+
+def _scanned(path):
+    """`_scan` by this process, from `_SCANNED` when the file is unchanged."""
+    st = os.stat(path)
+    stamp = (st.st_ino, st.st_size, st.st_mtime_ns)
+    real = os.path.realpath(path)
+    hit = _SCANNED.get(real)
+    if hit is not None and hit[0] == stamp:
+        return list(hit[1])
+    out = _parse(path)
+    _SCANNED[real] = (stamp, out)
+    return list(out)
+
+
+def _parse(path):
+    """`_scan`'s grids, from the XML."""
     root = ET.parse(path).getroot()
     parent = {c: p for p in root.iter() for c in p}
     out = []
@@ -1950,11 +1999,12 @@ def _scan(path):
     return out
 
 
-def grids(path):
+def grids(path, comm=None):
     """Every uniform grid of an XDMF file whose arrays are in HDF5, in order, as dicts:
     'time' (None if it has none), 'geometry' and 'topology' as (HDF5 path, dataset),
-    'attributes' each attribute's name to the same, 'centers' its Center (`_scan`).
-    Raises ValueError for data held in the XML."""
+    'attributes' each attribute's name to the same, 'centers' its Center (`_scan`; with
+    a comm, collective, the file parsed by rank zero alone). Raises ValueError for data
+    held in the XML."""
     base = os.path.dirname(os.path.abspath(path))
 
     def h5(item, what):
@@ -1968,7 +2018,7 @@ def grids(path):
                  topology=h5(g['topology_item'], 'topology'),
                  attributes={n: h5(i, n) for n, i in g['attributes'].items()},
                  centers=g['centers'])
-            for g in _scan(path)]
+            for g in _scan(path, comm)]
 
 
 def continued(series, time):

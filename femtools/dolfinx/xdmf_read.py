@@ -8,7 +8,8 @@ The file's nodes are matched to the dofs of a plain Lagrange space of the file's
 by position, and that field is interpolated onto u's space, any degree and periodicity
 (a periodic field, written on both sides of the period, is the same there). Each rank
 reads one block of the file's nodes; nodes and dofs meet by position
-(`femtools.xdmf.read_nodes_at`): nothing is read whole. A scalar or vector u (not a mixed
+(`femtools.xdmf.read_nodes_at`): nothing is read whole, and rank zero alone parses the
+XML. A scalar or vector u (not a mixed
 one: read its components), with as many components as the file's field. Collective.
 """
 import numpy as np
@@ -36,7 +37,9 @@ def read_nodal(path, name, counter, u):
     from dolfinx import fem
     from femtools.xdmf import _NODAL_DEGREE, _scan, read_nodes_at
 
-    picked = [g for g in _scan(path) if name in g["attributes"]]
+    comm = u.function_space.mesh.comm
+    comm = comm if comm.size > 1 else None
+    picked = [g for g in _scan(path, comm) if name in g["attributes"]]
     if not picked:
         raise ValueError("no field named {!r} in {}".format(name, path))
     if not -len(picked) <= counter < len(picked):
@@ -48,7 +51,6 @@ def read_nodal(path, name, counter, u):
     if V.element.num_sub_elements > 0 and V.dofmap.index_map_bs == 1:
         raise NotImplementedError("read_nodal: a mixed space; read its components")
     mesh = V.mesh
-    comm = mesh.comm if mesh.comm.size > 1 else None
     gdim = mesh.geometry.dim
     bs = V.dofmap.index_map_bs
     shape = grid["attributes"][name][2]

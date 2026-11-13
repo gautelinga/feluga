@@ -168,3 +168,60 @@ def test_continued_series_merged(tmp_path):
     merge_series(files)
     times = [float(t.get("Value")) for t in ET.parse(files[0]).getroot().iter("Time")]
     assert times == [0., 0.1, 0.2, 0.3, 0.4, 0.5] and os.listdir(tmp_path) == ["a.xdmf"]
+
+
+def test_an_unchanged_file_is_parsed_once(tmp_path, monkeypatch):
+    """`grids` parses a file again only once it changed (its size or modification time,
+    or another file renamed over it)"""
+    from femtools import xdmf
+    path = tmp_path / "u.xdmf"
+    path.write_text(SERIES)
+    parsed = []
+    parse = xdmf._parse
+    monkeypatch.setattr(xdmf, "_parse", lambda p: parsed.append(p) or parse(p))
+    first = grids(str(path))
+    assert grids(str(path)) == first and len(parsed) == 1
+    path.write_text(SERIES.replace("5.000000000000000e-01", "7.500000000000000e-01"))
+    os.utime(path, ns=(1, 1))
+    assert [g["time"] for g in grids(str(path))] == [0.0, 0.75] and len(parsed) == 2
+    other = tmp_path / "v.xdmf"
+    other.write_text(SERIES)
+    os.utime(other, ns=(1, 1))
+    os.replace(other, path)
+    assert [g["time"] for g in grids(str(path))] == [0.0, 0.5] and len(parsed) == 3
+
+
+GRIDS_ON_RANKS = r"""
+import sys
+from mpi4py import MPI
+from femtools import xdmf
+comm = MPI.COMM_WORLD
+parsed = []
+parse = xdmf._parse
+xdmf._parse = lambda p: parsed.append(p) or parse(p)
+g = xdmf.grids(sys.argv[1], comm)
+try:
+    xdmf.grids(sys.argv[1] + ".missing", comm)
+    missing = "read"
+except FileNotFoundError:
+    missing = "FileNotFoundError"
+counts = comm.gather((len(parsed), [s["time"] for s in g], missing), root=0)
+if comm.rank == 0:
+    print(counts)
+"""
+
+
+@pytest.mark.mpi
+def test_grids_on_ranks_parsed_by_rank_zero(tmp_path):
+    """with a comm, rank zero alone parses the XML and every rank gets the grids, or the
+    error it met"""
+    import sys
+    from tests import support
+    path = tmp_path / "u.xdmf"
+    path.write_text(SERIES)
+    proc = support.run([sys.executable, "-c", GRIDS_ON_RANKS, str(path)], 3,
+                       env={"PYTHONPATH": os.path.dirname(os.path.dirname(
+                           os.path.abspath(__file__)))})
+    assert proc.stdout.strip() == str([(1, [0.0, 0.5], "FileNotFoundError")]
+                                      + [(0, [0.0, 0.5], "FileNotFoundError")] * 2), \
+        proc.stdout

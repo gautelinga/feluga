@@ -1228,6 +1228,40 @@ def test_released_steps_changed_on_disk_are_refused():
     f._doc = None
 
 
+CHANGED_SCRIPT = """
+import sys
+import dolfin as df
+from femtools.xdmf import XDMFFile2
+mesh = df.UnitCubeMesh(2, 2, 2)
+u = df.interpolate(df.Expression("x[0]", degree=2), df.FunctionSpace(mesh, "CG", 2))
+path = sys.argv[1]
+f = XDMFFile2(df.MPI.comm_world, path)
+f.parameters['rewrite_function_mesh'] = False
+for k in range(3):
+    f.write(u, float(k))
+df.MPI.barrier(df.MPI.comm_world)
+if df.MPI.rank(df.MPI.comm_world) == 0:
+    text = open(path).read()
+    at = text.index('Value="')
+    with open(path, 'w') as handle:
+        handle.write(text[:at] + text[at:].replace('0.000', '7.000', 1) + ' ')
+df.MPI.barrier(df.MPI.comm_world)
+try:
+    f.write(mesh)
+except RuntimeError as e:
+    print("RAISED", df.MPI.rank(df.MPI.comm_world), 'changed on disk' in str(e), flush=True)
+"""
+
+
+@pytest.mark.mpi
+def test_released_steps_changed_on_disk_raise_on_every_rank(tmp_path):
+    """the refusal is raised on every rank, not on rank 0 alone while the others wait"""
+    proc = support.run([sys.executable, '-c', CHANGED_SCRIPT, str(tmp_path / 'c.xdmf')], 2,
+                       timeout=300, cwd=os.path.dirname(os.path.dirname(
+                           os.path.abspath(__file__))))
+    assert proc.stdout.count('True') == 2, proc.stdout[-2000:]
+
+
 def test_read_delegates():
     """a file with no quadratic grid is read by dolfin itself"""
     mesh = unit_mesh(2)

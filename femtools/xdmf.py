@@ -460,10 +460,19 @@ class XdmfDocument(object):
         file on disk is rewritten in place from the first of them on, in one write: a
         save costs what changed, not the whole series. Otherwise it is written beside
         and renamed over, so a job killed while saving leaves the last complete XML; the
-        released steps' text is then taken from the file it replaces."""
+        released steps' text is then taken from the file it replaces. An error writing
+        it is raised on every rank (collective)."""
         changed, self._changed = self._changed, set()
+        error = None
         if self.rank == 0:
-            self._write(changed)
+            try:
+                self._write(changed)
+            except Exception as e:      # every rank must hear of it, or they wait
+                error = "{}: {}".format(type(e).__name__, e)
+        if self.comm is not None and self.comm.size > 1:
+            error = self.comm.bcast(error, root=0)
+        if error is not None:
+            raise RuntimeError("{}: saving the XML failed: {}".format(self.path, error))
         self._release()
 
     def _write(self, changed):
@@ -1028,7 +1037,7 @@ class XDMFFile2(object):
         gvert = np.asarray(mesh.topology().global_indices(0))
         triples = None
         try:
-            triples = _cpp().mvc_values(mvc)
+            triples = _cpp(mesh.mpi_comm()).mvc_values(mvc)
         except TypeError:       # a value type the helper has no overload for
             pass                # (only size_t has one; the loop below takes the rest)
         if triples is not None:
@@ -1079,7 +1088,7 @@ class XDMFFile2(object):
 
     def _write_points(self, points, values, encoding):
         try:
-            coords = np.asarray(_cpp().points_array(points))
+            coords = np.asarray(_cpp(self.comm).points_array(points))
         except TypeError:           # not dolfin Points; the caster refused them
             coords = np.array([p.array() if hasattr(p, 'array') else list(p)
                                for p in points], dtype=float)
@@ -1225,7 +1234,7 @@ class XDMFFile2(object):
         used, conn = np.unique(corners, return_inverse=True)
         conn = conn.reshape(corners.shape)
         coords = coords[used]
-        _cpp().build_mesh(mesh, cellname, CELL_DIM[cellname], coords,
+        _cpp(mesh.mpi_comm()).build_mesh(mesh, cellname, CELL_DIM[cellname], coords,
                           conn.astype(np.uintp))
         return mesh
 
@@ -1406,8 +1415,10 @@ PYBIND11_MODULE(SIGNATURE, m)
 _CPP_MODULE = False             # False: not tried yet; the module afterwards
 
 
-def _cpp():
-    """The JIT-compiled C++ helpers. Raises if they will not build.
+def _cpp(comm=None):
+    """The JIT-compiled C++ helpers, built on rank 0 of `comm` (the caller's mesh's;
+    None: dolfin's world) at the first call, which is collective on it. Raises if they
+    will not build.
 
     `dolfin.compile_cpp_code` needs a compiler and the dolfin headers
     (`libdolfin-dev`); the first call compiles and dijitso caches the result for
@@ -1422,7 +1433,7 @@ def _cpp():
     global _CPP_MODULE
     if _CPP_MODULE is False:
         from femtools.jit import dolfin_module
-        _CPP_MODULE = dolfin_module(_CPP_CODE, None, "femtools.xdmf")
+        _CPP_MODULE = dolfin_module(_CPP_CODE, comm, "femtools.xdmf")
     return _CPP_MODULE
 
 
@@ -1443,7 +1454,7 @@ def _connectivity(mesh, dim, of_dim=0):
     conn = mesh.topology()(dim, of_dim)
     n_entities = mesh.num_entities(dim)
     per = conn.size(0) if n_entities else 0
-    flat = _cpp().connectivity(mesh, dim, of_dim).astype(np.int64)
+    flat = _cpp(mesh.mpi_comm()).connectivity(mesh, dim, of_dim).astype(np.int64)
     return flat.reshape(n_entities, per)
 
 
@@ -1636,7 +1647,8 @@ def _check_functions(functions):
 def _entity_dofs(dofmap, mesh, dim):
     """`dofmap.entity_dofs(mesh, dim)` as an int64 array, empty or not, through the C++
     helper: dolfin's hands back a Python list, about 36 B an entry where this is 8."""
-    return np.asarray(_cpp().entity_dofs(dofmap, mesh, int(dim)), dtype=np.int64)
+    return np.asarray(_cpp(mesh.mpi_comm()).entity_dofs(dofmap, mesh, int(dim)),
+                      dtype=np.int64)
 
 
 def owned_entities(mesh, dim):

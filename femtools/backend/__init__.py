@@ -43,7 +43,7 @@ NAMES = (
     # neutral helpers
     "set_default_mesh", "mesh_id", "space_id", "function_space", "space_mesh", "mesh_comm",
     "geometric_dimension", "element_degree", "is_lagrange", "owned_dofs", "fixed_dofs",
-    "sync", "collect_garbage",
+    "sync", "collect_garbage", "constant_on",
     # files: dolfin's HDF5 layout and XDMF time series, the same on both backends
     "XDMFFile", "TimeSeriesFile", "write_dof_tables", "write_function_h5",
     "write_functions_h5", "read_function_h5", "read_vector_function_h5", "read_series_step",

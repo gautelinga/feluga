@@ -185,7 +185,7 @@ alone = comm.allreduce(int(alone), op=MPI.MIN)
 if comm.rank == 0:
     print("HELD", n, "EXACT", bool(np.allclose(a, pts[:, 0] + 2 * pts[:, 1])))
     back = read_dump(stem)
-    print("DUMPED", len(glob.glob(stem + "*")) <= comm.size, sorted(back) == list(range(81)),
+    print("DUMPED", len(glob.glob(stem + "_rank*")) <= comm.size, sorted(back) == list(range(81)),
           all(np.allclose(back[i][0][:2], pts[i]) and np.allclose(back[i][1], a[i])
               for i in back))
     print("OWN COMM", bool(alone))
@@ -220,7 +220,11 @@ def test_dump_is_a_file_a_rank_and_reads_back(tmp_path):
     q(w)
     q.dump(str(tmp_path / "all"))
     q.dump(1, str(tmp_path / "one"))
-    assert sorted(os.listdir(tmp_path)) == ["all_rank0.probe", "one_rank0.probe"]
+    assert sorted(os.listdir(tmp_path)) == ["all.probes", "all_rank0.probe", "one.probes",
+                                             "one_rank0.probe"]
+    # a file an earlier dump on more ranks left (here: probe 0, other values) is not read
+    stale = (tmp_path / "all_rank0.probe").read_text().replace("Probe id = 1", "Probe id = 0")
+    (tmp_path / "all_rank5.probe").write_text(stale.replace("0.3", "9.9"))
     every, second = read_dump(str(tmp_path / "all")), read_dump(str(tmp_path / "one"))
     assert sorted(every) == sorted(second) == [0, 1, 2]
     for i, x in enumerate(pts):

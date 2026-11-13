@@ -827,6 +827,12 @@ def collect_garbage():
     cleanup()
 
 
+def constant_on(value, mesh):
+    """A Constant for forms on `mesh` (the default mesh would serve forms on another
+    one ill: DOLFINx's Constants belong to a mesh)."""
+    return Constant(value, mesh)
+
+
 class Constant(fem.Constant):
     """dolfin's Constant(value): on the last mesh a space was made on, unless given."""
 
@@ -852,13 +858,10 @@ class Constant(fem.Constant):
         self.value = value.value if isinstance(value, fem.Constant) else value
 
 
-_EXPRESSION_SPACES = weakref.WeakKeyDictionary()   # mesh -> {element: space}
-
-
 def _expression_space(mesh, element):
     """The space Expressions in `element` on `mesh` are interpolated into, one for all
-    of them (with its unique dofs)."""
-    spaces = _EXPRESSION_SPACES.setdefault(mesh, {})
+    of them (with its unique dofs). Kept on the mesh, so it goes with it."""
+    spaces = mesh.__dict__.setdefault("_expression_spaces", {})
     if element not in spaces:
         spaces[element] = _space(fem.functionspace(mesh, element), None)
     return spaces[element]

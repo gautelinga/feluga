@@ -53,6 +53,11 @@ def set_default_mesh(mesh):
     """Nothing: dolfin's Constants and Expressions belong to no mesh."""
 
 
+def constant_on(value, mesh):
+    """A Constant for forms on `mesh`: dolfin's belong to no mesh."""
+    return Constant(value)
+
+
 def mesh_id(mesh):
     """A key for the mesh, the same while it exists."""
     return mesh.id()

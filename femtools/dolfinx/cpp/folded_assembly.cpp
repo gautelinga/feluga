@@ -306,14 +306,15 @@ bool assemble_local(const Form& a, std::uintptr_t handle)
       return false;
     }
   }
-  auto add = [A](std::span<const std::int32_t> rows, std::span<const std::int32_t> cols,
-                 std::span<const double> vals) -> int
+  std::vector<PetscInt> r, c;   // the local indices as PetscInt, 32- or 64-bit
+  auto add = [A, &r, &c](std::span<const std::int32_t> rows,
+                         std::span<const std::int32_t> cols,
+                         std::span<const double> vals) -> int
   {
-    static_assert(sizeof(PetscInt) == sizeof(std::int32_t),
-                  "local indices passed as PetscInt");
-    check(MatSetValuesLocal(A, rows.size(), reinterpret_cast<const PetscInt*>(rows.data()),
-                            cols.size(), reinterpret_cast<const PetscInt*>(cols.data()),
-                            vals.data(), ADD_VALUES),
+    r.assign(rows.begin(), rows.end());
+    c.assign(cols.begin(), cols.end());
+    check(MatSetValuesLocal(A, r.size(), r.data(), c.size(), c.data(), vals.data(),
+                            ADD_VALUES),
           "MatSetValuesLocal");
     return 0;
   };

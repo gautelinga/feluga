@@ -16,8 +16,8 @@ A Function's values, and gradients, at many points, evaluated many times.
 A point is kept by the lowest rank that finds it in its cells, so a point on a partition
 boundary is evaluated once; a point outside the mesh is found by no rank and reads 0 in
 `array`, which gathers over the mesh's communicator. `GradProbes` takes gradients too
-(`grad`, `array_grad`). The C++ classes are built with cppimport on first import
-(femtools/cpp/probe11.cpp).
+(`grad`, `array_grad`). The C++ classes (femtools/cpp/probe11.cpp) are built with
+cppimport at their first use, collectively; read_dump needs none.
 """
 import glob
 import os
@@ -25,12 +25,20 @@ import re
 
 import numpy as np
 
-from femtools.jit import cppimport_module
 
-# built on rank 0 and loaded on every rank (import is collective under MPI)
-probe11 = cppimport_module(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp", "probe11.cpp"),
-    "femtools.cpp.probe11")
+# The compiled classes, built on first use of Probe, Probes, GradProbe or GradProbes
+# (on rank 0, loaded on every rank: that first use is collective under MPI); importing
+# the module, or read_dump, builds nothing.
+_COMPILED = {}
+_NAMES = ("probe11", "Probe", "Probes", "GradProbe", "GradProbes")
+
+
+def __getattr__(name):
+    if name in _NAMES:
+        if not _COMPILED:
+            _build()
+        return _COMPILED[name]
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
 
 
 def _on_root(comm, ids, local, total, root):
@@ -57,14 +65,21 @@ def read_dump(filename):
     probe's id to `(coordinates, values)`, its three coordinates and its values a row a
     snapshot (one column for a dumped component, a column a component otherwise). Reads
     the files a rank (`filename_rank<r>.probe`) and the files a probe of fenicstools'
-    layout (`filename_<id>.probe`); the two hold the same text a probe."""
+    layout (`filename_<id>.probe`); the two hold the same text a probe. With the list
+    of a dump's files (`filename.probes`), those files alone."""
     out = {}
-    names = sorted(glob.glob(glob.escape(filename) + "_*.probe"))
-    pattern = re.compile(re.escape(os.path.basename(filename)) + r"_(rank)?\d+\.probe$")
+    listed = filename + ".probes"
+    if os.path.exists(listed):
+        with open(listed) as handle:
+            here = os.path.dirname(filename)
+            names = [os.path.join(here, n.strip()) for n in handle if n.strip()]
+    else:
+        names = sorted(glob.glob(glob.escape(filename) + "_*.probe"))
+        pattern = re.compile(re.escape(os.path.basename(filename)) + r"_(rank)?\d+\.probe$")
+        names = [n for n in names if pattern.match(os.path.basename(n))]
     for name in names:
-        if pattern.match(os.path.basename(name)):
-            with open(name) as handle:
-                out.update(_parse_dump(handle.read().splitlines()))
+        with open(name) as handle:
+            out.update(_parse_dump(handle.read().splitlines()))
     return out
 
 
@@ -95,6 +110,20 @@ class _Collection(object):
 
     def __call__(self, *args):
         return self.eval(*args)
+
+    def dump(self, *args):
+        """`dump(filename)` or `dump(i, filename)`: each rank's probes to
+        filename_rank<r>.probe, and on rank 0 the list of this dump's files to
+        filename.probes, which read_dump reads (so files left by an earlier dump on
+        more ranks are not). Collective."""
+        filename = args[-1]
+        super().dump(*args)
+        mine = ("{}_rank{}.probe".format(os.path.basename(filename), self._comm.Get_rank())
+                if self.local_size() else None)
+        names = self._comm.gather(mine, root=0)
+        if self._comm.Get_rank() == 0:
+            with open(filename + ".probes", "w") as handle:
+                handle.write("".join(n + "\n" for n in names if n))
 
     def __len__(self):
         return self.local_size()
@@ -134,39 +163,48 @@ class _Collection(object):
         return self._array(self.values(), N, filename, component, root, "array")
 
 
-class Probe(probe11.Probe):
+def _build():
+    from femtools.jit import cppimport_module
+    probe11 = cppimport_module(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp", "probe11.cpp"),
+        "femtools.cpp.probe11")
 
-    def __call__(self, *args):
-        return self.eval(*args)
+    class Probe(probe11.Probe):
 
-    def __len__(self):
-        return self.value_size()
+        def __call__(self, *args):
+            return self.eval(*args)
 
-    def __getitem__(self, i):
-        return self.get_probe_at_snapshot(i)
+        def __len__(self):
+            return self.value_size()
 
+        def __getitem__(self, i):
+            return self.get_probe_at_snapshot(i)
 
-class Probes(_Collection, probe11.Probes):
-    pass
+    class Probes(_Collection, probe11.Probes):
+        pass
 
+    class GradProbe(probe11.GradProbe):
 
-class GradProbe(probe11.GradProbe):
+        def __call__(self, *args):
+            return self.eval(*args)
 
-    def __call__(self, *args):
-        return self.eval(*args)
+        def __len__(self):
+            return self.value_size()
 
-    def __len__(self):
-        return self.value_size()
+        def __getitem__(self, i):
+            return self.get_probe_at_snapshot(i)
 
-    def __getitem__(self, i):
-        return self.get_probe_at_snapshot(i)
+    class GradProbes(_Collection, probe11.GradProbes):
 
+        def grad(self, *args):
+            return self.eval_grad(*args)
 
-class GradProbes(_Collection, probe11.GradProbes):
+        def array_grad(self, N=None, filename=None, component=None, root=0):
+            """`array` for the gradients: component j*gdim + k is d(value j)/d(x_k)."""
+            return self._array(self.grad_values(), N, filename, component, root,
+                               "array_grad")
 
-    def grad(self, *args):
-        return self.eval_grad(*args)
-
-    def array_grad(self, N=None, filename=None, component=None, root=0):
-        """`array` for the gradients: component j*gdim + k is d(value j)/d(x_k)."""
-        return self._array(self.grad_values(), N, filename, component, root, "array_grad")
+    for cls in (Probe, Probes, GradProbe, GradProbes):
+        cls.__module__ = __name__
+    _COMPILED.update(probe11=probe11, Probe=Probe, Probes=Probes, GradProbe=GradProbe,
+                     GradProbes=GradProbes)

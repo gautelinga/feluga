@@ -39,6 +39,7 @@ def _check(r):
     assert r["poisson"] < 1e-3
     assert r["interpolate_vs_dolfinx"] < 1e-14
     assert r["expressions_share_space"] and r["sub_made_once"]
+    assert r["expression_mesh_freed"]
 
 
 def test_one_rank(tmp_path):

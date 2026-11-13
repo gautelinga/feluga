@@ -85,6 +85,15 @@ def main(out):
     e1 = L.Expression("x[0]", degree=2, domain=mesh)
     e2 = L.Expression("x[1]*a", a=2.0, degree=2, domain=mesh)
     r["expressions_share_space"] = e1.function_space is e2.function_space
+    # a mesh with an Expression's space is freed with the mesh
+    import gc
+    import weakref
+    other = L.UnitSquareMesh(3, 3)
+    L.Expression("x[0]", degree=1, domain=other)
+    gone = weakref.ref(other)
+    del other
+    gc.collect()
+    r["expression_mesh_freed"] = gone() is None
     r["sub_made_once"] = W.sub(0) is W.sub(0) and W.sub(1) is not W.sub(0)
     if comm.rank == 0:
         with open(out, "w") as f:

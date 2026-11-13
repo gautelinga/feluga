@@ -161,8 +161,18 @@ def mesh_coordinates(mesh):
 
 
 def hmax(mesh):
-    """The largest cell diameter over all ranks."""
-    return mesh.hmax()
+    """The largest cell diameter over all ranks (dolfin's mesh.hmax() is this rank's).
+    Collective."""
+    from mpi4py import MPI
+    return mesh.mpi_comm().allreduce(mesh.hmax() if mesh.num_cells() else 0.0, op=MPI.MAX)
+
+
+def hmin(mesh):
+    """The smallest cell diameter over all ranks (dolfin's mesh.hmin() is this rank's).
+    Collective."""
+    from mpi4py import MPI
+    return mesh.mpi_comm().allreduce(mesh.hmin() if mesh.num_cells() else float("inf"),
+                                     op=MPI.MIN)
 
 
 def read_mesh_file(fname, periodic=None):

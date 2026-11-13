@@ -293,11 +293,19 @@ def mesh_coordinates(mesh):
 
 
 def hmax(mesh):
-    """The largest cell diameter over all ranks (dolfin's mesh.hmax())."""
+    """The largest cell diameter over all ranks. Collective."""
     tdim = mesh.topology.dim
     n = mesh.topology.index_map(tdim).size_local
     h = mesh.h(tdim, np.arange(n, dtype=np.int32))  # a method of Mesh in DOLFINx 0.11
     return MPI.max(mesh.comm, float(h.max()) if n else 0.0)
+
+
+def hmin(mesh):
+    """The smallest cell diameter over all ranks. Collective."""
+    tdim = mesh.topology.dim
+    n = mesh.topology.index_map(tdim).size_local
+    h = mesh.h(tdim, np.arange(n, dtype=np.int32))
+    return MPI.min(mesh.comm, float(h.min()) if n else float("inf"))
 
 
 def write_mesh_h5(path, mesh):

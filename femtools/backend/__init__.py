@@ -28,7 +28,7 @@ NAMES = (
     "conditional", "cos", "exp", "ge", "gt", "le", "lt", "sin", "sqrt",
     # meshes and boxes
     "Mesh", "RectangleMesh", "UnitSquareMesh", "BoxMesh", "Point", "read_mesh_file",
-    "write_mesh_h5", "mesh_coordinates", "hmax", "extent", "Faces", "mark_walls",
+    "write_mesh_h5", "mesh_coordinates", "hmax", "hmin", "extent", "Faces", "mark_walls",
     "SubDomain", "PeriodicBox", "repair_partition", "check_periodic_pairing",
     # spaces, functions, conditions
     "FunctionSpace", "Function", "Constant", "Expression", "DirichletBC", "BoundaryMarkers",

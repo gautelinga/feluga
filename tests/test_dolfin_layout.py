@@ -55,6 +55,26 @@ def test_tables_written_once_and_linked(tmp_path):
         "own file: refused", "numbering: refused"]
 
 
+FUNCTIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "write_functions_worker.py")
+
+
+@pytest.mark.parametrize("backend", ["dolfin", pytest.param("dolfinx",
+                                                            marks=pytest.mark.dolfinx)])
+@pytest.mark.parametrize("ranks", [1, pytest.param(3, marks=pytest.mark.mpi)])
+def test_several_functions_in_one_open(backend, ranks, tmp_path):
+    """`write_functions_h5` on either backend, on one rank and three: the file holds what
+    consecutive `write_function_h5` calls write (groups, datasets, attributes, links),
+    with the tables linked and written, two spaces in two calls, and reads back; tables
+    of another element are refused (tests/write_functions_worker.py)."""
+    if backend == "dolfinx":
+        pytest.importorskip("dolfinx")
+    proc = support.run([sys.executable, FUNCTIONS, backend, str(tmp_path)], ranks,
+                       timeout=600)
+    assert support.lines(proc.stdout) == [
+        "linked: same read", "tables: same read", "two spaces: same",
+        "other element: refused"], proc.stdout
+
+
 @pytest.mark.parametrize("dim", [2, 3])
 def test_a_mesh_from_arrays_is_dolfins_serial_mesh(dim, tmp_path):
     """`write_mesh_arrays`: the datasets, dtypes, values and attributes dolfin's HDF5File

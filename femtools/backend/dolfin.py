@@ -20,6 +20,7 @@ from femtools.box import mark_walls  # noqa: F401
 from femtools.dolfin_layout import read_function as read_function_h5
 from femtools.dolfin_layout import write_dofs as write_dof_tables  # noqa: F401
 from femtools.dolfin_layout import write_function as write_function_h5  # noqa: F401
+from femtools.dolfin_layout import write_functions as write_functions_h5  # noqa: F401
 from femtools.dolfin_layout import write_mesh as write_mesh_h5  # noqa: F401
 from femtools.fast_assembly import assemble as _fast_assemble
 from femtools.fast_assembly import assemble_matrix  # noqa: F401

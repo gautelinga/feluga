@@ -1466,6 +1466,16 @@ def write_function_h5(path, u, name, mode="a", dofs=None):
     write_function(path, u.vector().get_local(), V, unique_dofs(V), name, mode, dofs)
 
 
+def write_functions_h5(path, functions, mode="w", dofs=None):
+    """Several Functions, `(u, name)` each, in one file opened once: what
+    write_function_h5 writes for each in turn, the first in `mode` and the rest appended
+    (femtools.dolfin_layout.write_functions_of)."""
+    from femtools.dolfinx.checkpoint import write_functions
+    write_functions(path, [(u.vector().get_local(), u.function_space,
+                            unique_dofs(u.function_space), name) for u, name in functions],
+                    mode, dofs)
+
+
 def read_function_h5(path, u, name):
     """u from the Function `name` in path, in dolfin's layout (written by dolfin or by
     write_function_h5, on any number of ranks)."""

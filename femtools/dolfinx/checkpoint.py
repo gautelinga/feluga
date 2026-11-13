@@ -4,6 +4,7 @@ writes -- a checkpoint moves between the backends and between numbers of process
 
     write_dofs(path, V, U, "dofs")                     # the dof tables, once
     write_function(path, values, V, U, "u", dofs=("tables.h5", "dofs"))
+    write_functions(path, [(values, V, U, "current"), (old, V, U, "previous")], dofs=...)
     values = read_function(path, "u", V, U)            # this rank's unique dofs
 
 `values` are a space's unique dofs as numbered by its `UniqueDofs` U (this rank's
@@ -28,7 +29,7 @@ and `vector_0`.
 """
 import numpy as np
 
-from femtools.dolfin_layout import SpaceLayout, write_dofs_of, write_values_of
+from femtools.dolfin_layout import SpaceLayout, write_dofs_of, write_functions_of
 from femtools.dolfinx.cells import signature
 from femtools.lru import WeakCache
 
@@ -61,13 +62,26 @@ def write_function(path, values, V, U, name, mode="a", dofs=None):
     """A Function on V, given as this rank's unique values (`values`, numbered by U), as
     dolfin's `HDF5File.write` writes one. With `dofs = (file, group)` the tables
     `write_dofs` wrote are linked instead of written (femtools.dolfin_layout). Collective."""
+    write_functions(path, [(values, V, U, name)], mode, dofs)
+
+
+def write_functions(path, functions, mode="w", dofs=None):
+    """Several Functions, `(values, V, U, name)` each as `write_function` takes one, in one
+    file opened once: what `write_function` writes for each in turn, the first in `mode`
+    and the rest appended (femtools.dolfin_layout.write_functions_of). Collective."""
     from femtools.hdf5_rows import agreed
-    values = np.asarray(values, dtype=np.float64)
-    lo, hi = U.owned_range
-    if agreed(V.mesh.comm, len(values) != hi - lo):
-        raise ValueError("write_function: {} values for {} unique dofs on some rank".format(
-            len(values), hi - lo))
-    write_values_of(path, _layout(V, U), name, values, lo, U.n_global, mode=mode, dofs=dofs)
+    layouts, items = {}, []
+    for values, V, U, name in functions:
+        values = np.asarray(values, dtype=np.float64)
+        lo, hi = U.owned_range
+        if agreed(V.mesh.comm, len(values) != hi - lo):
+            raise ValueError("write_function: {} values for {} unique dofs on some "
+                             "rank".format(len(values), hi - lo))
+        key = (id(V), id(U))
+        if key not in layouts:
+            layouts[key] = _layout(V, U)
+        items.append((layouts[key], name, values, lo, U.n_global))
+    write_functions_of(path, items, mode, dofs)
 
 
 def read_function(path, name, V, U):

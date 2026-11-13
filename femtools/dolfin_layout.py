@@ -5,6 +5,7 @@ compressed (`compress`; dolfin's own writer has no compression).
     write_function(path, u, "u")           # <name>/vector_0, cell_dofs, x_cell_dofs, cells
     write_dofs(path, V, "V")               # <name>/cell_dofs, x_cell_dofs, cells, once
     write_function(path, u, "u", dofs=("tables.h5", "V"))   # vector_0, the tables linked
+    write_functions(path, [(u, "current"), (u1, "previous")], dofs=...)   # one open
     read_function(path, u, "u")            # any number of ranks, either backend's file
     write_mesh_arrays(path, x, cells)      # the mesh from arrays, serially, without dolfin
     write_mesh_rows(path, name, comm, ...) # a mesh's datasets from either backend's arrays
@@ -22,8 +23,9 @@ so this:
   vector's local ranges with `partition` (each rank's first row); the group's `signature`,
   the element's.
 
-Every dataset goes through `hdf5_rows.write_ordered`: no rank holds one whole, and every
-rank writes its own block (MPI-IO). dolfin and mpi4py are imported where they are used.
+Every dataset goes through `hdf5_rows` (`write_ordered`, or `write_rows` into a file opened
+once for all of a call's datasets): no rank holds one whole, and every rank writes its own
+block (MPI-IO). dolfin and mpi4py are imported where they are used.
 
 One writer serves both backends: `write_dofs_of` and `write_values_of` take a space's
 `SpaceLayout` (its communicator, signature, cell count, and on demand its dof tables and
@@ -33,7 +35,8 @@ make one and call them.
 The dof tables are most of a Function's file, and the same for every Function on a space
 until the mesh is partitioned anew; `write_dofs` writes them once, and
 `write_function(..., dofs=...)` links them (an HDF5 external link a reader follows) next
-to each vector -- a checkpoint then costs its vectors alone.
+to each vector -- a checkpoint then costs its vectors alone. `write_functions` writes
+several Functions into one file in one collective open, the linked tables checked once.
 """
 import numpy as np
 
@@ -130,8 +133,9 @@ def _fingerprint(comm, gc, dofs):
     return np.uint64(total[0])
 
 
-def _write_tables(path, name, comm, n_c, gc, dofs, mode):
-    """`x_cell_dofs`, `cell_dofs` and `cells` of the group `name`, as dolfin writes them."""
+def _tables(comm, n_c, gc, dofs):
+    """`x_cell_dofs`, `cell_dofs` and `cells` of a space's group, as dolfin writes them:
+    `(name, rows, values, n)` each, this rank's rows of the n."""
     own, n = dofs.shape if dofs.ndim == 2 else (0, 0)
     local = dofs.reshape(-1)
     lengths = np.full(own, n, dtype=np.uint64)
@@ -145,10 +149,9 @@ def _write_tables(path, name, comm, n_c, gc, dofs, mode):
     if comm.Get_rank() == comm.Get_size() - 1:      # the total, by the last rank
         x_rows = np.r_[x_rows, n_c]
         x_vals = np.r_[x_vals, np.uint64(n_dofs)]
-    write_ordered(path, name + "/x_cell_dofs", x_rows, x_vals, n_c + 1, comm, mode=mode)
-    write_ordered(path, name + "/cell_dofs", dof_first + np.arange(len(local)), local,
-                  n_dofs, comm)
-    write_ordered(path, name + "/cells", x_rows[:own], gc, n_c, comm)
+    return [("x_cell_dofs", x_rows, x_vals, n_c + 1),
+            ("cell_dofs", dof_first + np.arange(len(local)), local, n_dofs),
+            ("cells", x_rows[:own], gc, n_c)]
 
 
 class SpaceLayout:
@@ -180,22 +183,25 @@ def write_dofs_of(path, layout, name="dofs", mode="w"):
     """The dof tables of a space (its SpaceLayout) alone -- `x_cell_dofs`, `cell_dofs` and
     `cells`, as `write_values_of` writes them -- with the element's `signature` and the
     numbering's `fingerprint` on the group. Collective."""
-    from femtools.hdf5_rows import opened
+    from femtools.hdf5_rows import opened, write_rows
+    comm = layout.comm
     gc, dofs = layout.tables()
-    _write_tables(path, name, layout.comm, layout.n_cells, gc, dofs, mode)
+    tables = _tables(comm, layout.n_cells, gc, dofs)
     fingerprint = layout.fingerprint()
-    with opened(path, "a", layout.comm) as h5:
+    with opened(path, mode, comm) as h5:
+        for key, rows, values, n in tables:
+            write_rows(h5, name + "/" + key, rows, values, n, comm)
         if h5 is not None:
             h5[name].attrs["signature"] = np.bytes_(layout.signature)
             h5[name].attrs["fingerprint"] = fingerprint
 
 
-def _check_linked(path, dofs, layout):
-    """Why the tables `dofs = (file, group)` are not the layout's space's on this
-    partition, or None."""
+def _check_linked(path, dofs, layouts):
+    """Why the tables `dofs = (file, group)` are not the space's of each of `layouts` on
+    this partition, or None. Rank zero reads the tables' attributes once."""
     import os
     import h5py
-    comm = layout.comm
+    comm = layouts[0].comm
     target, group = dofs
     where = os.path.join(os.path.dirname(os.path.abspath(path)), target)
     found = None
@@ -207,17 +213,18 @@ def _check_linked(path, dofs, layout):
         except (OSError, KeyError) as e:
             found = str(e)
     found = comm.bcast(found, root=0)
-    fingerprint = layout.fingerprint()
+    fingerprints = [layout.fingerprint() for layout in layouts]
     if os.path.realpath(where) == os.path.realpath(path):
         return ("{}: the dof tables must be in another file than the Function's, which "
                 "mode 'w' would truncate".format(where))
     if isinstance(found, str):
         return "{}:{}: no dof tables ({})".format(where, group, found)
-    if found[0] != np.bytes_(layout.signature):
-        return "{}:{}: the dof tables of another element".format(where, group)
-    if found[1] != fingerprint:
-        return ("{}:{}: the dof tables of another numbering (another number of ranks, or "
-                "partition); write this one's with write_dofs".format(where, group))
+    for layout, fingerprint in zip(layouts, fingerprints):
+        if found[0] != np.bytes_(layout.signature):
+            return "{}:{}: the dof tables of another element".format(where, group)
+        if found[1] != fingerprint:
+            return ("{}:{}: the dof tables of another numbering (another number of ranks, "
+                    "or partition); write this one's with write_dofs".format(where, group))
     return None
 
 
@@ -232,27 +239,40 @@ def write_values_of(path, layout, name, values, lo, n_global, mode="a", dofs=Non
     every reader follow the links, so the group reads as before while only `vector_0` is
     written. The tables are checked to be the space's, numbered as now (refused on every
     rank)."""
+    write_functions_of(path, [(layout, name, values, lo, n_global)], mode, dofs)
+
+
+def write_functions_of(path, functions, mode="a", dofs=None):
+    """Several Functions in one file, opened once (collectively, under MPI-IO): each of
+    `functions` is `(layout, name, values, lo, n_global)`, as `write_values_of` takes
+    one. The file holds what `write_values_of` writes for each in turn, the first in
+    `mode` and the rest appended: the same datasets, attributes and links. With `dofs`,
+    the linked tables are checked once for all of them. Collective."""
     import h5py
-    from femtools.hdf5_rows import agreed, opened
-    comm = layout.comm
-    values = np.asarray(values)
-    _, partition = _offsets(comm, len(values))
-    if dofs is None:
-        gc, tables = layout.tables()
-        _write_tables(path, name, comm, layout.n_cells, gc, tables, mode)
-        mode = "a"
-    else:
-        bad = _check_linked(path, dofs, layout)
+    from femtools.hdf5_rows import agreed, opened, write_rows
+    functions = list(functions)
+    if not functions:
+        raise ValueError("{}: no Functions to write".format(path))
+    comm = functions[0][0].comm
+    if dofs is not None:
+        bad = _check_linked(path, dofs, [f[0] for f in functions])
         if agreed(comm, bad is not None):
             raise ValueError(bad or "another rank refused the dof tables")
-    write_ordered(path, name + "/vector_0", lo + np.arange(len(values), dtype=np.int64),
-                  values, n_global, comm, mode=mode, attrs={"partition": partition})
-    with opened(path, "a", comm) as h5:
-        if h5 is not None:
-            if dofs is not None:
-                for k in ("x_cell_dofs", "cell_dofs", "cells"):
-                    h5[name + "/" + k] = h5py.ExternalLink(dofs[0], dofs[1] + "/" + k)
-            h5[name].attrs["signature"] = np.bytes_(layout.signature)
+    with opened(path, mode, comm) as h5:
+        for layout, name, values, lo, n_global in functions:
+            values = np.asarray(values)
+            _, partition = _offsets(comm, len(values))
+            if dofs is None:
+                gc, tables = layout.tables()
+                for key, rows, vals, n in _tables(comm, layout.n_cells, gc, tables):
+                    write_rows(h5, name + "/" + key, rows, vals, n, comm)
+            write_rows(h5, name + "/vector_0", lo + np.arange(len(values), dtype=np.int64),
+                       values, n_global, comm, attrs={"partition": partition})
+            if h5 is not None:
+                if dofs is not None:
+                    for k in ("x_cell_dofs", "cell_dofs", "cells"):
+                        h5[name + "/" + k] = h5py.ExternalLink(dofs[0], dofs[1] + "/" + k)
+                h5[name].attrs["signature"] = np.bytes_(layout.signature)
 
 
 #: each dolfin space's fingerprint, by the space's id (dolfin never reuses one in a
@@ -287,10 +307,23 @@ def write_function(path, u, name, mode="a", dofs=None):
     """The Function as `HDF5File(path, mode).write(u, name)` writes it, or with `dofs =
     (file, group)` its tables linked to those `write_dofs` wrote (write_values_of).
     Collective."""
-    vec = u.vector()
-    lo, _ = vec.local_range()
-    write_values_of(path, _layout(u.function_space()), name, vec.get_local(), lo,
-                    vec.size(), mode=mode, dofs=dofs)
+    write_functions(path, [(u, name)], mode, dofs)
+
+
+def write_functions(path, functions, mode="w", dofs=None):
+    """Several Functions, `(u, name)` each, in one file opened once: what `write_function`
+    writes for each in turn, the first in `mode` and the rest appended
+    (write_functions_of). Collective."""
+    layouts, items = {}, []
+    for u, name in functions:
+        V = u.function_space()
+        if V.id() not in layouts:
+            layouts[V.id()] = _layout(V)
+        layout = layouts[V.id()]
+        vec = u.vector()
+        lo, _ = vec.local_range()
+        items.append((layout, name, vec.get_local(), lo, vec.size()))
+    write_functions_of(path, items, mode, dofs)
 
 
 def write_mesh_arrays(path, x, cells, name="mesh", mode="w"):

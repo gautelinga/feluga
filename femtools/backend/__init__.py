@@ -46,6 +46,6 @@ NAMES = (
     "sync", "collect_garbage",
     # files: dolfin's HDF5 layout and XDMF time series, the same on both backends
     "XDMFFile", "TimeSeriesFile", "write_dof_tables", "write_function_h5",
-    "read_function_h5", "read_vector_function_h5", "read_series_step",
+    "write_functions_h5", "read_function_h5", "read_vector_function_h5", "read_series_step",
     "read_vector_series_step",
 )

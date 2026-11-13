@@ -47,7 +47,20 @@ def _n_nodes(d, degree):
 
 
 class SpaceTables:
-    """A space's tables (see the module's docstring)."""
+    """A space's tables (see the module's docstring). `x` and `vgid` are made on first
+    use: checkpoints need neither."""
+
+    @property
+    def x(self):
+        if "x" not in self.__dict__:
+            self.__dict__["x"] = self._make_x()
+        return self.__dict__["x"]
+
+    @property
+    def vgid(self):
+        if "vgid" not in self.__dict__:
+            self.__dict__["vgid"] = self._make_vgid()
+        return self.__dict__["vgid"]
 
     def component(self, i=None):
         """(dofs of component i, its degree); i None for a space of one component."""
@@ -68,8 +81,7 @@ def space_tables(space):
         _dolfinx_space(t, V, U)
     else:
         _dolfin_space(t, V)
-    d = t.x.shape[2]
-    if t.x.shape[1] != d + 1:
+    if t.vertices_per_cell != t.gdim + 1:
         raise NotImplementedError("tables: triangles and tetrahedra in their own dimension")
     return t
 
@@ -92,9 +104,11 @@ def _dolfin_space(t, V):
                  np.dtype(np.int32).str)
     t.gc = np.asarray(mesh.topology().global_indices(d), dtype=np.uint64)[:own]
     t.dofs = to_global[per_cell].astype(dtype)
-    cells = mesh.cells()[:own]
-    t.x = mesh.coordinates()[cells]
-    t.vgid = np.asarray(mesh.topology().global_indices(0), dtype=np.int64)[cells]
+    t.vertices_per_cell = mesh.cells().shape[1]
+    t.gdim = mesh.geometry().dim()
+    t._make_x = lambda: mesh.coordinates()[mesh.cells()[:own]]
+    t._make_vgid = lambda: np.asarray(mesh.topology().global_indices(0),
+                                      dtype=np.int64)[mesh.cells()[:own]]
     t.owned = tuple(int(v) for v in dm.ownership_range())
     t.n_global = int(V.dim())
     t.comm = comm
@@ -126,10 +140,11 @@ def _dolfinx_space(t, V, U):
     t.gc, D = dolfin_cell_dofs(V)
     dtype = np.int32 if U.n_global < 2**31 else np.int64    # dolfin's int32 when it fits
     t.dofs = U.compact[D].astype(dtype)
-    G = ufc_vertices(mesh)
-    gv = np.asarray(mesh.geometry.input_global_indices, dtype=np.int64)
-    t.x = mesh.geometry.x[G][:, :, :mesh.geometry.dim]
-    t.vgid = gv[G]
+    t.vertices_per_cell = mesh.geometry.dofmap.shape[1]
+    t.gdim = mesh.geometry.dim
+    t._make_x = lambda: mesh.geometry.x[ufc_vertices(mesh)][:, :, :mesh.geometry.dim]
+    t._make_vgid = lambda: np.asarray(mesh.geometry.input_global_indices,
+                                      dtype=np.int64)[ufc_vertices(mesh)]
     t.owned = tuple(int(v) for v in U.owned_range)
     t.n_global = int(U.n_global)
     t.comm = mesh.comm

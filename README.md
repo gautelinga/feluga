@@ -64,8 +64,9 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 ### Point evaluation and gradients
 
 - **`probes`**: `Probes` and `GradProbes`, a Function's values and gradients at fixed
-  points, located once and evaluated many times. From Mikael Mortensen's fenicstools, as
-  extended in addictif.
+  points, located once and evaluated many times; `dump` writes one file a rank, which
+  `read_dump` reads back (as fenicstools' one file a probe). From Mikael Mortensen's
+  fenicstools, as extended in addictif.
 - **`gradient`**: the weighted gradient matrix, a P1 field's derivative at the nodes as one
   matrix-vector product. From Mikael Mortensen's fenicstools, unchanged in what it computes.
 
@@ -119,7 +120,8 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 - **`dolfinx.mixed`**: `subfunction`, `set_subfunction`, `subspace` and
   `AssignedVectorFunction`, as in `mixed`, for DOLFINx Functions (index copies through
   the collapse dof maps, built once).
-- **`dolfinx.checkpoint`**: `write_dofs`, `write_function`, `read_function`: DOLFINx
+- **`dolfinx.checkpoint`**: `write_dofs`, `write_function`, `write_functions` (several in
+  one file, in one open; the backends' `write_functions_h5`), `read_function`: DOLFINx
   Functions in dolfin's HDF5 layout (`dolfin_layout`), cell by cell through the original
   cell and vertex indices and dolfin's local dof order, so a checkpoint written by
   either backend, on any number of ranks, reads on the other. Values are a space's
@@ -146,8 +148,9 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   every rank writing its own rows -- so `grids`, `merge_series` and
   `XDMFFile2.read_checkpoint` treat both backends' series alike.
 - **`dolfinx.xdmf_read`**: `read_nodal`, a step of such a series, written by either backend,
-  into a DOLFINx Function of any degree and periodicity (nodes matched by position on a
-  plain space of the file's degree, then interpolated): `read_checkpoint`'s counterpart.
+  into a DOLFINx Function of any degree and periodicity (a Lagrange space of the file's
+  degree reads its owned dofs at their nodes; another degree through a plain space of the
+  file's degree, interpolated): `read_checkpoint`'s counterpart.
 
 ## Requirements
 
@@ -156,8 +159,12 @@ they are used. `probes` and `gradient` compile their C++ with cppimport (pybind1
 compiler and `libdolfin-dev`) on first import; `periodic`, `periodic_partition` and
 `plaza_periodic` use dolfin's JIT on first use. `dolfinx.refine` and `dolfinx.assembly`
 build their C++ with CMake, a compiler and nanobind against the installed DOLFINx on
-first use, cached in FEMTOOLS_JIT_DIR (else ~/.cache/femtools). `periodic_partition` needs a ParMETIS with
-64-bit `idx_t` past 2^31 cells.
+first use, cached in FEMTOOLS_JIT_DIR (else ~/.cache/femtools); `python3 -m
+femtools.dolfinx.compiled` builds them ahead of a job (with FEMTOOLS_REQUIRE_EXTENSIONS set
+a run refuses the slower assembly without them). Each JIT builds on one rank and loads on
+all, so its cache must be on a file system every rank sees. `periodic_partition` needs a
+ParMETIS with 64-bit `idx_t` past 2^31 cells, and more than 2^31 dofs a PETSc (and hypre)
+with 64-bit indices.
 
 Parallel HDF5 I/O needs h5py built with MPI (Debian/Ubuntu: `python3-h5py-mpi`, which
 Debian's h5py loads under `mpirun`; on a cluster, an h5py built against the cluster's MPI

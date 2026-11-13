@@ -98,7 +98,7 @@ def _dolfin_space(t, V):
     # call for all, not a pybind call a cell -- on every rank, a rank without cells too,
     # since the first call compiles (dolfin's JIT is collective)
     n = V.element().space_dimension()
-    per_cell = cell_dofs(dm, np.arange(own), n)
+    per_cell = cell_dofs(dm, np.arange(own), n, comm)
     # the dofmap's integer type, from a rank that has a cell
     dtype = next((k for k in comm.allgather(dm.cell_dofs(0).dtype.str if own else None) if k),
                  np.dtype(np.int32).str)

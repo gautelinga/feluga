@@ -1421,8 +1421,8 @@ def _cpp():
     """
     global _CPP_MODULE
     if _CPP_MODULE is False:
-        import dolfin as df
-        _CPP_MODULE = df.compile_cpp_code(_CPP_CODE)
+        from femtools.jit import dolfin_module
+        _CPP_MODULE = dolfin_module(_CPP_CODE, None, "femtools.xdmf")
     return _CPP_MODULE
 
 

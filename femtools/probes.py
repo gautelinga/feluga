@@ -23,10 +23,12 @@ import glob
 import os
 import re
 
-import cppimport
 import numpy as np
 
-probe11 = cppimport.imp_from_filepath(
+from femtools.jit import cppimport_module
+
+# built on rank 0 and loaded on every rank (import is collective under MPI)
+probe11 = cppimport_module(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp", "probe11.cpp"),
     "femtools.cpp.probe11")
 

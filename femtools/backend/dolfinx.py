@@ -1188,7 +1188,10 @@ def _owned_rows(U, dofs):
 
 
 def apply_bc(bc, *tensors):
-    bc.apply(*tensors)
+    """bc.apply(*tensors); `bc` may be a list or tuple of conditions, applied in their
+    order (as femtools.fast_bc.apply on dolfin)."""
+    for one in (bc if isinstance(bc, (list, tuple)) else [bc]):
+        one.apply(*tensors)
 
 
 # --- interpolation, mixed components, null spaces --------------------------------------

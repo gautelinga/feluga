@@ -53,6 +53,7 @@ def _check_unique(r):
     assert r["fold_mixed_reordered"] < 1e-14 and r["fold_mixed_reordered_exact"]
     assert r["reordered_interleaved"]
     assert r["reordered_roundtrip"] == 0.0
+    assert r["reordered_dg0"]
     assert r["band_reordered"] < r["band_own_order"] / 2, (r["band_reordered"],
                                                            r["band_own_order"])
 

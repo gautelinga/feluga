@@ -292,6 +292,11 @@ for reorder in (False, True):
     assemble_matrix(K, a_lap)
     band.append(bandwidth(K))
 res["band_own_order"], res["band_reordered"] = band
+# a space with one dof per cell: no edges, every dof still numbered once
+D0 = fem.functionspace(msh, ("DG", 0))
+own = UniqueDofs(D0, reorder=True).owned_unique
+res["reordered_dg0"] = bool(comm.allreduce(int(not np.array_equal(
+    np.sort(own), np.arange(D0.dofmap.index_map.size_local)))) == 0)
 
 if comm.rank == 0:
     with open(sys.argv[1], "w") as fh:

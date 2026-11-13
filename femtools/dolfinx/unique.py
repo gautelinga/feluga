@@ -56,24 +56,38 @@ def _gps_order(V, owned_unique, rep, nodes):
 
     node_ids, node_of = np.unique(nodes[owned_unique], return_inverse=True)
     n_nodes = len(node_ids)
-    index = np.full(len(rep), -1, dtype=np.int64)  # node (into node_ids) of an owned unique dof
+    index = np.full(len(rep), -1, dtype=np.int32)  # node (into node_ids) of an owned unique dof
     index[owned_unique] = node_of
     r = rep[V.dofmap.list.reshape(V.dofmap.list.shape[0], -1)]
     cells = np.where(r >= 0, index[np.maximum(r, 0)], -1)
+    del r, index
     edges = [np.zeros(0, np.int64)]  # each edge once, as lower * n_nodes + higher
     for i in range(cells.shape[1]):
         for j in range(i + 1, cells.shape[1]):
             a, b = cells[:, i], cells[:, j]
             keep = (a >= 0) & (b >= 0) & (a != b)
             a, b = a[keep], b[keep]
-            edges.append(np.minimum(a, b) * n_nodes + np.maximum(a, b))
-    lower, higher = np.divmod(np.unique(np.concatenate(edges)), n_nodes)
-    src, dst = np.concatenate([lower, higher]), np.concatenate([higher, lower])
-    order = np.lexsort((dst, src))
-    src, dst = src[order], dst[order]
+            edges.append(np.minimum(a, b).astype(np.int64) * n_nodes + np.maximum(a, b))
+    del cells
+    edges = np.concatenate(edges)
+    edges.sort()  # by lower node, then higher; in place
+    first = np.ones(len(edges), dtype=bool)
+    first[1:] = edges[1:] != edges[:-1]
+    edges = edges[first]
+    del first
+    lower = (edges // n_nodes).astype(np.int32)
+    higher = (edges % n_nodes).astype(np.int32)
+    del edges
+    # Each node's neighbours in ascending order: those below it (where it is the higher)
+    # first, then those above, each part already ascending; a stable sort keeps that.
+    src = np.concatenate([higher, lower])
+    dst = np.concatenate([lower, higher])
+    del lower, higher
+    dst = dst[np.argsort(src, kind="stable")]
     offsets = np.zeros(n_nodes + 1, dtype=np.int32)
     np.cumsum(np.bincount(src, minlength=n_nodes), out=offsets[1:])
-    place = np.asarray(reorder_gps(AdjacencyList_int32(dst.astype(np.int32), offsets)),
+    del src
+    place = np.asarray(reorder_gps(AdjacencyList_int32(dst, offsets)),
                        dtype=np.int64)  # place[node]: its position in the new order
     return owned_unique[np.argsort(place[node_of], kind="stable")]
 
@@ -119,7 +133,7 @@ class UniqueDofs:
             owned_unique = owned_unique[np.argsort(keys[owned_unique], kind="stable")]
         if reorder:
             lo = imap.local_range[0]
-            rep = np.full(n_loc, -1, dtype=np.int64)
+            rep = np.full(n_loc, -1, dtype=np.int32)
             rep[owned_unique] = owned_unique
             here = (masters >= lo) & (masters < lo + n_own)
             rep[slaves[here]] = masters[here] - lo

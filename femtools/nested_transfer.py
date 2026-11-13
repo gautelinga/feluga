@@ -84,20 +84,36 @@ def _check_rows(comm, rows, owned, what):
                            "rank's cells".format(missing, what))
 
 
+def _petsc_ints(comm, a, n_global, what):
+    """`a` (global indices below `n_global`) as PETSc's integers; raises on every rank
+    when `n_global` does not fit them, where a cast would wrap without a word.
+    Collective."""
+    from petsc4py import PETSc
+    from femtools.hdf5_rows import agreed
+    top = np.iinfo(PETSc.IntType).max
+    if agreed(comm, n_global - 1 > top or (len(a) and int(np.max(a)) > top)):
+        raise OverflowError(
+            "nested_transfer: {} {} beyond PETSc's {}-bit integers; this needs a PETSc "
+            "built with 64-bit indices (--with-64-bit-indices)".format(
+                n_global, what, 8 * np.dtype(PETSc.IntType).itemsize))
+    return np.asarray(a).astype(PETSc.IntType)
+
+
 def _mat(comm, rows, cols, vals, row_layout, col_layout):
     """A petsc4py AIJ matrix from this rank's own rows' entries, ordered by row and
-    column (as `_owned_rows` gives them)."""
+    column (as `_owned_rows` gives them). Collective."""
     from petsc4py import PETSc
     (rlo, rhi), n_rows = row_layout
     (clo, chi), n_cols = col_layout
+    _petsc_ints(comm, (), n_rows, "rows")
+    cols = _petsc_ints(comm, cols, n_cols, "columns")
     indptr = np.zeros(rhi - rlo + 1, dtype=PETSc.IntType)
     np.cumsum(np.bincount(rows - rlo, minlength=rhi - rlo), out=indptr[1:])
     A = PETSc.Mat().create(comm=comm)
     A.setSizes(((rhi - rlo, n_rows), (chi - clo, n_cols)))
     A.setType(PETSc.Mat.Type.AIJ)
     # local CSR of the own rows (PETSc 3.19's petsc4py has no COO assembly)
-    A.setPreallocationCSR((indptr, cols.astype(PETSc.IntType),
-                           vals.astype(PETSc.ScalarType)))
+    A.setPreallocationCSR((indptr, cols, vals.astype(PETSc.ScalarType)))
     A.assemble()
     return A
 
@@ -329,6 +345,7 @@ class Lattice:
         self._scatter = None
         self.passes = nest.passes
         self.n_cells = tc.n_cells
+        self.n_dofs = tf.n_global
         d = tc.x.shape[2]
         n_own = len(tc.gc)
         # each coarse cell's vertices ordered by global id: the canonical order
@@ -366,8 +383,9 @@ class Lattice:
         (n_cells, width)."""
         from petsc4py import PETSc
         if self._scatter is None:           # built once: any vector of the fine layout
-            idx = PETSc.IS().createGeneral(self.dof.astype(PETSc.IntType),
-                                           comm=PETSc.COMM_SELF)
+            idx = PETSc.IS().createGeneral(
+                _petsc_ints(self.comm, self.dof, self.n_dofs, "fine dofs"),
+                comm=PETSc.COMM_SELF)
             y = PETSc.Vec().createSeq(len(self.dof), comm=PETSc.COMM_SELF)
             self._scatter = (PETSc.Scatter().create(x, idx, y, None), y)
         scatter, y = self._scatter

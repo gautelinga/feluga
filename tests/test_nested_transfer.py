@@ -6,7 +6,8 @@ prolongation of a P2 field is its fine P2 and P1 interpolant, the injection of a
 mixed field is its coarse P2 and P1 interpolant, R P is the identity -- all to rounding,
 on 1 and 3 ranks. A fine field written by its lattice on one backend and rank count is
 read back on the other backend and another rank count. The matrices and the lattice
-are the same when built a few fine cells at a time.
+are the same when built a few fine cells at a time. Indices beyond PETSc's integers
+raise.
 """
 import json
 import os
@@ -54,3 +55,16 @@ def test_across_ranks_and_backends(tmp_path):
     _check(_run("dolfinx", 3, tmp_path, "r", tmp_path / "dolfin_1.h5"), read=True)
     _check(_run("dolfin", 2, tmp_path, "r", tmp_path / "dolfinx_3.h5"), read=True)
 
+
+def test_indices_beyond_petsc_integers_raise():
+    petsc4py = pytest.importorskip("petsc4py")
+    petsc4py.init()
+    import numpy as np
+    from petsc4py import PETSc
+    from femtools.nested_transfer import _petsc_ints
+    top = int(np.iinfo(PETSc.IntType).max)
+    assert _petsc_ints(None, [3, top], top + 1, "columns").dtype == PETSc.IntType
+    with pytest.raises(OverflowError, match="64-bit indices"):
+        _petsc_ints(None, [3], top + 2, "columns")
+    with pytest.raises(OverflowError, match="64-bit indices"):
+        _petsc_ints(None, [top + 1], top + 2, "columns")

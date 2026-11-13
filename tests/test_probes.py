@@ -2,6 +2,8 @@
 UnitCubeMesh give the function's own value and gradient at the probe points, every
 gradient component and every gradient snapshot; a Probes built from located GradProbes
 gives the same values."""
+import os
+
 import numpy as np
 import pytest
 
@@ -157,9 +159,10 @@ def test_erasing_a_gradient_snapshot_keeps_the_histories_aligned():
 
 
 BOUNDARY = r"""
+import glob, os, sys
 import numpy as np, dolfin as df
 from mpi4py import MPI
-from femtools.probes import Probes
+from femtools.probes import Probes, read_dump
 comm = MPI.COMM_WORLD
 mesh = df.UnitSquareMesh(8, 8)
 V = df.FunctionSpace(mesh, "CG", 1)
@@ -169,21 +172,68 @@ p = Probes(pts.flatten(), V)
 p(u)
 n = comm.allreduce(p.local_size())
 a = p.array(N=0)
+stem = os.path.join(sys.argv[1], "u")
+p.dump(stem)
+comm.Barrier()
+# a mesh of each rank's own: its probes gather over its communicator, not the world's
+own = df.UnitSquareMesh(MPI.COMM_SELF, 4, 4)
+W = df.FunctionSpace(own, "CG", 1)
+q = Probes(pts[:3].flatten(), W)
+q(df.interpolate(df.Expression("x[0] + 2*x[1] + k", k=comm.rank, degree=1), W))
+alone = np.allclose(q.array(N=0), pts[:3, 0] + 2 * pts[:3, 1] + comm.rank)
+alone = comm.allreduce(int(alone), op=MPI.MIN)
 if comm.rank == 0:
     print("HELD", n, "EXACT", bool(np.allclose(a, pts[:, 0] + 2 * pts[:, 1])))
+    back = read_dump(stem)
+    print("DUMPED", len(glob.glob(stem + "*")) <= comm.size, sorted(back) == list(range(81)),
+          all(np.allclose(back[i][0][:2], pts[i]) and np.allclose(back[i][1], a[i])
+              for i in back))
+    print("OWN COMM", bool(alone))
 """
 
 
 @pytest.mark.mpi
-def test_a_point_on_a_partition_boundary_is_held_once():
+def test_a_point_on_a_partition_boundary_is_held_once(tmp_path):
     """Every vertex of the mesh as a point, on three ranks: each is held by one rank
-    (the lowest finding it), and gathered to its value."""
+    (the lowest finding it), and gathered to its value; dumped as a file a rank and read
+    back whole; and probes on a mesh of one rank's own gather over its communicator."""
     import os
     import sys
     from tests import support
-    proc = support.run([sys.executable, "-c", BOUNDARY], 3,
+    proc = support.run([sys.executable, "-c", BOUNDARY, str(tmp_path)], 3,
                        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     assert "HELD 81 EXACT True" in proc.stdout, proc.stdout[-2000:]
+    assert "DUMPED True True True" in proc.stdout, proc.stdout[-2000:]
+    assert "OWN COMM True" in proc.stdout, proc.stdout[-2000:]
+
+
+def test_dump_is_a_file_a_rank_and_reads_back(tmp_path):
+    """`dump` writes the probes of a rank into one file, all components or one, in the
+    text a probe's own dump writes; `read_dump` reads it, and fenicstools' file a probe"""
+    from femtools.probes import Probe, read_dump
+    mesh = df.UnitSquareMesh(4, 4)
+    W = df.VectorFunctionSpace(mesh, "CG", 1)
+    w = df.interpolate(df.Expression(("x[0]", "2*x[1]"), degree=1), W)
+    pts = np.array([[0.3, 0.4], [0.6, 0.6], [0.1, 0.9]])
+    q = Probes(pts.flatten(), W)
+    q(w)
+    q(w)
+    q.dump(str(tmp_path / "all"))
+    q.dump(1, str(tmp_path / "one"))
+    assert sorted(os.listdir(tmp_path)) == ["all_rank0.probe", "one_rank0.probe"]
+    every, second = read_dump(str(tmp_path / "all")), read_dump(str(tmp_path / "one"))
+    assert sorted(every) == sorted(second) == [0, 1, 2]
+    for i, x in enumerate(pts):
+        assert np.allclose(every[i][0], [x[0], x[1], 0.0])
+        assert every[i][1].shape == (2, 2) and np.allclose(every[i][1], [x * [1, 2]] * 2)
+        assert np.allclose(second[i][1], [[2 * x[1]]] * 2)
+    probe = Probe(pts[0], W)
+    probe(w)
+    probe.dump(str(tmp_path / "old_7.probe"), 7)
+    old = read_dump(str(tmp_path / "old"))
+    assert list(old) == [7] and np.allclose(old[7][1], [pts[0] * [1, 2]])
+    with pytest.raises(RuntimeError):
+        q.dump(2, str(tmp_path / "none"))
 
 
 def test_an_array_before_any_evaluation_is_empty():

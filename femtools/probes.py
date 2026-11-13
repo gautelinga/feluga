@@ -10,25 +10,30 @@ A Function's values, and gradients, at many points, evaluated many times.
     probes.array()                            # (points, components, snapshots) on root
     probes.array(N=0)                         # one snapshot: (points, components)
 
+    probes.dump("out/u")                      # out/u_rank<r>.probe, a file a rank
+    read_dump("out/u")                        # {id: (coordinates, values)}
+
 A point is kept by the lowest rank that finds it in its cells, so a point on a partition
 boundary is evaluated once; a point outside the mesh is found by no rank and reads 0 in
-`array`. `GradProbes` takes gradients too (`grad`, `array_grad`). The C++ classes are
-built with cppimport on first import (femtools/cpp/probe11.cpp).
+`array`, which gathers over the mesh's communicator. `GradProbes` takes gradients too
+(`grad`, `array_grad`). The C++ classes are built with cppimport on first import
+(femtools/cpp/probe11.cpp).
 """
+import glob
 import os
+import re
 
 import cppimport
 import numpy as np
-from mpi4py.MPI import COMM_WORLD as comm
 
 probe11 = cppimport.imp_from_filepath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp", "probe11.cpp"),
     "femtools.cpp.probe11")
 
 
-def _on_root(ids, local, total, root):
+def _on_root(comm, ids, local, total, root):
     """Every rank's rows `local` (one a local probe, `ids` their places) as one array on
-    root, `total` rows, zeros where no rank holds the probe; None elsewhere."""
+    root of comm, `total` rows, zeros where no rank holds the probe; None elsewhere."""
     local = np.ascontiguousarray(local, dtype=float)
     tail = local.shape[1:]
     width = int(np.prod(tail)) if tail else 1
@@ -45,9 +50,46 @@ def _on_root(ids, local, total, root):
     return z
 
 
+def read_dump(filename):
+    """What `dump(filename)` or `dump(i, filename)` wrote, on any number of ranks: each
+    probe's id to `(coordinates, values)`, its three coordinates and its values a row a
+    snapshot (one column for a dumped component, a column a component otherwise). Reads
+    the files a rank (`filename_rank<r>.probe`) and the files a probe of fenicstools'
+    layout (`filename_<id>.probe`); the two hold the same text a probe."""
+    out = {}
+    names = sorted(glob.glob(glob.escape(filename) + "_*.probe"))
+    pattern = re.compile(re.escape(os.path.basename(filename)) + r"_(rank)?\d+\.probe$")
+    for name in names:
+        if pattern.match(os.path.basename(name)):
+            with open(name) as handle:
+                out.update(_parse_dump(handle.read().splitlines()))
+    return out
+
+
+def _parse_dump(lines):
+    """`read_dump`'s probes of one file's lines."""
+    out, k = {}, 0
+    while k < len(lines):
+        if not lines[k].startswith("Probe id = "):
+            k += 1
+            continue
+        pid = int(lines[k].split("=")[1])
+        n = int(lines[k + 1].split("=")[1])
+        x = np.array(lines[k + 3].split(), dtype=float)
+        rows = lines[k + 5:k + 5 + n]
+        values = np.array([r.split() for r in rows], dtype=float).reshape(n, -1)
+        out[pid] = (x, values)
+        k += 5 + n
+    return out
+
+
 class _Collection(object):
     """What Probes and GradProbes share in Python: call to evaluate, iterate over the
-    local probes as (id, probe), and gather to root."""
+    local probes as (id, probe), and gather to root of the mesh's communicator."""
+
+    def __init__(self, x, V):
+        super().__init__(x, V)
+        self._comm = V.mesh().mpi_comm()
 
     def __call__(self, *args):
         return self.eval(*args)
@@ -76,7 +118,8 @@ class _Collection(object):
             values = values[:, [component], :]
         if N is not None:
             values = values[:, :, N]
-        z = _on_root(self.get_probe_ids(), values, self.get_total_number_probes(), root)
+        z = _on_root(self._comm, self.get_probe_ids(), values,
+                     self.get_total_number_probes(), root)
         if z is None:
             return None
         if filename:

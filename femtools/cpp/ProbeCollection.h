@@ -2,6 +2,7 @@
 #define __PROBECOLLECTION_H
 
 #include <dolfin/common/MPI.h>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <string>
@@ -108,17 +109,46 @@ namespace dolfin
             new P(x.data() + i*gdim, V, cell[i])));
     }
 
-    // Write each probe's component i, or all, to filename_<id>.probe
+    // Write every local probe's component i, or all of them, to one file a rank,
+    // filename_rank<r>.probe: the probes one after another in the text Probe::dump
+    // writes for one (femtools.probes.read_dump reads either). A rank holding no probe
+    // writes no file.
     void dump(std::size_t i, std::string filename) const
     {
+      if (_probes.empty())
+        return;
+      if (i >= _value_size)
+        dolfin_error("ProbeCollection.h", "dump a component",
+                     "no component %d: there are %d", (int) i, (int) _value_size);
+      std::ofstream fp(rank_file(filename).c_str(), std::ios_base::out);
+      fp << std::scientific;
       for (auto& p : _probes)
-        p.second->dump(i, filename + "_" + std::to_string(p.first) + ".probe", p.first);
+      {
+        head(fp, p);
+        fp << "Values for component " << i << std::endl;
+        for (std::size_t s = 0; s < p.second->number_of_evaluations(); s++)
+          fp << p.second->get_probe_component_and_snapshot(i, s) << std::endl;
+        fp << std::endl;
+      }
     }
 
     void dump(std::string filename) const
     {
+      if (_probes.empty())
+        return;
+      std::ofstream fp(rank_file(filename).c_str(), std::ios_base::out);
+      fp << std::scientific;
       for (auto& p : _probes)
-        p.second->dump(filename + "_" + std::to_string(p.first) + ".probe", p.first);
+      {
+        head(fp, p);
+        fp << "Values for all components:" << std::endl;
+        for (std::size_t s = 0; s < p.second->number_of_evaluations(); s++)
+        {
+          for (std::size_t j = 0; j < p.second->value_size(); j++)
+            fp << p.second->get_probe_component_and_snapshot(j, s) << " ";
+          fp << std::endl;
+        }
+      }
     }
 
     // A copy of the local probe i, and its id
@@ -207,6 +237,25 @@ namespace dolfin
     }
 
   protected:
+
+    // This rank's dump file (`dump`), named by its rank in the probes' mesh's
+    // communicator
+    std::string rank_file(const std::string& filename) const
+    {
+      const MPI_Comm comm = _probes.front().second->mesh().mpi_comm();
+      return filename + "_rank" + std::to_string(MPI::rank(comm)) + ".probe";
+    }
+
+    // A probe's lines before its values, as Probe::dump writes them
+    template <class Entry>
+    static void head(std::ofstream& fp, const Entry& p)
+    {
+      const std::vector<double> x = p.second->coordinates();
+      fp << "Probe id = " << p.first << std::endl;
+      fp << "Number of evaluations = " << p.second->number_of_evaluations() << std::endl;
+      fp << "Coordinates:" << std::endl;
+      fp << x[0] << " " << x[1] << " " << x[2] << std::endl;
+    }
 
     void check(std::size_t i) const
     {

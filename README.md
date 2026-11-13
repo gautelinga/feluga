@@ -218,6 +218,7 @@ LD_PRELOAD=$PWD/libdof_reorder_star.so python3 solve.py
 python3 -m pytest              # the quick tier, seconds
 python3 -m pytest -m slow      # the mpirun and compile tests, minutes
 python3 -m pytest -m ""        # everything
+python3 -m pytest -m "" -n 4   # everything, in parallel (pytest-xdist)
 ```
 
 The dolfin tests skip where dolfin is missing.

@@ -18,11 +18,12 @@ the upper faces); the check also needs the lower corner, `lower`, the origin unl
 given.
 
 **The fix is the partition.** `read_mesh` reads the mesh in blocks and partitions it
-with ParMETIS, and `repaired` moves any rank's cells at an endangered slave entity to a
-rank that holds an exterior facet there -- a handful of cells per partition. Only the
-cells touching an upper face go to rank 0 to decide that: every facet that matters
-contains an upper-face vertex, so all of its cells are among them, which makes the
-restriction exact and small. When nothing moves -- most partitions --
+with ParMETIS, and `repaired` moves cells until every rank holding a slave entity holds
+an exterior facet there -- a handful of cells per partition. Only the cells touching an
+upper face take part: every facet that matters contains an upper-face vertex, so all of
+its cells are among them, which makes the restriction exact. They are not gathered
+anywhere: each entity is judged at the rank it hashes to (`_repair_rows`), every move
+goes to a lower rank, so the rounds end. When nothing moves -- most partitions --
 the mesh is used as read. Otherwise it is built again in memory with those cells on
 their new ranks (`rebuild`: dolfin's `build_distributed_mesh` from the mesh's own
 arrays, as it builds a mesh it reads). No rank reads or holds the whole mesh.
@@ -85,19 +86,9 @@ def upper_mask(x, L, periodic, tol):
 def _held(topo, owner, mask, edges):
     """The slave entities each element of `topo` holds, with its rank, distinct, as rows
     (kind, a, b, rank): a vertex (0, v, -1) on an upper face, an edge (1, lo, hi) whose
-    ends lie on one upper face."""
-    rows = []
-    for c in range(topo.shape[1]):
-        m = mask[topo[:, c]] > 0
-        n = int(m.sum())
-        rows.append(np.stack([np.zeros(n, np.int64), topo[m, c],
-                              np.full(n, -1, np.int64), owner[m]], 1))
-    for a, b in edges:
-        m = (mask[topo[:, a]] & mask[topo[:, b]]) > 0
-        va, vb = topo[m, a], topo[m, b]
-        rows.append(np.stack([np.ones(len(va), np.int64), np.minimum(va, vb),
-                              np.maximum(va, vb), owner[m]], 1))
-    return unique_rows(np.concatenate(rows).astype(np.int64))
+    ends lie on one upper face (`_entity_rows`)."""
+    topo = np.asarray(topo, np.int64)
+    return unique_rows(_entity_rows(topo, mask[topo], edges, np.asarray(owner, np.int64)))
 
 
 def _endangered(mask, topo, owner):
@@ -139,36 +130,155 @@ def endangered(x, topo, owner, L, periodic, tol):
                        np.asarray(owner, np.int64))
 
 
-def _repair(mask, topo, owner, max_rounds=50):
-    """`repair` on vertex masks: each cell at an endangered entity goes to the lowest rank
-    holding an exterior facet there, round after round; cells found through a
-    vertex-to-cells map built once."""
-    topo = np.asarray(topo, np.int64)
+def _entity_rows(topo, cmask, edges, cell):
+    """The slave entities of cells (or facets) `topo` with their vertices' upper-face
+    masks `cmask`, as rows (kind, a, b, cell): a vertex (0, v, -1) on an upper face, an
+    edge (1, lo, hi) of `edges` whose ends lie on one upper face; `cell` each element's
+    label."""
+    rows = []
+    for c in range(topo.shape[1]):
+        m = cmask[:, c] > 0
+        n = int(m.sum())
+        rows.append(np.stack([np.zeros(n, np.int64), topo[m, c],
+                              np.full(n, -1, np.int64), cell[m]], 1))
+    for a, b in edges:
+        m = (cmask[:, a] & cmask[:, b]) > 0
+        va, vb = topo[m, a], topo[m, b]
+        rows.append(np.stack([np.ones(len(va), np.int64), np.minimum(va, vb),
+                              np.maximum(va, vb), cell[m]], 1))
+    return np.concatenate(rows).astype(np.int64)
+
+
+def _send(comm, dest, *arrays):
+    """`hdf5_rows.route`'s received arrays; the arrays themselves on one rank (`comm`
+    None). Collective."""
+    if comm is None:
+        return [np.asarray(a) for a in arrays]
+    from femtools.hdf5_rows import route
+    return route(comm, dest, *arrays).received
+
+
+def _exterior_entities(comm, gcells, cmask):
+    """The slave entities of the exterior facets of cells `gcells` (global vertex ids;
+    this rank's share of the layer of cells at an upper face), as rows (kind, a, b,
+    cell), each at the rank holding the facet's cell. Exterior is a facet no other cell of the layer
+    has: a facet at an upper-face vertex has all its cells in the layer. Each such facet
+    is judged at the rank its vertices hash to. Collective."""
+    from femtools.hdf5_rows import rank_of
+    n, nv = gcells.shape
+    rank, size = (0, 1) if comm is None else (comm.rank, comm.size)
+    _, facet_edges = _cell_edges(nv)
+    keys, masks, cells = [], [], []
+    for k in range(nv):
+        f = np.delete(gcells, k, axis=1)
+        m = np.delete(cmask, k, axis=1)
+        on = (m > 0).any(1)
+        order = np.argsort(f[on], axis=1)
+        keys.append(np.take_along_axis(f[on], order, axis=1))
+        masks.append(np.take_along_axis(m[on], order, axis=1).astype(np.int64))
+        cells.append(np.nonzero(on)[0])
+    keys, masks = np.concatenate(keys), np.concatenate(masks)
+    cells = np.concatenate(cells).astype(np.int64)
+    home = np.full(len(cells), rank, np.int64)
+    keys, masks, home, cells = _send(comm, rank_of(keys, size), keys, masks, home, cells)
+    order = np.lexsort(keys.T[::-1])
+    keys, masks, home, cells = keys[order], masks[order], home[order], cells[order]
+    dup = np.all(keys[1:] == keys[:-1], axis=1)
+    single = np.ones(len(keys), bool)
+    single[1:] &= ~dup
+    single[:-1] &= ~dup
+    rows = _entity_rows(keys[single], masks[single], facet_edges,
+                        np.arange(int(single.sum()), dtype=np.int64))
+    dest = home[single][rows[:, 3]]
+    rows[:, 3] = cells[single][rows[:, 3]]
+    (rows,) = _send(comm, dest, rows)
+    return rows
+
+
+def _judge(rows):
+    """The moves the rows of slave entities at this rank call for: `rows` (kind, a, b,
+    rank, home, cell, role), role 0 a cell holding the entity, 1 the cell of an exterior
+    facet there, `rank` the cell's current part. Returns `(moves, bad, orphan)`: moves
+    (home, cell, to rank), how many (entity, rank) holders lack an exterior facet, and an
+    entity no exterior facet holds (None for none).
+
+    A rank p holding an entity without an exterior facet there, q the lowest rank with
+    one: p's cells at the entity go to q when q < p; when q > p, q's cells with an
+    exterior facet there come to the lowest such p instead. Every move goes to a lower
+    rank."""
+    held, seen = rows[rows[:, 6] == 0], rows[rows[:, 6] == 1]
+    pairs = unique_rows(seen[:, :4])                   # (entity, rank) with a facet
+    first = np.r_[True, np.any(pairs[1:, :3] != pairs[:-1, :3], axis=1)] if len(pairs) \
+        else np.zeros(0, bool)
+    keys, low = pairs[first, :3], pairs[first, 3]      # each entity's lowest such rank
+    at = find_rows(held[:, :3], keys)
+    if (at < 0).any():
+        k = held[at < 0][0]
+        return None, 0, 'a slave {} {} has no exterior facet on any rank'.format(
+            'vertex' if k[0] == 0 else 'edge',
+            int(k[1]) if k[0] == 0 else (int(k[1]), int(k[2])))
+    bad = find_rows(held[:, :4], pairs) < 0
+    q = low[at]
+    down = bad & (held[:, 3] > q)
+    moves = [np.stack([held[down, 4], held[down, 5], q[down]], 1)]
+    up = bad & (held[:, 3] < q)
+    if up.any():
+        target = np.full(len(keys), np.iinfo(np.int64).max)
+        np.minimum.at(target, at[up], held[up, 3])
+        s_at = find_rows(seen[:, :3], keys)
+        bring = (target[s_at] < seen[:, 3]) & (seen[:, 3] == low[s_at])
+        moves.append(np.stack([seen[bring, 4], seen[bring, 5], target[s_at[bring]]], 1))
+    n_bad = len(unique_rows(held[bad, :4]))
+    return np.concatenate(moves), n_bad, None
+
+
+def _repair_rows(comm, gcells, cmask, owner, max_rounds=50):
+    """`(owner, moved)`: the parts of the layer cells `gcells` (global vertex ids, on
+    every rank its own) with their vertices' upper-face masks `cmask`, moved until no
+    rank holds a slave entity without an exterior facet there, and how many moves that
+    took. Each round every rank sends its cells' slave entities, and those of their
+    exterior facets, with the cells' parts to the rank each entity hashes to, which
+    decides the moves (`_judge`); a cell given several moves takes the lowest rank. Every
+    move lowers a cell's part, so the rounds end. Errors are raised on every rank.
+    Collective on `comm` (None for one rank)."""
+    from femtools.hdf5_rows import agreed, rank_of
+    gcells = np.asarray(gcells, np.int64)
+    cmask = np.asarray(cmask, np.uint8).reshape(gcells.shape)
     owner = np.asarray(owner, np.int64).copy()
-    flat = topo.ravel()
-    by_vertex = np.argsort(flat, kind="stable")
-    starts = np.searchsorted(flat[by_vertex], np.arange(len(mask) + 1))
-
-    def cells_of(v):
-        return by_vertex[starts[v]:starts[v + 1]] // topo.shape[1]
-
+    rank, size = (0, 1) if comm is None else (comm.rank, comm.size)
+    cell_edges, _ = _cell_edges(gcells.shape[1])
+    held = _entity_rows(gcells, cmask, cell_edges, np.arange(len(gcells), dtype=np.int64))
+    seen = _exterior_entities(comm, gcells, cmask)
+    entity = np.concatenate([held, seen])
+    role = np.r_[np.zeros(len(held), np.int64), np.ones(len(seen), np.int64)]
+    held = seen = None
+    dest = rank_of(entity[:, :3], size)
     moved = 0
     for _ in range(max_rounds):
-        bad, (keys, low) = _endangered(mask, topo, owner)
-        if not len(bad):
+        rows = np.concatenate([entity[:, :3], owner[entity[:, 3]][:, None],
+                               np.full((len(entity), 1), rank, np.int64),
+                               entity[:, 3:4], role[:, None]], axis=1)
+        (rows,) = _send(comm, dest, rows)
+        moves, bad, orphan = _judge(rows)
+        if agreed(comm, orphan is not None):
+            found = [orphan] if comm is None else [o for o in comm.allgather(orphan) if o]
+            raise RuntimeError(found[0] if found else 'a slave entity has no exterior facet '
+                               'on any rank')
+        if not (bad if comm is None else comm.allreduce(bad)):
             return owner, moved
-        at = find_rows(bad[:, :3], keys)
-        if (at < 0).any():
-            k = bad[at < 0][0]
-            raise RuntimeError('a slave {} {} has no exterior facet on any rank'.format(
-                'vertex' if k[0] == 0 else 'edge', int(k[1]) if k[0] == 0
-                else (int(k[1]), int(k[2]))))
-        for (kind, a, b, p), to in zip(bad, low[at]):
-            cells = cells_of(a) if kind == 0 else np.intersect1d(cells_of(a), cells_of(b))
-            cells = cells[owner[cells] == p]
-            owner[cells] = to
-            moved += len(cells)
+        moves, = _send(comm, moves[:, 0], moves[:, 1:])
+        cell, to = moves[:, 0], moves[:, 1]
+        new = owner.copy()
+        np.minimum.at(new, cell, to)
+        moved += int((new != owner).sum())
+        owner = new
     raise RuntimeError('the partition repair did not converge in {} rounds'.format(max_rounds))
+
+
+def _repair(mask, topo, owner, max_rounds=50):
+    """`repair` on vertex masks, on one rank (`_repair_rows`)."""
+    topo = np.asarray(topo, np.int64)
+    return _repair_rows(None, topo, np.asarray(mask)[topo], owner, max_rounds)
 
 
 def repair(x, topo, owner, L, periodic, tol, max_rounds=50):
@@ -708,8 +818,9 @@ def _box(x, L, comm, gdim):
 
 
 def _moves(mesh, L, periodic, comm, log, owner, tol=None):
-    """The cells the repair moves, as `(global cell id, from rank, to rank)` on every
-    rank, from `owner` (each owned local cell's proposed rank)."""
+    """`(moves, moved)`: the cells of this rank the repair moves, as rows (global cell
+    id, from rank, to rank), from `owner` (each owned local cell's proposed rank), and
+    how many it moves over all ranks."""
     x = mesh.coordinates()
     L, side = _box(x, L, comm, mesh.geometry().dim())
     vmask = upper_mask(x, L, periodic, _face_tol(side, tol))
@@ -728,42 +839,31 @@ def _layer_moves(comm, gc, gcells, cmask, owner, log):
     rank.
 
     Only the layer -- the cells with a vertex on an upper periodic face, ~1 % of the
-    mesh -- goes to rank 0, at ~50 B a cell (ids and masks, no coordinates): every facet
-    that matters contains an upper-face vertex, so all of its cells are in the layer,
-    and the repair on the layer alone is exact. Vertices are named by their global
-    index, which every rank agrees on. Rank 0's repair is array work (`_repair`).
+    mesh -- takes part: every facet that matters contains an upper-face vertex, so all
+    of its cells are in the layer, and the repair on the layer alone is exact. Vertices
+    are named by their global index, which every rank agrees on. The repair is
+    distributed (`_repair_rows`): no rank holds more than its share of the layer.
     """
+    from mpi4py import MPI
     nv = np.shape(gcells)[1]
     cmask = np.asarray(cmask, np.uint8).reshape(-1, nv)
     layer = np.nonzero((cmask > 0).any(1))[0]
-    part = (np.asarray(gc, np.int64)[layer], np.asarray(gcells, np.int64)[layer],
-            cmask[layer], np.asarray(owner, np.int64)[layer])
-    parts = comm.gather(part, root=0)
-    moves, failure = None, None
+    owner = np.asarray(owner, np.int64)[layer]
+    fixed, _ = _repair_rows(comm, np.asarray(gcells, np.int64).reshape(-1, nv)[layer],
+                            cmask[layer], owner)
+    m = np.nonzero(fixed != owner)[0]
+    moves = np.stack([np.asarray(gc, np.int64)[layer][m], owner[m], fixed[m]], 1)
+    n_moved = comm.allreduce(len(m), op=MPI.SUM)
+    n_layer = comm.allreduce(len(layer), op=MPI.SUM)
     if comm.rank == 0:
-        try:
-            ids = np.concatenate([p[0] for p in parts])
-            vg = np.concatenate([p[1] for p in parts]).reshape(-1)
-            vm = np.concatenate([p[2] for p in parts]).reshape(-1)
-            owner = np.concatenate([p[3] for p in parts])
-            del parts
-            uniq, first, t = np.unique(vg, return_index=True, return_inverse=True)
-            fixed, moved = _repair(vm[first], t.reshape(-1, nv), owner)
-            m = np.nonzero(fixed != owner)[0]
-            moves = np.stack([ids[m], owner[m], fixed[m]], 1)
-            log('periodic partition: {} cells moved of {} touching an upper face'
-                .format(len(m), len(ids)))
-        except Exception as exc:          # every rank must hear it, or they wait forever
-            failure = '{}: {}'.format(type(exc).__name__, exc)
-    failure = comm.bcast(failure, root=0)
-    if failure is not None:
-        raise RuntimeError('periodic partition: rank 0 could not repair the partition '
-                           '({}); no rank goes on'.format(failure))
-    return comm.bcast(moves, root=0)
+        log('periodic partition: {} cells moved of {} touching an upper face'
+            .format(n_moved, n_layer))
+    return moves, n_moved
 
 
 def _apply_moves(gc, part, moves):
-    """`part` (each local cell's rank) with the moves of the cells this rank holds."""
+    """`part` (each local cell's rank) with the moves `(global id, from, to)` of the
+    cells this rank holds."""
     part = np.array(part, dtype=np.int64)
     if len(moves):
         by_id = moves[np.argsort(moves[:, 0])]
@@ -779,10 +879,10 @@ def repaired_partition(mesh, part, L, periodic, comm, log=print, tol=None):
     `FACE_RTOL` times the box's largest side). Collective."""
     own = _owned(mesh)
     part = np.asarray(part)[:own]
-    moves = _moves(mesh, L, periodic, comm, log, part, tol)
+    moves, moved = _moves(mesh, L, periodic, comm, log, part, tol)
     gc = np.asarray(mesh.topology().global_indices(mesh.topology().dim()),
                     dtype=np.int64)[:own]
-    return _apply_moves(gc, part, moves), len(moves)
+    return _apply_moves(gc, part, moves), moved
 
 
 def repaired(mesh, L, periodic, comm, log=print, tol=None):
@@ -856,7 +956,7 @@ def read_partitioned(mesh_file, L, periodic, comm, log=print, tol=None, families
     L, side = _box(x, L, comm, gdim)
     vmask = upper_mask(x, L, periodic, _face_tol(side, tol))
     cmask = lookup(comm, ve, vmask, cells.reshape(-1)).reshape(cells.shape)
-    part = _apply_moves(ids, part, _layer_moves(comm, ids, cells, cmask, part, log))
+    part = _apply_moves(ids, part, _layer_moves(comm, ids, cells, cmask, part, log)[0])
     data = _cpp().local_data(like, cells, ids, x, lo, n_v, n_c, part.astype(np.int32))
     cells = ids = x = cmask = vmask = part = None       # dolfin's copy alone through the build
     out = df.Mesh(comm)

@@ -428,3 +428,91 @@ def test_a_ghosted_mesh_is_rebuilt_from_its_owned_cells():
     proc = support.run([sys.executable, "-c", GHOSTED], 2,
                        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     assert "CELLS 1296 1296 1296" in proc.stdout, proc.stdout[-2000:]
+
+
+def _kuhn_layer(n, parts, seed):
+    """`(mask, topo, owner)`: the cells of an n^3 grid of the unit cube (six
+    tetrahedra a cube) that touch the upper face of x or y (periodic there), their
+    vertices' upper-face masks, and a random part out of `parts` for each."""
+    import numpy as np
+    from femtools import periodic_partition as pp
+    g = np.arange(n + 1)
+    x = np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3) / n
+    corner = np.stack(np.meshgrid(*[np.arange(n)] * 3, indexing="ij"), -1).reshape(-1, 3)
+    cells = []
+    for axes in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)):
+        path = [corner.copy()]
+        for a in axes:
+            step = path[-1].copy()
+            step[:, a] += 1
+            path.append(step)
+        cells.append(np.stack([(p[:, 0] * (n + 1) + p[:, 1]) * (n + 1) + p[:, 2]
+                               for p in path], 1))
+    topo = np.concatenate(cells)
+    mask = pp.upper_mask(x, [1.0, 1.0, 1.0], [True, True, False], 1e-9)
+    topo = topo[(mask[topo] > 0).any(1)]
+    owner = np.random.default_rng(seed).integers(0, parts, size=len(topo))
+    return mask, topo, owner
+
+
+def _lowest_rank_rule(mask, topo, owner, rounds):
+    """Whether moving every endangered holder's cells to the lowest rank with an exterior
+    facet at the entity, round after round, ends within `rounds` rounds."""
+    import numpy as np
+    from femtools import periodic_partition as pp
+    from femtools.hdf5_rows import find_rows
+    owner = owner.copy()
+    for _ in range(rounds):
+        bad, (keys, low) = pp._endangered(mask, topo, owner)
+        if not len(bad):
+            return True
+        for (kind, a, b, p), to in zip(bad, low[find_rows(bad[:, :3], keys)]):
+            at = (topo == a).any(1) & ((kind == 0) | (topo == b).any(1)) & (owner == p)
+            owner[at] = to
+    return False
+
+
+def test_the_repair_ends_where_moving_to_the_lowest_rank_cycles():
+    """A layer of random parts on which sending each endangered holder's cells to the
+    lowest rank with an exterior facet there goes round in circles: the repair moves
+    cells to lower ranks only, ends, and leaves nothing endangered."""
+    import numpy as np
+    from femtools import periodic_partition as pp
+    mask, topo, owner = _kuhn_layer(4, 9, 0)
+    assert not _lowest_rank_rule(mask, topo, owner, 50)
+    fixed, moved = pp._repair(mask, topo, owner)
+    assert moved > 0 and (fixed <= owner).all()
+    assert len(pp._endangered(mask, topo, fixed)[0]) == 0
+
+
+DISTRIBUTED_REPAIR = r"""
+import numpy as np
+from mpi4py import MPI
+from femtools import periodic_partition as pp
+from tests.test_periodic_partition import _kuhn_layer
+comm = MPI.COMM_WORLD
+for n, parts, seed in ((4, 9, 0), (6, 64, 1), (5, 3, 2)):
+    mask, topo, owner = _kuhn_layer(n, parts, seed)
+    serial, _ = pp._repair(mask, topo, owner)
+    # every rank a scattered share of the layer, in no particular order
+    mine = np.nonzero(np.random.default_rng(seed).integers(0, comm.size, len(topo))
+                      == comm.rank)[0][::-1]
+    fixed, _ = pp._repair_rows(comm, topo[mine], mask[topo[mine]], owner[mine])
+    got = np.full(len(topo), -1)
+    for i, f in zip(comm.allgather(mine), comm.allgather(fixed)):
+        got[i] = f
+    bad = len(pp._endangered(mask, topo, got)[0])
+    if comm.rank == 0:
+        print("SAME", n, np.array_equal(got, serial), bad)
+"""
+
+
+@pytest.mark.mpi
+@pytest.mark.parametrize("ranks", [2, 3])
+def test_the_distributed_repair_is_the_serial_one(ranks):
+    """The repair with the layer scattered over the ranks, each entity judged where it
+    hashes to, moves the cells the serial repair moves, and leaves nothing endangered."""
+    proc = support.run([sys.executable, "-c", DISTRIBUTED_REPAIR], ranks,
+                       cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    lines = [l.split() for l in proc.stdout.splitlines() if l.startswith("SAME")]
+    assert len(lines) == 3 and all(l[2:] == ["True", "0"] for l in lines), proc.stdout[-2000:]

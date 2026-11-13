@@ -1,7 +1,8 @@
 """`femtools.fast_interpolation`: interpolate and values give dolfin.interpolate's
 values between Lagrange spaces of any degrees, scalar and vector, from a component of
 a mixed or a vector Function, on a periodic space and on three ranks; refuse what they
-cannot do; and build the transfer once per pair of spaces."""
+cannot do; build the transfer once per pair of spaces, and hold no more than its
+matrix."""
 import os
 import sys
 
@@ -96,3 +97,49 @@ def test_three_ranks(tmp_path):
     support.run([sys.executable, WORKER, str(out)], 3,
                 env={"PYTHONPATH": os.path.dirname(os.path.dirname(os.path.abspath(__file__)))})
     assert float(out.read_text()) < 1e-13
+
+
+HELD = r"""
+import ctypes
+import dolfin as df
+from petsc4py import PETSc
+from femtools import fast_interpolation as fi
+
+_lib = ctypes.CDLL(PETSc.__file__)
+
+
+def live():
+    d = ctypes.c_double()
+    _lib.PetscMallocGetCurrentUsage(ctypes.byref(d))
+    return d.value
+
+
+mesh = df.UnitSquareMesh(64, 64)
+W = df.FunctionSpace(mesh, df.MixedElement([df.VectorElement("CG", mesh.ufl_cell(), 2),
+                                            df.FiniteElement("CG", mesh.ufl_cell(), 1)]))
+Q = df.FunctionSpace(mesh, "CG", 1)
+V = W.sub(0).sub(1)
+base = live()
+T = fi.transfer(V, Q)
+held = live() - base
+C = T.duplicate(copy=True)
+own = live() - base - held
+fi.forget(V)
+C.destroy()
+gone = live() - base
+if df.MPI.comm_world.rank == 0:
+    print("HELD", held, "OWN", own, "GONE", gone)
+"""
+
+
+@pytest.mark.parametrize("ranks", [1, pytest.param(2, marks=pytest.mark.mpi)])
+def test_a_component_transfer_holds_its_matrix_alone(ranks):
+    """A transfer from a component, cached, holds no more of PETSc's memory than a copy
+    of its matrix (the matrices made on the way, which a product keeps for a reuse, are
+    destroyed), and nothing once forgotten. PETSc's own count, with -malloc_debug."""
+    proc = support.run([sys.executable, "-c", HELD], ranks,
+                       env={"PETSC_OPTIONS": "-malloc_debug"},
+                       cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    line = [l.split() for l in proc.stdout.splitlines() if l.startswith("HELD")][0]
+    held, own, gone = float(line[1]), float(line[3]), float(line[5])
+    assert own > 0 and held < 1.2 * own and gone == 0, proc.stdout[-2000:]

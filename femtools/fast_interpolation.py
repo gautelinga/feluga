@@ -27,16 +27,22 @@ def transfer(V, W):
     """The transfer from the source space V (a space, or a component of a mixed one)
     to the target space W, as a PETSc matrix built once per pair. For a component it
     acts on the mixed vector: dolfin's transfer from the collapsed space, times the
-    matrix that picks the component's values out of the mixed vector."""
+    matrix that picks the component's values out of the mixed vector. Collective."""
     import dolfin as df
     key = (V.id(), W.id())
     T = _TRANSFERS.get(key)
     if T is None:
         _check(V, W)
         if len(V.component()):                   # a component of a mixed space
-            source, dofs = V.collapse(collapsed_dofs=True)
-            T = df.PETScDMCollection.create_transfer_matrix(source, W).mat()
-            T = T.matMult(_selection(V, source, dofs))
+            source = V.collapse()
+            D = df.PETScDMCollection.create_transfer_matrix(source, W).mat()
+            P = _selection(V, source)
+            product = D.matMult(P)
+            # a product keeps its factors for a reuse, as long as it lives: the copy
+            # alone is kept, and the factors destroyed with the product
+            T = product.duplicate(copy=True)
+            for M in (product, P, D):
+                M.destroy()
         else:
             T = df.PETScDMCollection.create_transfer_matrix(V, W).mat()
         _TRANSFERS[key] = T
@@ -54,23 +60,38 @@ def forget(V):
             T.destroy()
 
 
-def _selection(V, source, dofs):
+#: cells taken at a time when matching a component's dofs with its collapsed space's
+CELL_BLOCK = 100_000
+
+
+def _selection(V, source):
     """The matrix from the mixed vector to the component's collapsed space: a one in
-    each row, at the mixed dof that the row's collapsed dof is."""
+    each row, at the mixed dof that the row's collapsed dof is. The two are matched
+    cell by cell through their dofmaps (as `collapse` matches them), a block of cells at
+    a time, into one array of the collapsed space's local dofs: `collapse`'s own map is a
+    Python dict of every dof. Collective."""
     import dolfin as df
     from petsc4py import PETSc
+    from femtools.periodic import cell_dofs
+    mesh = source.mesh()
+    comm = mesh.mpi_comm()
     owned = df.IndexMap.MapSize.OWNED
     n = source.dofmap().index_map().size(owned)
+    k = source.element().space_dimension()
+    parent = np.full(n, -1, dtype=np.int64)
+    n_cells = mesh.num_cells()
+    for start in range(0, max(n_cells, 1), CELL_BLOCK):
+        cells = np.arange(start, min(start + CELL_BLOCK, n_cells), dtype=np.int64)
+        collapsed = cell_dofs(source.dofmap(), cells, k, comm).ravel()
+        mixed = cell_dofs(V.dofmap(), cells, k, comm).ravel()
+        mine = collapsed < n
+        parent[collapsed[mine]] = mixed[mine]
     to_global = V.dofmap().tabulate_local_to_global_dofs()
     lo, hi = V.dofmap().ownership_range()
-    collapsed = np.fromiter(dofs.keys(), dtype=np.int64)
-    parent = np.fromiter(dofs.values(), dtype=np.int64)
-    cols = np.empty(n, dtype=PETSc.IntType)
-    mine = collapsed < n
-    cols[collapsed[mine]] = to_global[parent[mine]]
+    cols = np.asarray(to_global[parent], dtype=PETSc.IntType)
     rows = np.arange(n + 1, dtype=PETSc.IntType)
     P = PETSc.Mat().createAIJ([(n, PETSc.DECIDE), (hi - lo, PETSc.DECIDE)],
-                              csr=(rows, cols, np.ones(n)), comm=source.mesh().mpi_comm())
+                              csr=(rows, cols, np.ones(n)), comm=comm)
     P.assemble()
     return P
 

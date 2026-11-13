@@ -21,8 +21,8 @@ vector Lagrange Functions of degree 1 or 2 (not mixed: write their components).
 import numpy as np
 
 from femtools.ufc import CELL_NAMES, edge_index
-from femtools.xdmf import (QUADRATIC, XDMF_TOPOLOGY, XdmfDocument, _int32, _pad3,
-                           node_dofs, node_layout, node_positions)
+from femtools.xdmf import (QUADRATIC, XDMF_TOPOLOGY, XdmfDocument, _pad3, is_wide,
+                           node_dofs, node_layout, node_positions, topology_array)
 
 
 def _edges_of_cells(mesh, n_cells, pairs):
@@ -140,10 +140,12 @@ class XDMFSeries:
         store = self._stored.get(id(V))
         if store is None:
             group = doc.mesh_group(True)
-            store = (doc.slab(group + "/topology", L.cell_offset, _int32(L.conn), L.n_cells),
+            store = (doc.slab(group + "/topology", L.cell_offset,
+                              topology_array(L.conn, L.n_nodes), L.n_cells),
                      doc.rows(group + "/geometry", L.rows, L.coords, L.n_nodes))
             self._stored[id(V)] = store
-        doc.topology(grid, L.conn, L.topology, ref=store[0], shape=(L.n_cells, L.conn.shape[1]))
+        doc.topology(grid, L.conn, L.topology, ref=store[0], shape=(L.n_cells, L.conn.shape[1]),
+                     wide=is_wide(L.n_nodes))
         doc.geometry(grid, None, ref=store[1], shape=(L.n_nodes, L.gdim))
         doc.time(grid, t)
         values = np.asarray(u.x.array).reshape(-1, L.bs)[L.dofs]

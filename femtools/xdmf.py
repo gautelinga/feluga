@@ -350,10 +350,13 @@ class XdmfDocument(object):
         self._changed.add(top)
         return node
 
-    def _data_item(self, parent, ref, shape, unsigned=False):
+    def _data_item(self, parent, ref, shape, unsigned=False, wide=False):
         item = self._sub(parent, 'DataItem')
         item.set('Dimensions', ' '.join(str(int(n)) for n in shape))
-        if unsigned:
+        if wide:
+            item.set('NumberType', 'Int')
+            item.set('Precision', '8')
+        elif unsigned:
             item.set('NumberType', 'UInt')
         item.set('Format', 'HDF')
         item.text = ref
@@ -370,15 +373,16 @@ class XdmfDocument(object):
             return node
         return self._sub(parent, 'Grid', attrib)
 
-    def topology(self, grid, cells, topology_type, ref=None, shape=None):
+    def topology(self, grid, cells, topology_type, ref=None, shape=None, wide=False):
         # `shape` is the *global* one: writing in parallel, a rank holds a slice, and
-        # the XML has to describe the whole dataset rather than that rank's part
+        # the XML has to describe the whole dataset rather than that rank's part.
+        # `wide`: the node numbers are stored as 64-bit integers (`topology_array`)
         n_cells, per_cell = shape if shape is not None else cells.shape
         node = self._sub(grid, 'Topology', {
             'NumberOfElements': str(n_cells), 'TopologyType': topology_type,
             'NodesPerElement': str(per_cell)})
         self._data_item(node, ref if ref is not None else cells,
-                        (n_cells, per_cell), unsigned=True)
+                        (n_cells, per_cell), unsigned=True, wide=wide)
         return node
 
     def geometry(self, grid, coords, ref=None, shape=None):
@@ -538,13 +542,27 @@ def _file_size(path):
         return None
 
 
-def _int32(a):
-    """Topology as the XDMF files here store it, 32-bit: refused rather than wrapped past
-    2^31 nodes (a P2 mesh has ~1.33 nodes a cell, so ~1.6B cells)."""
+#: the most nodes a grid's topology numbers in 32-bit integers
+INT32_NODES = 2 ** 31
+
+
+def is_wide(n_nodes):
+    """Whether a topology over `n_nodes` nodes (all ranks') is stored in 64-bit integers:
+    past `INT32_NODES` (a P2 mesh has ~1.33 nodes a cell, so ~1.6B cells), its XML saying
+    so (`NumberType="Int" Precision="8"`). Smaller ones stay 32-bit."""
+    return int(n_nodes) > INT32_NODES
+
+
+def topology_array(a, n_nodes):
+    """Topology as the XDMF files here store it (`is_wide`): 32-bit integers, or 64-bit past
+    `INT32_NODES` nodes; a node number past the 32-bit range is refused rather than
+    wrapped."""
     a = np.asarray(a)
-    if a.size and int(a.max()) >= 2 ** 31:
-        raise ValueError("XDMF topology: node {} past the 32-bit range the file stores"
-                         .format(int(a.max())))
+    if is_wide(n_nodes):
+        return a.astype(np.int64)
+    if a.size and int(a.max()) >= INT32_NODES:
+        raise ValueError("XDMF topology: node {} of {} nodes, past the 32-bit range"
+                         .format(int(a.max()), int(n_nodes)))
     return a.astype(np.int32)
 
 
@@ -773,12 +791,12 @@ class XDMFFile2(object):
                 group = doc.mesh_group(time is not None)
                 coords = node_positions(_geometry(mesh.coordinates()), info['layout'])
                 store = (doc.slab(group + '/topology', info['cell_offset'],
-                                  _int32(conn), n_cells),
+                                  topology_array(conn, n_nodes), n_cells),
                          doc.rows(group + '/geometry', info['layout']['rows'], coords,
                                   n_nodes))
                 self._stored[(mesh.id(), degree)] = store
             doc.topology(grid, conn, topology_type, ref=store[0],
-                         shape=(n_cells, conn.shape[1]))
+                         shape=(n_cells, conn.shape[1]), wide=is_wide(n_nodes))
             doc.geometry(grid, None, ref=store[1],
                          shape=(n_nodes, _gwidth(mesh)))
             if time is not None:
@@ -822,13 +840,13 @@ class XDMFFile2(object):
 
         grid = doc.grid('mesh')
         group = doc.mesh_group(False)
-        store = (doc.slab(group + '/topology', offset, _int32(cells), n_cell),
+        store = (doc.slab(group + '/topology', offset, topology_array(cells, n_vert), n_cell),
                  doc.rows(group + '/geometry', gvert[owned],
                           _geometry(mesh.coordinates())[owned], n_vert))
         self._stored[(mesh.id(), 1)] = store
         doc.topology(grid, cells,
                      XDMF_TOPOLOGY[(mesh.ufl_cell().cellname(), cells.shape[1])],
-                     ref=store[0], shape=(n_cell, cells.shape[1]))
+                     ref=store[0], shape=(n_cell, cells.shape[1]), wide=is_wide(n_vert))
         doc.geometry(grid, None, ref=store[1], shape=(n_vert, _gwidth(mesh)))
         self._grids[(mesh.id(), 1, None)] = grid
         self._finish()
@@ -858,11 +876,11 @@ class XDMFFile2(object):
 
         group = 'MeshFunction/{}'.format(doc._next('MeshFunction'))
         grid = doc.grid('mesh')
-        topo = doc.slab(group + '/mesh/topology', offset, _int32(rows), n_ent)
+        topo = doc.slab(group + '/mesh/topology', offset, topology_array(rows, n_vert), n_ent)
         geom = doc.rows(group + '/mesh/geometry', gvert[owned_v],
                         _geometry(mesh.coordinates())[owned_v], n_vert)
         doc.topology(grid, rows, _entity_topology(mesh, dim, rows.shape[1]),
-                     ref=topo, shape=(n_ent, rows.shape[1]))
+                     ref=topo, shape=(n_ent, rows.shape[1]), wide=is_wide(n_vert))
         doc.geometry(grid, None, ref=geom, shape=(n_vert, _gwidth(mesh)))
         name = mf.name() if mf.name() and mf.name() != 'f' else 'meshfunction'
         doc.attribute(grid, name, values, 'Cell',
@@ -933,8 +951,9 @@ class XDMFFile2(object):
         name = mvc.name() or 'm'
         grid = doc.grid(name)
         doc.topology(grid, entities, _entity_topology(mesh, dim, width),
-                     ref=doc.slab(group + '/topology', offset, _int32(entities), n_marked),
-                     shape=(n_marked, width))
+                     ref=doc.slab(group + '/topology', offset,
+                                  topology_array(entities, n_vert), n_marked),
+                     shape=(n_marked, width), wide=is_wide(n_vert))
         doc.geometry(grid, None, shape=(n_vert, _gwidth(mesh)),
                      ref=doc.rows(group + '/geometry', gvert[owned_v],
                                   _geometry(mesh.coordinates())[owned_v], n_vert))
@@ -962,8 +981,8 @@ class XDMFFile2(object):
         conn = np.arange(n, dtype=np.int64).reshape(-1, 1)
         group = doc.free_group('Points')
         grid = doc.grid('points')
-        doc.topology(grid, conn, 'Polyvertex', shape=(n, 1),
-                     ref=doc.dataset(group + '/topology', _int32(conn)))
+        doc.topology(grid, conn, 'Polyvertex', shape=(n, 1), wide=is_wide(n),
+                     ref=doc.dataset(group + '/topology', topology_array(conn, n)))
         doc.geometry(grid, None, shape=(n, 3), ref=doc.dataset(group + '/geometry', coords))
         if values is not None:
             doc.attribute(grid, 'values', values, 'Node', shape=(n, 1),
@@ -2053,9 +2072,10 @@ def write_quadratic(path, coords, conn, values, names, cell_type='tetra10'):
     doc = XdmfDocument(path)
     grid = doc.grid('mesh')
     topology_type = MESHIO_TOPOLOGY.get(cell_type, cell_type)
-    doc.topology(grid, conn, topology_type,
+    n_nodes = len(np.asarray(coords))
+    doc.topology(grid, conn, topology_type, wide=is_wide(n_nodes),
                  ref=doc.dataset('Mesh/mesh/topology',
-                                 _int32(np.asarray(conn))))
+                                 topology_array(np.asarray(conn), n_nodes)))
     doc.geometry(grid, coords,
                  ref=doc.dataset('Mesh/mesh/geometry', np.asarray(coords, float)))
     for index, (name, value) in enumerate(zip(names, values)):
@@ -2083,7 +2103,7 @@ def write_quadratic_blocks(path, comm, cell_rows, conn, n_cells, node_rows, coor
     h5_name = os.path.splitext(os.path.basename(path))[0] + '.h5'
     h5_path = os.path.join(os.path.dirname(os.path.abspath(path)), h5_name)
     zero = {'partition': np.array([0], dtype=np.uint64)}
-    write_ordered(h5_path, 'Mesh/mesh/topology', cell_rows, _int32(conn),
+    write_ordered(h5_path, 'Mesh/mesh/topology', cell_rows, topology_array(conn, n_nodes),
                   n_cells, comm, mode='w', attrs=zero)
     write_ordered(h5_path, 'Mesh/mesh/geometry', node_rows, np.asarray(coords, float),
                   n_nodes, comm, attrs=zero)
@@ -2104,7 +2124,7 @@ def write_quadratic_blocks(path, comm, cell_rows, conn, n_cells, node_rows, coor
         try:
             doc = XdmfDocument(path)
             grid = doc.grid('mesh')
-            doc.topology(grid, None, topology_type,
+            doc.topology(grid, None, topology_type, wide=is_wide(n_nodes),
                          ref='{}:/Mesh/mesh/topology'.format(h5_name),
                          shape=(n_cells, TOPOLOGY_CELL[topology_type][1]))
             doc.geometry(grid, None, ref='{}:/Mesh/mesh/geometry'.format(h5_name),

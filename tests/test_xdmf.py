@@ -1276,6 +1276,46 @@ if df.MPI.rank(C) == 0:
     assert proc.stdout.strip().endswith('ok'), proc.stdout + proc.stderr
 
 
+@pytest.mark.parametrize('limit', [None, 8])
+def test_topology_past_32_bits(limit, monkeypatch):
+    """a topology numbering more nodes than `INT32_NODES` (lowered here) is stored in
+    64-bit integers and says so (`NumberType="Int" Precision="8"`), and reads back -- the
+    mesh by dolfin, the field by XDMFFile2; below it, 32-bit as before"""
+    import h5py
+    import xml.etree.ElementTree as ET
+    if limit is not None:
+        monkeypatch.setattr(export_p2_xdmf, 'INT32_NODES', limit)
+    mesh = unit_mesh(2)
+    u = quadratic_field(mesh)
+    paths = [tmp('wide_mesh_{}.xdmf'.format(limit)), tmp('wide_u_{}.xdmf'.format(limit))]
+    with XDMFFile2(df.MPI.comm_world, paths[0]) as f:
+        f.write(mesh)
+    with XDMFFile2(df.MPI.comm_world, paths[1]) as f:
+        f.parameters['rewrite_function_mesh'] = False
+        f.write(u, 0.0)
+        f.write(u, 1.0)
+    for path in paths:
+        items = [t.find('DataItem') for t in ET.parse(path).getroot().iter('Topology')
+                 if t.find('DataItem') is not None]
+        assert items
+        for item in items:
+            if limit is None:
+                assert (item.get('NumberType'), item.get('Precision')) == ('UInt', None)
+            else:
+                assert (item.get('NumberType'), item.get('Precision')) == ('Int', '8')
+        with h5py.File(path.replace('.xdmf', '.h5'), 'r') as h5:
+            ref = items[0].text.strip().partition(':')[2]
+            assert h5[ref].dtype == (np.int32 if limit is None else np.int64)
+    back = df.Mesh()
+    with df.XDMFFile(df.MPI.comm_world, paths[0]) as f:
+        f.read(back)
+    assert np.array_equal(back.cells(), mesh.cells())
+    v = df.Function(u.function_space())
+    with XDMFFile2(df.MPI.comm_world, paths[1]) as f:
+        f.read_checkpoint(v, 'u', 1)
+    assert np.array_equal(v.vector().get_local(), u.vector().get_local())
+
+
 def test_checkpoint_conflict():
     """a checkpoint and visualisation grids refuse to share a file"""
     mesh = unit_mesh(2)

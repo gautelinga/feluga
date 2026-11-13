@@ -62,6 +62,30 @@ def main(out):
     exact = L.Function(V)
     exact.interpolate(lambda x: x[1] * (1 - x[1]))
     r["poisson"] = abs(L.assemble(w * L.dx) - L.assemble(exact * L.dx))
+    # interpolation at dof coordinates equals DOLFINx's own, on scalar, vector, DG0 and
+    # P2 spaces; Expressions in one element share one space
+    from dolfinx import fem
+    worst = 0.0
+    for family, degree, shape in (("CG", 1, ()), ("CG", 2, ()), ("CG", 2, (2,)),
+                                  ("DG", 0, ())):
+        S = fem.functionspace(mesh, (family if family == "DG" else "Lagrange", degree,
+                                     shape))
+        if shape:
+            def f(x):
+                return np.stack([np.sin(3 * x[0]) * x[1], x[0] ** 2 - x[1]])
+        else:
+            def f(x):
+                return np.where(x[0] < 0.5, np.sin(3 * x[0]) * x[1], x[0] ** 2 - x[1])
+        ours, theirs = fem.Function(S), fem.Function(S)
+        L._interpolate(ours, f)
+        fem.Function.interpolate(theirs, f)
+        worst = max(worst, float(np.abs(ours.x.array - theirs.x.array).max(initial=0)))
+    from mpi4py import MPI
+    r["interpolate_vs_dolfinx"] = comm.allreduce(worst, op=MPI.MAX)
+    e1 = L.Expression("x[0]", degree=2, domain=mesh)
+    e2 = L.Expression("x[1]*a", a=2.0, degree=2, domain=mesh)
+    r["expressions_share_space"] = e1.function_space is e2.function_space
+    r["sub_made_once"] = W.sub(0) is W.sub(0) and W.sub(1) is not W.sub(0)
     if comm.rank == 0:
         with open(out, "w") as f:
             json.dump(r, f)

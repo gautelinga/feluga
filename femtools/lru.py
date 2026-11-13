@@ -6,11 +6,13 @@ from collections import OrderedDict
 
 class LRU(OrderedDict):
     """At most `capacity` entries. `get` and setting an entry make it the most
-    recently used; setting one beyond the capacity drops the least recently used."""
+    recently used; setting one beyond the capacity drops the least recently used
+    (counted in `evicted`)."""
 
     def __init__(self, capacity):
         super().__init__()
         self.capacity = capacity
+        self.evicted = 0
 
     def get(self, key, default=None):
         if key not in self:
@@ -23,6 +25,7 @@ class LRU(OrderedDict):
         self.move_to_end(key)
         if len(self) > self.capacity:
             self.popitem(last=False)
+            self.evicted += 1
 
 
 class WeakCache:

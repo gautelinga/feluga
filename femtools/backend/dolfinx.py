@@ -381,7 +381,11 @@ class _Space(fem.FunctionSpace):
     W.sub(0) acts through W's unique dofs."""
 
     def sub(self, i):
-        return _space(super().sub(i), self._box, parent=self)
+        """Component i, made once (DOLFINx makes a new sub-dofmap at every call)."""
+        subs = self.__dict__.setdefault("_subs", {})
+        if i not in subs:
+            subs[i] = _space(super().sub(i), self._box, parent=self)
+        return subs[i]
 
     def unique_dofs(self):
         return unique_dofs(self)
@@ -696,6 +700,34 @@ class _Values(dolfinx.la.Vector):
             owner.restrict()
 
 
+def _point_evaluation(V):
+    """Whether the dofs of space V are its values at its dof coordinates: a scalar or
+    blocked space of a Lagrange-type element, not mixed and not a component."""
+    if V.component():
+        return False
+    e = V.ufl_element()
+    if e.block_size > 1:
+        e = e.sub_elements[0]
+    try:
+        return bool(e.basix_element.interpolation_is_identity)
+    except (AttributeError, NotImplementedError):
+        return False
+
+
+def _interpolate(u, f, *args, **kwargs):
+    """DOLFINx's u.interpolate(f). A callable f into a space whose dofs are point
+    values is evaluated once per dof, at the dof coordinates; DOLFINx would evaluate it
+    at every cell's points, several times as many."""
+    V = u.function_space
+    if callable(f) and not isinstance(f, fem.Function) and not args and not kwargs \
+            and _point_evaluation(V):
+        x = V.tabulate_dof_coordinates()          # (dofs, 3), contiguous
+        values = np.asarray(f(x.T), dtype=u.x.array.dtype)
+        u.x.array[:] = values.T.ravel() if values.ndim > 1 else values
+        return
+    fem.Function.interpolate(u, f, *args, **kwargs)
+
+
 class _WritesBack(fem.Function):
     """What a backend Function and its component views share: DOLFINx's ways of writing
     the array (`interpolate`, `x.array[...] = ...` then `x.scatter_forward()`) end in the
@@ -706,7 +738,7 @@ class _WritesBack(fem.Function):
         self._x = _Values(self._cpp_object.x, owner)
 
     def interpolate(self, u0, *args, **kwargs):
-        fem.Function.interpolate(self, _interpolant(u0), *args, **kwargs)
+        _interpolate(self, _interpolant(u0), *args, **kwargs)
         self._owner().restrict()
         return self
 
@@ -820,6 +852,18 @@ class Constant(fem.Constant):
         self.value = value.value if isinstance(value, fem.Constant) else value
 
 
+_EXPRESSION_SPACES = weakref.WeakKeyDictionary()   # mesh -> {element: space}
+
+
+def _expression_space(mesh, element):
+    """The space Expressions in `element` on `mesh` are interpolated into, one for all
+    of them (with its unique dofs)."""
+    spaces = _EXPRESSION_SPACES.setdefault(mesh, {})
+    if element not in spaces:
+        spaces[element] = _space(fem.functionspace(mesh, element), None)
+    return spaces[element]
+
+
 class Expression(Function):
     """dolfin's Expression(cpp_code, degree=..., **parameters): C++ code in x[0], x[1],
     x[2] and the parameters, compiled as dolfin compiles it
@@ -872,7 +916,7 @@ class Expression(Function):
             el = basix.ufl.element("Lagrange", mesh.basix_cell(), degree,
                                    discontinuous=family == "DG",
                                    shape=(n,) if n > 1 else ())
-        super().__init__(_space(fem.functionspace(mesh, el), None), name="Expression")
+        super().__init__(_expression_space(mesh, el), name="Expression")
 
     @property
     def _user_parameters(self):
@@ -900,7 +944,7 @@ class Expression(Function):
 
     def sync(self):
         if self._dirty:
-            fem.Function.interpolate(self, self.evaluate)
+            _interpolate(self, self.evaluate)
             self.restrict()
             object.__setattr__(self, "_dirty", False)
         return self
@@ -964,6 +1008,12 @@ def compiled(form):
         entry = _BY_CONTENT.get(form)
     if entry is None or any(m.version != v for m, v in entry.markers):
         entry = _BY_CONTENT[form] = _Compiled(form)
+        if _BY_CONTENT.evicted == 1 and entry.comm.rank == 0:
+            import sys
+            print("femtools: more than {} distinct forms compiled. Each holds DOLFINx's "
+                  "integration entities; a form made with other values each time (a "
+                  "Python number where a Constant belongs) is compiled again every "
+                  "time.".format(CAPACITY), file=sys.stderr)
     _FORMS[id(form)] = (form, entry)      # the form held: its id is not reused
     for c in entry.coefficients:
         sync(c)
@@ -1094,6 +1144,8 @@ class DirichletBC:
     def apply(self, *tensors):
         for t in tensors:
             if isinstance(t, Matrix):
+                # the rows are this rank's own: PETSc need not route them to owners
+                t._m.setOption(PETSc.Mat.Option.NO_OFF_PROC_ZERO_ROWS, True)
                 t._m.zeroRows(self.global_rows(), diag=1.0)
             elif isinstance(t, Vector):
                 with t._v as a:
@@ -1144,7 +1196,7 @@ def apply_bc(bc, *tensors):
 def interpolate(f, V, out=None):
     """dolfin.interpolate(f, V), into out (a Function on V, made if None)."""
     out = Function(V) if out is None else out
-    fem.Function.interpolate(out, _interpolant(f))
+    _interpolate(out, _interpolant(f))
     return out.restrict()
 
 

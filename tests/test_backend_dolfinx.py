@@ -37,6 +37,8 @@ def _check(r):
     assert r["n_unique"] == 72              # 81 nodes, the 9 on x = 1 slaves
     assert r["bc_rows"] == 5                # y = 0, x >= 1/2: 5 masters
     assert r["poisson"] < 1e-3
+    assert r["interpolate_vs_dolfinx"] < 1e-14
+    assert r["expressions_share_space"] and r["sub_made_once"]
 
 
 def test_one_rank(tmp_path):

@@ -40,12 +40,29 @@ import numpy as np
 from femtools.hdf5_rows import write_ordered
 
 
-def _offsets(comm, n):
-    """(this rank's first row, every rank's first row) for n rows a rank, rank order."""
+def _first(comm, n):
+    """This rank's first row for n rows a rank, rank order: one buffer Exscan."""
     from mpi4py import MPI
-    first = comm.exscan(int(n), op=MPI.SUM) if comm.Get_size() > 1 else 0
-    first = 0 if first is None else int(first)
-    return first, np.asarray(comm.allgather(first), dtype=np.uint64)
+    before = np.zeros(1, dtype=np.int64)
+    comm.Exscan(np.array([int(n)], dtype=np.int64), before, op=MPI.SUM)
+    return 0 if comm.Get_rank() == 0 else int(before[0])
+
+
+def _total(comm, n):
+    """n summed over the ranks: one buffer Allreduce."""
+    from mpi4py import MPI
+    out = np.zeros(1, dtype=np.int64)
+    comm.Allreduce(np.array([int(n)], dtype=np.int64), out, op=MPI.SUM)
+    return int(out[0])
+
+
+def _offsets(comm, n):
+    """(this rank's first row, every rank's first row) for n rows a rank, rank order: the
+    second is dolfin's `partition` attribute, which every rank writes alike."""
+    first = _first(comm, n)
+    every = np.empty(comm.Get_size(), dtype=np.int64)
+    comm.Allgather(np.array([first], dtype=np.int64), every)
+    return first, every.astype(np.uint64)
 
 
 def write_mesh_rows(path, name, comm, vertex_rows, x, n_vertices, cells, cell_ids, n_cells,
@@ -105,8 +122,12 @@ def _fingerprint(comm, gc, dofs):
     and another for another numbering (another number of ranks, or partition)."""
     n = dofs.shape[1] if dofs.ndim == 2 else 0
     key = gc[:, None] * np.uint64(n + 1) + np.arange(n, dtype=np.uint64)
-    mine = int(_mix(_mix(key) ^ dofs.astype(np.uint64)).sum(dtype=np.uint64))
-    return np.uint64(sum(comm.allgather(mine)) % (1 << 64))
+    from mpi4py import MPI
+    mine = np.array([_mix(_mix(key) ^ dofs.astype(np.uint64)).sum(dtype=np.uint64)],
+                    dtype=np.uint64)
+    total = np.zeros(1, dtype=np.uint64)
+    comm.Allreduce(mine, total, op=MPI.SUM)        # unsigned: wraps modulo 2^64
+    return np.uint64(total[0])
 
 
 def _write_tables(path, name, comm, n_c, gc, dofs, mode):
@@ -114,9 +135,9 @@ def _write_tables(path, name, comm, n_c, gc, dofs, mode):
     own, n = dofs.shape if dofs.ndim == 2 else (0, 0)
     local = dofs.reshape(-1)
     lengths = np.full(own, n, dtype=np.uint64)
-    first, _ = _offsets(comm, own)
-    dof_first, _ = _offsets(comm, len(local))
-    n_dofs = comm.allreduce(len(local))
+    first = _first(comm, own)
+    dof_first = _first(comm, len(local))
+    n_dofs = _total(comm, len(local))
     x_rows = first + np.arange(own, dtype=np.int64)
     # in uint64 throughout: an int64 [0] beside a uint64 sum promotes to float64
     x_vals = np.uint64(dof_first) + np.concatenate(

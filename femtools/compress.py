@@ -268,34 +268,50 @@ def _copy(src, dst, names, comm=None):
                 comm.Barrier()
 
 
+def _check_meta(fi, fo, names):
+    """The first difference between src's and dst's structure, links, attributes and each
+    dataset's dtype, shape, maxshape and stored chunk count, or None."""
+    if _walk(fo, []) != names or not _same_attrs(fi.attrs, fo.attrs):
+        return "the structure or the file's attributes differ"
+    for kind, n, *_ in names:
+        if kind == "l":
+            continue
+        d, e = fi[n], fo[n]
+        if not _same_attrs(d.attrs, e.attrs):
+            return "{}'s attributes differ".format(n)
+        if kind == "g":
+            continue
+        if d.dtype != e.dtype or d.shape != e.shape or d.maxshape != e.maxshape:
+            return "{}: dtype, shape or maxshape differs".format(n)
+        if _raw(d) and d.id.get_num_chunks() != e.id.get_num_chunks():
+            return "{}: the number of stored chunks differs".format(n)
+    return None
+
+
 def _check(src, dst, names, comm=None):
     """The first difference between src and dst, or None: structure, links, attributes,
-    and every dataset's values, a stored-chunk dataset's stored bytes. With comm, each
-    rank compares its own share of the rows and chunks, and every rank gets the answer."""
+    and every dataset's values, a stored-chunk dataset's stored bytes. With comm, rank
+    zero compares the structure and the attributes (`_check_meta`), each rank its own
+    share of the rows and chunks, and every rank gets the answer."""
     import h5py
     rank, size = (0, 1) if comm is None else (comm.Get_rank(), comm.Get_size())
     bad = None
     with h5py.File(src, "r") as fi, h5py.File(dst, "r") as fo:
-        if _walk(fo, []) != names or not _same_attrs(fi.attrs, fo.attrs):
-            bad = "the structure or the file's attributes differ"
+        if rank == 0:
+            bad = _check_meta(fi, fo, names)
+        if comm is not None:
+            bad = comm.bcast(bad, root=0)
         for kind, n, *_ in ([] if bad else names):
-            if kind == "l":
+            if kind != "d":
                 continue
             d, e = fi[n], fo[n]
-            if not _same_attrs(d.attrs, e.attrs):
-                bad = "{}'s attributes differ".format(n)
-            elif kind == "g":
-                continue
-            elif d.dtype != e.dtype or d.shape != e.shape or d.maxshape != e.maxshape:
-                bad = "{}: dtype, shape or maxshape differs".format(n)
-            elif _raw(d):
-                if d.id.get_num_chunks() != e.id.get_num_chunks():
-                    bad = "{}: the number of stored chunks differs".format(n)
-                elif any(_chunk(d, i) != _chunk(e, i)
-                         for i in range(rank, d.id.get_num_chunks(), size)):
+            if _raw(d):
+                if any(_chunk(d, i) != _chunk(e, i)
+                       for i in range(rank, d.id.get_num_chunks(), size)):
                     bad = "{}: a stored chunk differs".format(n)
             elif d.ndim == 0 or d.size == 0:
-                if np.asarray(d[()]).tobytes() != np.asarray(e[()]).tobytes():
+                if rank == 0 and (np.asarray(d[()]).tobytes()
+                                  != np.asarray(e[()]).tobytes()):
                     bad = "{} differs".format(n)
             else:
                 for s in _pieces(e, comm):
@@ -327,9 +343,12 @@ def rewrite(path, comm=None, share=None):
     plain part has grown that much -- keeps the copying a few times the final size.
 
     With `comm`, collective, and every rank gets the result: through MPI-IO when h5py
-    has it (`hdf5_rows.mpio`), every rank copying and comparing its own share of each
-    dataset; otherwise, or for a file with variable-length data (which parallel HDF5
-    cannot write), by rank zero. A failure while the ranks write together aborts the job
+    has it (`hdf5_rows.mpio`), rank zero surveying the file and comparing its structure
+    and attributes, every rank copying and comparing its own share of each dataset;
+    otherwise, or for a file with variable-length data (which parallel HDF5 cannot write),
+    by rank zero. A filtered dataset's stored chunks are written by rank zero, the file
+    reopened serially: HDF5 1.10 under MPI-IO hangs when ranks write stored chunks of
+    one dataset each. A failure while the ranks write together aborts the job
     (`abort.aborting`), the copy removed."""
     from femtools.hdf5_rows import mpio
     share = WORTH_SHARE if share is None else float(share)
@@ -340,20 +359,15 @@ def rewrite(path, comm=None, share=None):
     return comm.bcast(_rewrite(path, None, share) if comm.Get_rank() == 0 else None, root=0)
 
 
-def _rewrite(path, comm, share=WORTH_SHARE):
-    """`rewrite` by this process alone (comm None), or by every rank of comm (MPI-IO)."""
+def _survey_for(path, share):
+    """`_rewrite`'s first look at path, read only: `(code, message)` when it is skipped or
+    cannot be read, else `(names, vlen, (atime_ns, mtime_ns, mode, size))`."""
     import os
-    import time
-    from femtools.abort import aborting
-    t = time.time()
-    tmp = path + SUFFIX
-    rank0 = comm is None or comm.Get_rank() == 0
     if os.path.islink(path):
         return SKIPPED, "a symlink"
     st = os.stat(path)
     if st.st_nlink > 1:
         return SKIPPED, "{} hard links".format(st.st_nlink)
-    # read only, and alike on every rank: what is refused here is answered, not raised
     try:
         names, plain, vlen = _survey(path)
     except Exception as e:                  # noqa: BLE001 -- reported; the original kept
@@ -361,12 +375,31 @@ def _rewrite(path, comm, share=WORTH_SHARE):
     if plain < max(WORTH_BYTES, share * st.st_size):
         return SKIPPED, ("nothing to compress" if plain == 0 else
                          "nothing worth compressing ({:.0f} KiB plain)".format(plain / 1024))
+    return names, vlen, (st.st_atime_ns, st.st_mtime_ns, st.st_mode, st.st_size)
+
+
+def _rewrite(path, comm, share=WORTH_SHARE):
+    """`rewrite` by this process alone (comm None), or by every rank of comm (MPI-IO),
+    rank zero alone looking at the file first (`_survey_for`)."""
+    import os
+    import time
+    from femtools.abort import aborting
+    t = time.time()
+    tmp = path + SUFFIX
+    rank0 = comm is None or comm.Get_rank() == 0
+    # read only: what is refused here is answered, not raised
+    first = _survey_for(path, share) if rank0 else None
+    if comm is not None:
+        first = comm.bcast(first, root=0)
+    if not isinstance(first[0], list):     # skipped, or unreadable
+        return first
+    names, vlen, (atime, mtime, mode, size) = first
     if comm is not None and vlen:
         return comm.bcast(_rewrite(path, None, share) if rank0 else None, root=0)
 
     def replace():
-        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
-        os.chmod(tmp, st.st_mode & 0o7777)
+        os.utime(tmp, ns=(atime, mtime))
+        os.chmod(tmp, mode & 0o7777)
         after = os.path.getsize(tmp)
         os.replace(tmp, path)
         return after
@@ -396,7 +429,7 @@ def _rewrite(path, comm, share=WORTH_SHARE):
     if bad:
         return 1, "NOT REPLACED: " + bad
     return 0, "{:.2f} -> {:.2f} GiB, x{:.2f}, {:.0f} s".format(
-        st.st_size / 2**30, after / 2**30, st.st_size / after, time.time() - t)
+        size / 2**30, after / 2**30, size / after, time.time() - t)
 
 
 def _one(path):

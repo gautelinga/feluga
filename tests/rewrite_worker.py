@@ -1,8 +1,9 @@
 """Worker for tests/test_compress.py: `compress.rewrite(path, comm)` on the ranks mpirun
 gives, of a file rank zero writes with plain, filtered, resizable, scalar and empty
 datasets, attributes, and soft and external links (and, with `vlen`, a variable-length string, which parallel HDF5
-cannot write: rank zero rewrites that file alone). Rank zero prints which way h5py wrote,
-the result, and `ok` when everything is kept and the plain datasets are compressed.
+cannot write: rank zero rewrites that file alone), rank zero alone surveying the file and
+walking its structure. Rank zero prints which way h5py wrote, the result, and `ok` when
+everything is kept and the plain datasets are compressed.
 
     mpirun -n 3 python3 tests/rewrite_worker.py OUT [vlen]
 """
@@ -43,8 +44,14 @@ def main(out, vlen=False):
             lzf = [(m, b) for _, m, b in compress._chunks(h["lzf"])]
         os.utime(p, (1e9, 1e9))
     comm.Barrier()
+    looked = []                         # the file surveyed and walked on rank zero alone
+    survey, walk = compress._survey, compress._walk
+    compress._survey = lambda *args: looked.append("survey") or survey(*args)
+    compress._walk = lambda *args: looked.append("walk") or walk(*args)
     code, what = compress.rewrite(p, comm)
+    compress._survey, compress._walk = survey, walk
     assert comm.allgather((code, what)) == [(code, what)] * comm.size
+    assert bool(looked) == (comm.rank == 0), looked
     if comm.rank:
         return
     print("mpio" if hdf5_rows.mpio(comm) else "gather")

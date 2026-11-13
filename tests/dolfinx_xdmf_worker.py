@@ -136,6 +136,21 @@ def read_dolfinx(folder, out):
                 d = np.abs(u.x.array[U.owned_unique] - (1 + k) * base)
                 errs.append(comm.allreduce(float(d.max()) if d.size else 0.0, op=MPI.MAX))
         res[name] = max(errs)
+    # read at the nodes of the spaces above: no plain space made
+    from femtools.dolfinx import xdmf_read
+    res["plain_spaces"] = len(xdmf_read._PLAIN)
+    # onto another degree, through a plain space of the file's: the P2 field's values at
+    # the P1 nodes, its own
+    V1 = fem.functionspace(msh, ("Lagrange", 1))
+    X = V1.tabulate_dof_coordinates()
+    errs = []
+    for prefix in ("x_", "d_"):
+        u = fem.Function(V1)
+        read_nodal(os.path.join(folder, prefix + "s2.xdmf"), "s2", 0, u)
+        d = np.abs(u.x.array - f(X[:, 0], X[:, 1]))
+        errs.append(comm.allreduce(float(d.max()) if d.size else 0.0, op=MPI.MAX))
+    res["s2_into_P1"] = max(errs)
+    res["plain_spaces_after"] = len(xdmf_read._PLAIN)
     if comm.rank == 0:
         with open(out, "w") as fh:
             json.dump(res, fh)

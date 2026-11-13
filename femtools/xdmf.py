@@ -57,10 +57,11 @@ know rather than silently ignoring it.
 
 `read_checkpoint` reads dolfin's own checkpoints -- which already round-trip a P2
 function exactly, so those are handed straight to dolfin -- *and* the quadratic
-visualisation grids written here, which dolfin cannot read at all. That reconstruction
-goes via an unconstrained space and then interpolates onto whatever space the caller's
-Function lives in, so it is safe for a periodic space, where matching dof coordinates
-is not.
+visualisation grids written here, which dolfin cannot read at all. Onto Lagrange of the
+grid's degree, periodic or not, each owned dof takes the value at the node of its vertex
+or edge (a periodic slave's and master's nodes hold the same value); onto any other space
+the field goes via an unconstrained space of the grid's degree and is interpolated from
+there.
 
 Every dataset is shuffled and gzipped (`femtools.compress`), and written from every
 rank's own rows (`hdf5_rows.write_rows`): nothing is gathered. With h5py's MPI build
@@ -1097,11 +1098,11 @@ class XDMFFile2(object):
         dolfin's reader knows only its own checkpoint format. If the file instead
         holds visualisation grids -- P1 (`Triangle`, `Tetrahedron`, `PolyLine`) or P2
         (`Triangle_6`, `Tetrahedron_10`, `Edge_3`), the field at the nodes, which
-        dolfin cannot read at all -- the field is rebuilt from the nodes onto an
-        unconstrained space of the grid's degree, and then interpolated onto
-        whatever space `u` lives in, of any degree (fast_interpolation). Going
-        through the unconstrained space is what makes it safe for a periodic one,
-        where matching dof coordinates does not line up node for node.
+        dolfin cannot read at all -- the field is read at the nodes of `u`'s space when
+        it is Lagrange of the grid's degree, periodic or not (`_read_into`): each owned
+        dof takes the value at its vertex or edge midpoint. Onto any other space it is
+        read into an unconstrained space of the grid's degree and interpolated from
+        there (fast_interpolation).
 
         `counter` defaults to -1 -- the last stored step -- because that is dolfin's
         default; a drop-in defaulting to the first step would hand back the wrong
@@ -1133,15 +1134,12 @@ class XDMFFile2(object):
         degree = _NODAL_DEGREE[grid['topology']]
         width = int(np.prod(u.value_shape())) if len(u.value_shape()) else 1
         mesh = V.mesh()
-        # The nodes are read into an unconstrained space and interpolated onto V,
-        # which is right for a periodic V too, where matching dof coordinates is
-        # not. When V is that unconstrained space they are read into it directly.
-        if _is_plain(V, mesh, degree, width):
-            _scatter_nodes(u, V, self.path, grid, name, width, degree)
+        if _at_nodes(V, degree):
+            _read_into(u, self.path, grid, name, width, degree, self._nodes)
             return u
         plain = _plain_space(mesh, degree, width, self._nodes)
         target = df.Function(plain)
-        _scatter_nodes(target, plain, self.path, grid, name, width, degree)
+        _read_into(target, self.path, grid, name, width, degree, self._nodes)
         fast_interpolate(target, V, out=u)
         return u
 
@@ -1429,9 +1427,10 @@ def _plain_space(mesh, degree, width, cache):
     """An unconstrained Lagrange space, built once per mesh, degree and width and kept in
     `cache`, which is a file's (`XDMFFile2._nodes`) and goes when the file closes.
 
-    Reading needs one (`_read_nodal`): the file's nodes are matched to its distinct dof
-    coordinates and the field interpolated from it onto the caller's space. Writing
-    reads a field's own dofs (`_node_dofs`) and builds none. A series read step by step
+    A read onto a space whose dofs are not at the grid's nodes needs one (`_read_nodal`:
+    another degree, or a mixed space's component): the field is read into it and
+    interpolated from it onto the caller's space. A read onto Lagrange of the grid's
+    degree, periodic or not, and every write, build none. A series read step by step
     builds it once; it goes with the file rather than with the process, since the space
     and its transfers (`fast_interpolation`) are as large as the field's.
     """
@@ -1463,24 +1462,13 @@ def _release_plain(cache):
         drop()
 
 
-def _is_plain(V, mesh, degree, width):
-    """Whether a space is already unconstrained Lagrange of this degree and width.
-
-    A periodic space identifies its slave dofs with masters, so it is strictly
-    smaller than the unconstrained one; comparing the dimensions is therefore an
-    exact test and not a heuristic. When it holds, a file's nodes can be read straight
-    into the field's own dofs (`_read_nodal`) and neither a new space nor an
-    interpolation is needed.
-    """
+def _at_nodes(V, degree):
+    """Whether V's dofs sit at the nodes of a grid of `degree`, one a component: V is
+    continuous Lagrange of that degree, scalar, vector or tensor, a whole space (not a
+    mixed space's component), periodic or not."""
     element = V.ufl_element()
-    if element.family() not in ('Lagrange', 'P', 'CG') or element.degree() != degree:
-        return False
-    n = mesh.num_entities_global(0)
-    if degree == 2:
-        mesh.init(1)
-        mesh.init_global(1)
-        n += mesh.num_entities_global(1)
-    return V.dim() == n * width
+    return (element.family() in ('Lagrange', 'P', 'CG') and element.degree() == degree
+            and not len(V.component()))
 
 
 def _split_cell_tags(objects):
@@ -1929,33 +1917,53 @@ def read_nodes_at(path, grid, name, x, comm):
     return found
 
 
-def _scatter_nodes(target, space, path, grid, name, width, degree):
-    """Puts the nodal values of grid's attribute `name` onto an unconstrained space's
-    dofs, matched by position (`read_nodes_at`).
+def _owned_nodes(V, degree, width):
+    """`(x, dofs)`: one position for each node whose dofs this rank owns -- a vertex, or
+    at degree 2 an edge's midpoint, carrying them (`_at_nodes`) -- and those local dofs,
+    a column a component. A periodic V gives a slave entity its master's dofs, and either
+    one's position serves: the file holds the field on both sides of the period. Refused
+    on every rank when the owned dofs are not one a component at each node."""
+    from femtools.hdf5_rows import agreed
+    mesh = V.mesh()
+    x = np.asarray(mesh.coordinates())
+    dofs = [_entity_dofs(V.dofmap(), mesh, 0).reshape(-1, width)]
+    if degree == 2:
+        mesh.init(1)
+        dofs.append(_entity_dofs(V.dofmap(), mesh, 1).reshape(-1, width))
+        ends = _connectivity(mesh, 1)
+        x = np.vstack((x, 0.5 * (x[ends[:, 0]] + x[ends[:, 1]])))
+    dofs = np.vstack(dofs)
+    lo, hi = V.dofmap().ownership_range()
+    n_owned = hi - lo
+    mine = np.nonzero(dofs[:, 0] < n_owned)[0]
+    _, first = np.unique(dofs[mine, 0], return_index=True)
+    pick = mine[first]
+    bad = len(dofs) != len(x) or len(pick) * width != n_owned \
+        or bool((dofs[pick] >= n_owned).any())
+    if agreed(mesh.mpi_comm(), bad):
+        raise ValueError('the owned dofs of {} are not one a component at each node'
+                         .format(V.ufl_element()))
+    return np.ascontiguousarray(x[pick]), dofs[pick]
 
-    The space is unconstrained, so its dof coordinates are distinct and a nearest
-    match is unambiguous -- which is exactly what is *not* true of a periodic space,
-    and why the caller interpolates from here rather than writing into one directly.
-    Collective.
-    """
+
+def _read_into(target, path, grid, name, width, degree, cache):
+    """The nodal values of grid's attribute `name` into the owned dofs of `target`, whose
+    space has its dofs at the grid's nodes (`_at_nodes`), matched by position
+    (`read_nodes_at`), ghosts updated after. Where the dofs are is kept in `cache` (the
+    file's, by the space's id and the degree) for a series read step by step.
+    Collective."""
+    space = target.function_space()
     mesh = space.mesh()
     comm = mesh.mpi_comm() if mesh.mpi_comm().Get_size() > 1 else None
-    # `dofmap().dofs()` numbers dofs globally, while `tabulate_dof_coordinates` and
-    # `get_local` hold this rank's owned rows: the global numbers are made local
-    first = space.dofmap().ownership_range()[0]
-    gdim = mesh.geometry().dim()
-    if width > 1:
-        sub_dofs = [np.asarray(space.sub(c).dofmap().dofs()) - first
-                    for c in range(width)]
-        x = space.tabulate_dof_coordinates().reshape(-1, gdim)[sub_dofs[0]]
-    else:
-        sub_dofs = [np.asarray(space.dofmap().dofs()) - first]
-        x = space.tabulate_dof_coordinates().reshape(-1, gdim)
+    key = ('read', space.id(), degree)
+    if key not in cache:
+        cache[key] = _owned_nodes(space, degree, width)
+    x, dofs = cache[key]
     found = read_nodes_at(path, grid, name, x, comm)
     vector = target.vector()
     local = vector.get_local()
-    for c, dofs in enumerate(sub_dofs):
-        local[dofs] = found[:, c]
+    for c in range(width):
+        local[dofs[:, c]] = found[:, c]
     vector.set_local(local)
     vector.apply('insert')
 

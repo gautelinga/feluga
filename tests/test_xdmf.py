@@ -803,16 +803,15 @@ def test_split_component_written_as_collapsed(monkeypatch):
 
 def test_periodic_write_lets_go_on_close():
     """what a file builds for its fields is its own, kept across its steps and let go of
-    when it closes
+    when it closes; a read into a space of the grid's degree, periodic too, builds no
+    space and no transfer, and a read into another degree builds them for the file
 
     A write keeps its node layout and each space's node dofs for the next step, and
     holds no unconstrained space and no transfer at all
-    (`test_periodic_write_builds_no_transfer`). A read into a periodic space still goes
-    through an unconstrained one and a transfer from it (`read_checkpoint`), and those
-    are the file's too. Held module-wide, they outlived every file: a Stokes tensor
-    solve writing each direction between its solves carried them into the next solves,
-    and at 224 M dofs that took the job past its node's memory (stokes-beadpack,
-    2026-11-12).
+    (`test_periodic_write_builds_no_transfer`). Held module-wide, they outlived every
+    file: a Stokes tensor solve writing each direction between its solves carried them
+    into the next solves, and at 224 M dofs that took the job past its node's memory
+    (stokes-beadpack, 2026-11-12).
     """
     from femtools import fast_interpolation
     mesh = unit_mesh(4, 'triangle')
@@ -833,24 +832,31 @@ def test_periodic_write_lets_go_on_close():
     f.close()
     assert not f._nodes, 'the file still holds its node layout after close'
 
-    g = XDMFFile2(df.MPI.comm_world, tmp('letgo.xdmf'))
+    r = XDMFFile2(df.MPI.comm_world, tmp('letgo.xdmf'))
     back = df.Function(V)
-    g.read_checkpoint(back, 'u', 0)
-    plain = [v for k, v in g._nodes.items() if k[:1] == ('plain',)]
-    assert len(plain) == 1, 'no unconstrained space kept for the read'
+    r.read_checkpoint(back, 'u', 0)
+    assert not [k for k in r._nodes if k[:1] == ('plain',)], \
+        'a read into the grid\'s degree built an unconstrained space'
+    assert set(fast_interpolation._TRANSFERS) == before, 'a read built a transfer'
+    assert_close(back.vector().get_local(), u.vector().get_local(), 1e-14, 'read back')
+    W = df.VectorFunctionSpace(mesh, 'CG', 1, constrained_domain=periodic_x())
+    linear = df.Function(W)
+    r.read_checkpoint(linear, 'u', 0)
+    plain = [val for k, val in r._nodes.items() if k[:1] == ('plain',)]
+    assert len(plain) == 1, 'no unconstrained space kept for the read into P1'
     made = set(fast_interpolation._TRANSFERS) - before
     assert made, 'no transfer made from the unconstrained space'
-    g.read_checkpoint(back, 'u', 1)
-    assert [v for k, v in g._nodes.items() if k[:1] == ('plain',)] == plain, \
+    r.read_checkpoint(linear, 'u', 1)
+    assert [val for k, val in r._nodes.items() if k[:1] == ('plain',)] == plain, \
         'a second read built its space again'
     assert set(fast_interpolation._TRANSFERS) - before == made, \
         'a second read built its transfer again'
-    g.close()
-    assert not g._nodes, 'the file still holds its spaces after close'
+    r.close()
+    assert not r._nodes, 'the file still holds its spaces after close'
     assert not set(fast_interpolation._TRANSFERS) & made, 'its transfers outlived the file'
-    # and what it wrote is still the field
-    assert_close(back.vector().get_local(), u.vector().get_local(), 1e-14, 'read back')
-    print('two steps written with no space or transfer; the read\'s {} transfer(s) '
+    assert_close(linear.vector().get_local(),
+                 df.interpolate(u, W).vector().get_local(), 1e-14, 'read into P1')
+    print('two steps written with no space or transfer; the P1 read\'s {} transfer(s) '
           'gone after close'.format(len(made)))
 
 
@@ -1053,13 +1059,12 @@ def test_read_vector_back(cell):
 
 @CELLS
 def test_read_into_periodic(cell):
-    """a periodic space reads back, where coordinate matching does not
+    """a periodic space reads back, where matching dof coordinates does not
 
     DESIGN-NOTES.md, "Reading the flow back", records two failed attempts at matching
-    periodic dof coordinates.
-
-    The read path goes through an unconstrained space and interpolates, so it is
-    unaffected -- this is the case that would catch a rewrite that stopped doing so.
+    periodic dof coordinates: a slave's coordinates are not its dof's. The read takes
+    each owned dof's value at the node of a vertex or edge carrying it, a slave's or
+    its master's, which hold the same value in the file.
     """
     class Periodic(df.SubDomain):
         def inside(self, x, on_boundary):
@@ -1082,8 +1087,8 @@ def test_read_into_periodic(cell):
         f.read_checkpoint(back, 'u', 0)
     assert V.dim() < df.FunctionSpace(mesh, 'CG', 2).dim(), \
         'the constrained space is not actually smaller, so this proves nothing'
-    assert_close(back.vector().get_local(), u.vector().get_local(), 1e-12,
-                 'periodic round trip')
+    assert np.array_equal(back.vector().get_local(), u.vector().get_local()), \
+        'periodic round trip'
     print('{} constrained dofs of {} unconstrained, exact'.format(V.dim(), df.FunctionSpace(mesh, 'CG', 2).dim()))
 
 
@@ -1316,6 +1321,74 @@ if df.MPI.rank(C) == 0:
     with open(path, 'w') as handle:
         handle.write(script)
     proc = support.run([sys.executable, path, tmp('quad_par.xdmf')], 3, timeout=600)
+    assert proc.stdout.strip().endswith('ok'), proc.stdout + proc.stderr
+
+
+READ_PERIODIC = """
+import sys
+import numpy as np, dolfin as df
+from femtools import xdmf
+from femtools.xdmf import XDMFFile2
+from femtools.periodic import periodic_box_from_bounds
+df.set_log_level(40)
+C = df.MPI.comm_world
+mesh = df.UnitCubeMesh(C, 4, 3, 5)
+box = periodic_box_from_bounds({0: (0.0, 1.0)})
+V = df.VectorFunctionSpace(mesh, 'CG', 2, constrained_domain=box)
+P = df.FunctionSpace(mesh, 'CG', 1, constrained_domain=box)
+u = df.interpolate(df.Expression(('cos(2*pi*x[0])*x[1]', 'sin(2*pi*x[0])*x[2]', 'x[2]*x[2]'),
+                                 degree=2), V)
+p = df.interpolate(df.Expression('cos(2*pi*x[0]) + x[1]', degree=1), P)
+u.rename('u', 'u')
+p.rename('p', 'p')
+if sys.argv[1] == 'write':
+    with XDMFFile2(C, sys.argv[2]) as f:
+        f.parameters['rewrite_function_mesh'] = False
+        f.write((u, p), 0.0)
+        f.write((u, p), 1.0)
+    sys.exit(0)
+ok = True
+
+
+def close(a, b):
+    return bool(np.abs(a.vector().get_local() - b.vector().get_local()).max(initial=0)
+                < 1e-14)
+
+
+with XDMFFile2(C, sys.argv[2]) as f:
+    back = df.Function(V)
+    f.read_checkpoint(back, 'u', 1)
+    ok &= close(back, u)
+    ok &= not [k for k in f._nodes if k[:1] == ('plain',)]
+    # P1 from the quadratic grid (the pressure was carried onto its nodes), through an
+    # unconstrained P2 space
+    back = df.Function(P)
+    f.read_checkpoint(back, 'p', 1)
+    ok &= close(back, p)
+    W = df.VectorFunctionSpace(mesh, 'CG', 1, constrained_domain=box)
+    low = df.Function(W)
+    f.read_checkpoint(low, 'u', 0)
+    ok &= close(low, df.interpolate(u, W))
+    ok &= len([k for k in f._nodes if k[:1] == ('plain',)]) == 2
+ok = C.allreduce(int(ok), op=__import__('mpi4py').MPI.MIN)
+if df.MPI.rank(C) == 0:
+    print('ok' if ok else 'FAILED')
+"""
+
+
+@pytest.mark.mpi
+@pytest.mark.parametrize('ranks', [2, 3])
+def test_periodic_read_at_the_nodes_on_other_ranks(ranks):
+    """a periodic P2 vector written on three ranks reads back on two and on three at its
+    own nodes, no unconstrained space made; P1 spaces from the quadratic grid through
+    one"""
+    script = os.path.join(TMP, 'read_periodic.py')
+    with open(script, 'w') as handle:
+        handle.write(READ_PERIODIC)
+    path = tmp('read_periodic_{}.xdmf'.format(ranks))
+    env = {'PYTHONPATH': os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}
+    support.run([sys.executable, script, 'write', path], 3, timeout=600, env=env)
+    proc = support.run([sys.executable, script, 'read', path], ranks, timeout=600, env=env)
     assert proc.stdout.strip().endswith('ok'), proc.stdout + proc.stderr
 
 

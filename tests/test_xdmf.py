@@ -1135,27 +1135,70 @@ def _whole_tree_xml(doc):
 def test_saved_xml_is_the_whole_tree_after_every_write(share):
     """a grid at a time, appended in place: after every write the file is the whole
     tree's XML -- a static grid first, steps, steps sharing a grid, a grid after the
-    series, and a file changed behind the writer's back"""
+    series, and a file changed behind the writer's back -- and the file of a writer that
+    releases its complete steps (the default) is the same, byte for byte"""
     mesh = unit_mesh(2)
     u, p = quadratic_field(mesh, 'u'), quadratic_field(mesh, 'p')
     mf = df.MeshFunction('size_t', mesh, 2, 0)
     mf.rename('m', 'm')
-    path = tmp('saves_{}.xdmf'.format(share))
-    with XDMFFile2(df.MPI.comm_world, path) as f:
+    paths = []
+    for tag in ('kept', 'released'):
+        os.makedirs(tmp(tag), exist_ok=True)
+        paths.append(tmp(os.path.join(tag, 'saves_{}.xdmf'.format(share))))
+    files = [XDMFFile2(df.MPI.comm_world, path) for path in paths]
+    for f in files:
         f.parameters['functions_share_mesh'] = share
+        f.parameters['rewrite_function_mesh'] = False
+    files[0]._document(None).release = False
+    kept, released = files
+
+    def same():
+        text = open(paths[0]).read()
+        assert text == _whole_tree_xml(kept._doc)
+        assert open(paths[1]).read() == text
+
+    for f in files:
         f.write(mf)
-        for k in range(4):
+    for k in range(4):
+        for f in files:
             f.write(u, float(k))
             f.write(p, float(k))
-            assert open(path).read() == _whole_tree_xml(f._doc), k
-            if k == 1:
+        same()
+        if k == 1:
+            for path in paths:
                 with open(path, 'a') as handle:     # someone else's edit: rewritten
                     handle.write(' ')
+    assert released._doc._dropped > 0 and len(released._doc.series) < len(kept._doc.series)
+    for f in files:
         f.write(mesh)
-        assert open(path).read() == _whole_tree_xml(f._doc)
+    same()
+    for f in files:
         f.write(u, 9.0)
-        assert open(path).read() == _whole_tree_xml(f._doc)
-    assert not os.path.exists(path + '.tmp')
+    same()
+    for f in files:
+        f.close()
+    for path in paths:
+        assert not os.path.exists(path + '.tmp')
+    assert open(paths[0]).read() == open(paths[1]).read()
+
+
+def test_released_steps_changed_on_disk_are_refused():
+    """a file rewritten whole takes its released steps from the file on disk, checked:
+    changed there, they are refused rather than written as found"""
+    mesh = unit_mesh(2)
+    u = quadratic_field(mesh, 'u')
+    path = tmp('released_changed.xdmf')
+    f = XDMFFile2(df.MPI.comm_world, path)
+    f.parameters['rewrite_function_mesh'] = False
+    for k in range(3):
+        f.write(u, float(k))
+    text = open(path).read()
+    at = text.index('Value="')
+    with open(path, 'w') as handle:          # the first step's time changed in place
+        handle.write(text[:at] + text[at:].replace('0.000', '7.000', 1) + ' ')
+    with pytest.raises(RuntimeError, match='changed on disk'):
+        f.write(mesh)
+    f._doc = None
 
 
 def test_read_delegates():

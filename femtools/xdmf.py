@@ -249,6 +249,14 @@ class XdmfDocument(object):
         self._changed = set()       # top-level grids added to since the last save
         self._step = {}             # time step -> its place in the series
         self._saved = None          # what the file on disk holds, for appending
+        # A time series grows by a grid a step, which no rank need hold once it is
+        # complete (`seal`) and, on rank zero, written: `release` drops such steps from
+        # the tree after each save. Rank zero keeps a hash of their text, so that a file
+        # rewritten whole takes them from the file on disk, checked (`_released_text`).
+        self.release = True
+        self._sealed = 0            # the time steps before this one are complete
+        self._dropped = 0           # the time steps released, all before the others
+        self._region = None         # rank zero: the hash of the released steps' text
 
     # -- HDF5 ------------------------------------------------------------------
 
@@ -308,11 +316,14 @@ class XdmfDocument(object):
                 self.driver = 'serial'
         return self._h5
 
-    def rows(self, group, rows, values, n_global):
+    def rows(self, group, rows, values, n_global, plans=None):
         """One global dataset: row `rows[i]` is `values[i]`, from every rank's rows
         (`hdf5_rows.write_rows`: moved to chunk-aligned blocks, each written by its
         rank). The file's rows are in global order, so the file is the same however many
         ranks wrote it, as `dolfin.XDMFFile`'s node coordinates are. Collective.
+
+        `plans`: a dict kept beside `rows`, for rows written again and again, in which
+        their routing to the writing ranks is kept (`hdf5_rows.write_rows`).
 
         The `partition` attribute is dolfin's, and is written so that dolfin's own
         reader finds a file of ours exactly as it finds one of its own. Returns the
@@ -322,7 +333,7 @@ class XdmfDocument(object):
         if h5 is not None and group in h5:
             del h5[group]
         write_rows(h5, group, rows, np.ascontiguousarray(values), int(n_global), self.comm,
-                   attrs={'partition': np.array([0], dtype=np.uint64)})
+                   attrs={'partition': np.array([0], dtype=np.uint64)}, plans=plans)
         return '{}:/{}'.format(self.h5_name, group)
 
     def slab(self, group, offset, values, n_global):
@@ -370,7 +381,7 @@ class XdmfDocument(object):
             self._top[node] = node
             self._changed.add(node)
             if parent is not None:
-                self._step[node] = len(parent) - 1
+                self._step[node] = self._dropped + len(parent) - 1
             return node
         return self._sub(parent, 'Grid', attrib)
 
@@ -410,6 +421,12 @@ class XdmfDocument(object):
         """A `<Time>`, and the temporal collection it has to live in."""
         self._sub(grid, 'Time', {'Value': '{:.15e}'.format(float(value))})
 
+    def seal(self):
+        """Every time step so far is complete: nothing more is added to it, and after the
+        next save it is released from the tree (`release`)."""
+        if self.series is not None:
+            self._sealed = self._dropped + len(self.series)
+
     def collection(self):
         """The temporal collection dolfin puts every timed grid inside."""
         if self.series is None:
@@ -427,22 +444,30 @@ class XdmfDocument(object):
 
     def save(self):
         """The XML, written by rank zero (every rank builds the tree -- that is what
-        keeps the dataset names in step -- but they must not all write the file).
+        keeps the dataset names in step -- but they must not all write the file); then
+        the complete time steps released (`seal`).
 
         The same text `ET.indent` and `ET.tostring` give the whole tree, built from each
         top-level grid's text, kept until something is added to the grid. When only time
         steps changed since the last save -- new ones, or the last ones added to -- the
         file on disk is rewritten in place from the first of them on, in one write: a
         save costs what changed, not the whole series. Otherwise it is written beside
-        and renamed over, so a job killed while saving leaves the last complete XML."""
+        and renamed over, so a job killed while saving leaves the last complete XML; the
+        released steps' text is then taken from the file it replaces."""
         changed, self._changed = self._changed, set()
-        if self.rank != 0:
-            return
+        if self.rank == 0:
+            self._write(changed)
+        self._release()
+
+    def _write(self, changed):
         saved = self._saved
+        size = _file_size(self.path)
+        if saved is not None and not changed and size == saved['size']:
+            return
         first = None
         if (saved is not None and changed and all(g in self._step for g in changed)
-                and _file_size(self.path) == saved['size']):
-            first = min(self._step[g] for g in changed)
+                and size == saved['size']):
+            first = min(self._step[g] for g in changed) - self._dropped
         if first is not None:
             at = saved['steps_at'][first] if first < len(saved['steps_at']) else saved['at']
             texts = [self._grid_text(g, 3) for g in self.series[first:]]
@@ -457,8 +482,11 @@ class XdmfDocument(object):
                 at += len(t.encode())
             saved['at'], saved['size'] = at, at + len(saved['tail'])
             return
+        released = self._released_text() if self._dropped else b''
         head, steps, tail = self._parts()
         data = head.encode()
+        start = len(data)
+        data += released
         steps_at = []
         for t in steps:
             steps_at.append(len(data))
@@ -468,8 +496,45 @@ class XdmfDocument(object):
         with open(tmp, 'wb') as handle:
             handle.write(data + tail)
         os.replace(tmp, self.path)
-        self._saved = dict(steps_at=steps_at, at=len(data), tail=tail,
+        self._saved = dict(start=start, steps_at=steps_at, at=len(data), tail=tail,
                            size=len(data) + len(tail))
+
+    def _released_text(self):
+        """The released steps' text, read from the file on disk where the last save put
+        it, and checked against the hash of what was released."""
+        import hashlib
+        saved = self._saved
+        end = saved['steps_at'][0] if saved['steps_at'] else saved['at']
+        data = b''
+        if os.path.exists(self.path):
+            with open(self.path, 'rb') as handle:
+                handle.seek(saved['start'])
+                data = handle.read(end - saved['start'])
+        if hashlib.sha1(data).digest() != self._region.digest():
+            raise RuntimeError(
+                '{}: the {} time steps written before were changed on disk, and this '
+                'writer no longer holds them'.format(self.path, self._dropped))
+        return data
+
+    def _release(self):
+        """The sealed time steps dropped from the tree, rank zero's once on disk."""
+        import hashlib
+        k = self._sealed - self._dropped
+        if not self.release or self.series is None or k <= 0:
+            return
+        if self.rank == 0:
+            if self._region is None:
+                self._region = hashlib.sha1()
+            for step in self.series[:k]:
+                self._region.update(self._grid_text(step, 3).encode())
+            del self._saved['steps_at'][:k]
+        for step in list(self.series[:k]):
+            for node in step.iter():
+                self._top.pop(node, None)
+            self._text.pop(step, None)
+            self._step.pop(step, None)
+            self.series.remove(step)
+        self._dropped += k
 
     def _grid_text(self, node, level):
         """A top-level grid's XML at its level of indentation, kept while unchanged."""
@@ -613,6 +678,7 @@ class XDMFFile2(object):
         self._grids = {}            # (mesh id, degree, time) -> grid element
         self._stored = {}           # (mesh id, degree) -> (topology ref, geometry ref)
         self._nodes = {}            # what a field's write takes of its mesh and space
+        self._time = None           # the time of the last timed write
         self._delegate = None       # a real dolfin.XDMFFile, for checkpoints
         self._mesh = None           # the last mesh seen, for a MeshValueCollection
 
@@ -772,6 +838,9 @@ class XDMFFile2(object):
         `Mesh/0`, `VisualisationVector/3` -- in step across ranks. They have to be,
         because creating a dataset is a collective operation and the ranks must agree
         on its name.
+
+        A write at a new time completes the steps before it (`XdmfDocument.seal`): with
+        `functions_share_mesh`, functions join a grid of the current time only.
         """
         if not functions:
             raise ValueError('nothing to write')
@@ -782,6 +851,11 @@ class XDMFFile2(object):
         conn, n_nodes, n_cells = info['conn'], info['n_nodes'], info['n_cells']
         topology_type = XDMF_TOPOLOGY[(mesh.ufl_cell().cellname(), conn.shape[1])]
 
+        if time is not None and time != self._time:
+            if self._time is not None:
+                doc.seal()
+                self._grids = {k: g for k, g in self._grids.items() if k[2] is None}
+            self._time = time
         key = (mesh.id(), degree, time)
         grid = self._grids.get(key) if self.parameters['functions_share_mesh'] else None
         if grid is None:

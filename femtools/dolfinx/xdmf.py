@@ -11,7 +11,7 @@ edge at its midpoint, each with the field's value there -- a periodic field on t
 mesh, both sides of the period. The mesh is stored once, every step pointing at it (as
 twoasis has XDMFFile2 write its series: `rewrite_function_mesh` off), and the XML and
 HDF5 are flushed after each step. Every rank writes its own cells and the nodes it owns
-(`XdmfDocument.rows`): nothing is gathered.
+(`XdmfDocument.rows`): nothing is gathered. No rank keeps the XML of written steps.
 
 Node numbers are DOLFINx's (global vertex and edge indices), not dolfin's; a reader
 matches nodes by position (`XDMFFile2.read_checkpoint`), so it does not care. A node's
@@ -155,6 +155,7 @@ class XDMFSeries:
         ref = doc.rows("VisualisationVector/{}".format(doc._next("VisualisationVector")),
                        L.rows, values, L.n_nodes)
         doc.attribute(grid, u.name, values, "Node", ref=ref, shape=(L.n_nodes, values.shape[1]))
+        doc.seal()                 # the step is complete: no rank holds its XML after
         doc.flush()
 
     def close(self):

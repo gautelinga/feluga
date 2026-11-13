@@ -5,7 +5,8 @@ On a rectangle (crossed diagonals, once and twice refined) and a box, periodic i
 prolongation of a P2 field is its fine P2 and P1 interpolant, the injection of a fine
 mixed field is its coarse P2 and P1 interpolant, R P is the identity -- all to rounding,
 on 1 and 3 ranks. A fine field written by its lattice on one backend and rank count is
-read back on the other backend and another rank count.
+read back on the other backend and another rank count. The matrices and the lattice
+are the same when built a few fine cells at a time.
 """
 import json
 import os
@@ -52,3 +53,4 @@ def test_across_ranks_and_backends(tmp_path):
     _check(_run("dolfinx", 3, tmp_path, "w"))
     _check(_run("dolfinx", 3, tmp_path, "r", tmp_path / "dolfin_1.h5"), read=True)
     _check(_run("dolfin", 2, tmp_path, "r", tmp_path / "dolfinx_3.h5"), read=True)
+

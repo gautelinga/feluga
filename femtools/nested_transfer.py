@@ -31,9 +31,16 @@ Built on `femtools.ufc` (barycentric coordinates, the Lagrange nodes and basis) 
 `femtools.tables` (a cell's vertices and dofs in UFC's order, as both backends'
 checkpoints write them). The children must stay on their parent's rank (`redistribute=False`, as
 `refine_uniformly` refines), so every matrix is built from local cells alone.
+
+Memory: a fine node lies in every fine cell around it, so
+nothing is evaluated per (fine cell, node). The prolongation evaluates the coarse basis
+once per owned fine dof, in the first local fine cell holding it; the injection and the
+lattice look at the fine cells a block at a time (`hierarchical_transfer.EVAL_CHUNK`)
+and keep only what they found, one entry per coarse dof or lattice point.
 """
 import numpy as np
 
+from femtools import hierarchical_transfer
 from femtools.hierarchical_transfer import compose
 from femtools.tables import is_dolfinx
 from femtools.ufc import barycentric_simplex, ufc_basis, ufc_nodes
@@ -131,6 +138,22 @@ def refine_uniformly(mesh, passes, upper, axes, lower=None):
     return fine, ancestors
 
 
+def _first_holder(dofs, lo, hi):
+    """For each dof in [lo, hi), the first (fine cell, node) of `dofs` (n_cells, n_nodes)
+    holding it, in the order of the cells and then of their nodes, as the flat index
+    cell * n_nodes + node; -1 where no cell holds it. A block of cells at a time, the
+    last block first, so that the first holder is assigned last."""
+    n_cells, n_nodes = dofs.shape
+    first = np.full(hi - lo, -1, dtype=np.int64)
+    chunk = max(1, hierarchical_transfer.EVAL_CHUNK)
+    for start in range(((n_cells - 1) // chunk) * chunk if n_cells else 0, -1, -chunk):
+        block = np.ravel(dofs[start:start + chunk])
+        at = np.flatnonzero((block >= lo) & (block < hi))[::-1]
+        # numpy assigns repeated indices in order: the last, the first holder, stays
+        first[block[at] - lo] = start * n_nodes + at
+    return first
+
+
 class Nested:
     """A coarse mesh and its uniform refinement by `passes` passes (`refine_uniformly`),
     `ancestors` mapping each of the fine mesh's local cells to its ancestor among the
@@ -139,47 +162,71 @@ class Nested:
     def __init__(self, coarse, fine, ancestors, passes):
         self.coarse, self.fine, self.passes = coarse, fine, int(passes)
         self.ancestors = np.asarray(ancestors, dtype=np.int64)
-        self._lam = {}
 
-    def _fine_nodes(self, tf, tc, degree):
+    def _check_ancestors(self, tf, tc):
+        """Raise on every rank unless every fine cell has an ancestor among the coarse
+        mesh's own cells. Collective."""
+        from femtools.hdf5_rows import agreed
+        if agreed(tf.comm, len(self.ancestors) != len(tf.x)):
+            raise ValueError("nested_transfer: as many ancestors as fine cells, on "
+                             "every rank")
+        if agreed(tf.comm, len(self.ancestors) and self.ancestors.max() >= len(tc.x)):
+            raise ValueError("nested_transfer: an ancestor beyond the coarse mesh's own "
+                             "cells (were the children redistributed?)")
+
+    def _fine_nodes(self, tf, tc, cells, degree):
         """The barycentric coordinates in their ancestor of the nodes of degree `degree`
-        of each fine cell, (n_fine, n_nodes, d+1). Collective (its checks are agreed)."""
-        from femtools.hdf5_rows import agreed
-        if degree not in self._lam:
-            if agreed(tf.comm, len(self.ancestors) != len(tf.x)):
-                raise ValueError("nested_transfer: as many ancestors as fine cells, on "
-                                 "every rank")
-            if agreed(tf.comm, len(self.ancestors) and self.ancestors.max() >= len(tc.x)):
-                raise ValueError("nested_transfer: an ancestor beyond the coarse mesh's own "
-                                 "cells (were the children redistributed?)")
-            K = tc.x[self.ancestors]
-            d = K.shape[2]
-            lam_v = np.stack([barycentric_simplex(K, tf.x[:, j]) for j in range(d + 1)], axis=1)
-            self._lam[degree] = ufc_nodes(lam_v, degree)
-        return self._lam[degree]
+        of the fine cells `cells`, (len(cells), n_nodes, d+1)."""
+        K = tc.x[self.ancestors[cells]]
+        x = tf.x[cells]
+        d = K.shape[2]
+        lam_v = np.stack([barycentric_simplex(K, x[:, j]) for j in range(d + 1)], axis=1)
+        return ufc_nodes(lam_v, degree)
 
-    def _multi_index(self, lam, N, comm):
-        """The lattice multi-indices of barycentric coordinates `lam`, denominator N.
-        Collective on comm (its check is agreed)."""
-        from femtools.hdf5_rows import agreed
+    @staticmethod
+    def _multi_index(lam, N):
+        """`(m, off)`: the lattice multi-indices of barycentric coordinates `lam`,
+        denominator N, and how far `lam * N` is from them at most (0 for none)."""
         m = np.rint(lam * N)
-        if agreed(comm, len(m) and np.abs(lam * N - m).max() > 1e-6):
+        off = float(np.abs(lam * N - m).max()) if m.size else 0.0
+        return m.astype(np.int64), off
+
+    @staticmethod
+    def _check_lattice(comm, off):
+        """Raise on every rank when some rank's fine nodes were `off` their ancestor's
+        lattice. Collective."""
+        from femtools.hdf5_rows import agreed
+        if agreed(comm, off > 1e-6):
             raise RuntimeError("nested_transfer: a fine node off its ancestor's lattice "
                                "(is the refinement uniform, and passes right?)")
-        return m.astype(np.int64)
+
+    def _blocks(self, n_cells):
+        """The fine cells in blocks of `hierarchical_transfer.EVAL_CHUNK`."""
+        chunk = max(1, hierarchical_transfer.EVAL_CHUNK)
+        return (np.arange(a, min(a + chunk, n_cells)) for a in range(0, n_cells, chunk))
 
     def prolongation(self, coarse_space, fine_space, coarse_component=None,
                      fine_component=None):
         """The matrix P, fine vector = P coarse vector: each fine node's value from the
         coarse field in its ancestor cell, exact for a coarse field the fine space holds
-        (fine degree at least the coarse one)."""
+        (fine degree at least the coarse one). Each owned fine dof's row is the coarse
+        basis at its node in the first local fine cell holding it. Collective."""
         tc, tf = _tables(coarse_space), _tables(fine_space)
         cdofs, cdeg = tc.component(coarse_component)
         fdofs, fdeg = tf.component(fine_component)
-        lam = self._fine_nodes(tf, tc, fdeg)                     # (nf, nnf, d+1)
-        B = ufc_basis(lam, cdeg)                                 # (nf, nnf, nnc)
-        rows = np.broadcast_to(fdofs[:, :, None], B.shape)
-        cols = np.broadcast_to(cdofs[self.ancestors][:, None, :], B.shape)
+        self._check_ancestors(tf, tc)
+        lo, hi = tf.owned
+        first = _first_holder(fdofs, lo, hi)
+        held = np.flatnonzero(first >= 0)
+        cell, node = np.divmod(first[held], fdofs.shape[1])
+        first = None
+
+        def block(sl):
+            lam = self._fine_nodes(tf, tc, cell[sl], fdeg)
+            return ufc_basis(lam[np.arange(len(lam)), node[sl]], cdeg)    # (b, nnc)
+        B = hierarchical_transfer._in_blocks(len(held), block)
+        rows = np.broadcast_to((lo + held)[:, None], B.shape)
+        cols = cdofs[self.ancestors[cell]]
         keep = np.abs(B) > 1e-12
         r, c, v = _owned_rows(rows[keep], cols[keep], B[keep], tf.owned)
         _check_rows(tf.comm, r, tf.owned, "fine dofs")
@@ -189,7 +236,7 @@ class Nested:
                   coarse_component=None):
         """The matrix R, coarse vector = R fine vector: the fine field at each coarse
         node, a node of the fine space too (the coarse degree must divide the fine
-        degree times 2^passes)."""
+        degree times 2^passes). Collective."""
         tc, tf = _tables(coarse_space), _tables(fine_space)
         cdofs, cdeg = tc.component(coarse_component)
         fdofs, fdeg = tf.component(fine_component)
@@ -197,18 +244,29 @@ class Nested:
         if N % cdeg:
             raise ValueError("nested_transfer: degree {} nodes are not among the fine "
                              "degree {} nodes after {} passes".format(cdeg, fdeg, self.passes))
+        self._check_ancestors(tf, tc)
         d = tc.x.shape[2]
-        m_f = self._multi_index(self._fine_nodes(tf, tc, fdeg), N, tc.comm)   # (nf, nnf, d+1)
-        m_c = self._multi_index(ufc_nodes(np.eye(d + 1)[None], cdeg)[0], N, None)  # (nnc, d+1)
+        m_c, _ = self._multi_index(ufc_nodes(np.eye(d + 1)[None], cdeg)[0], N)  # (nnc, d+1)
         weights = (N + 1) ** np.arange(d + 1)
-        key_f, key_c = m_f @ weights, m_c @ weights
-        rows, cols = [], []
-        for j, k in enumerate(key_c):
-            cell, node = np.nonzero(key_f == k)
-            rows.append(cdofs[self.ancestors[cell], j])
-            cols.append(fdofs[cell, node])
-        rows, cols = np.concatenate(rows), np.concatenate(cols)
-        r, c, v = _owned_rows(rows, cols, np.ones(len(rows)), tc.owned)
+        key_c = m_c @ weights
+        lo, hi = tc.owned
+        found, off = [], 0.0
+        for cells in self._blocks(len(fdofs)):
+            m_f, o = self._multi_index(self._fine_nodes(tf, tc, cells, fdeg), N)
+            off = max(off, o)
+            key_f = m_f @ weights                                   # (b, nnf)
+            rows, cols = [], []
+            for j, k in enumerate(key_c):
+                c, node = np.nonzero(key_f == k)
+                rows.append(cdofs[self.ancestors[cells[c]], j])
+                cols.append(fdofs[cells[c], node])
+            rows, cols = np.concatenate(rows), np.concatenate(cols)
+            own = (rows >= lo) & (rows < hi)
+            r, c, _ = _owned_rows(rows[own], cols[own], np.ones(int(own.sum())), tc.owned)
+            found.append(np.stack([r, c], axis=1))
+        self._check_lattice(tc.comm, off)
+        found = np.concatenate(found) if found else np.zeros((0, 2), np.int64)
+        r, c, v = _owned_rows(found[:, 0], found[:, 1], np.ones(len(found)), tc.owned)
         _check_rows(tc.comm, r, tc.owned, "coarse dofs")
         return _mat(tc.comm, r, c, v, (tc.owned, tc.n_global), (tf.owned, tf.n_global))
 
@@ -266,38 +324,42 @@ class Lattice:
     def __init__(self, nest, fine_space):
         tf = _tables(fine_space)
         tc = _tables(_coarse_space_like(nest.coarse, fine_space))
+        nest._check_ancestors(tf, tc)
         self.comm, self.owned, self.gc = tf.comm, tf.owned, tc.gc
         self._scatter = None
         self.passes = nest.passes
         self.n_cells = tc.n_cells
         d = tc.x.shape[2]
+        n_own = len(tc.gc)
         # each coarse cell's vertices ordered by global id: the canonical order
-        perm = np.argsort(tc.vgid, axis=1, kind="stable")[nest.ancestors]   # (nf, d+1)
-        self.cell_of, self.slot, self.dof = [], [], []
-        width = 0
+        perm = np.argsort(tc.vgid, axis=1, kind="stable")              # (nc, d+1)
+        parts, off = [], 0.0
         for i in range(len(tf.components)):
             fdofs, fdeg = tf.component(i)
             N = fdeg * 2 ** nest.passes
-            m = nest._multi_index(nest._fine_nodes(tf, tc, fdeg), N, tf.comm)       # (nf, nnf, d+1)
-            m = np.take_along_axis(m, perm[:, None, :], axis=2)
             pts = lattice_points(d, N)
             weights = (N + 1) ** np.arange(d + 1)[::-1]
             order = np.argsort(pts @ weights)
-            j = order[np.searchsorted((pts @ weights)[order], m @ weights)]
-            cell = np.broadcast_to(nest.ancestors[:, None], j.shape)
-            self.cell_of.append(cell.ravel())
-            self.slot.append((width + j).ravel())
-            self.dof.append(fdofs.ravel())
-            width += len(pts)
-        self.cell_of = np.concatenate(self.cell_of)
-        self.slot = np.concatenate(self.slot)
-        self.dof = np.concatenate(self.dof)
-        self.width = width
+            sorted_keys = (pts @ weights)[order]
+            # the fine dof at each (own coarse cell, lattice point), -1 until found
+            dof_at = np.full((n_own, len(pts)), -1, dtype=np.int64)
+            for cells in nest._blocks(len(fdofs)):
+                m, o = nest._multi_index(nest._fine_nodes(tf, tc, cells, fdeg), N)
+                off = max(off, o)
+                anc = nest.ancestors[cells]
+                m = np.take_along_axis(m, perm[anc][:, None, :], axis=2)   # (b, nnf, d+1)
+                at = np.minimum(np.searchsorted(sorted_keys, m @ weights), len(pts) - 1)
+                dof_at[anc[:, None], order[at]] = fdofs[cells]
+            parts.append(dof_at)
+        nest._check_lattice(self.comm, off)
+        dof_at = np.concatenate(parts, axis=1)
+        parts = None
+        self.width = dof_at.shape[1]
         # every lattice point of every own coarse cell is some fine node
-        filled = np.zeros((len(tc.gc), width), bool)
-        filled[self.cell_of, self.slot] = True
-        if self.comm.allreduce(int((~filled).sum())):
+        if self.comm.allreduce(int((dof_at < 0).sum())):
             raise RuntimeError("nested_transfer: lattice points without a fine node")
+        self.cell_of, self.slot = np.nonzero(dof_at >= 0)
+        self.dof = dof_at[self.cell_of, self.slot]
 
     def gather(self, x):
         """This rank's own coarse cells' rows from the fine vector `x` (a petsc4py Vec),

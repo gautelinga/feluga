@@ -7,7 +7,8 @@ For a rectangle (crossed diagonals) and a box, periodic in x, refined uniformly 
 spaces; the injection from a fine mixed (P1 or P2) field to the coarse P2 and P1 spaces
 gives the coarse interpolant; R P is the identity. A fine mixed field is written by its
 lattice to h5dir/<backend>_<ranks>.h5, and with `read_from` (another run's file) read
-back and compared with this run's interpolant.
+back and compared with this run's interpolant. The matrices and the lattice are the
+same, entry for entry, when the fine cells are taken a few at a time.
 """
 import json
 import os
@@ -121,6 +122,7 @@ def run(backend, out, h5dir, read_from=None):
             r["P_fine_p{}".format(q)] = y.norm()
             if q == 2:
                 R = nest.injection(Vf, Vc)
+                r["blocks"] = _blockwise_differs(B, nest, Vc, Vf, P, R)
                 z = R.createVecLeft()
                 R.mult(_mult(P, xc), z)
                 z.axpy(-1.0, xc)
@@ -149,6 +151,29 @@ def run(backend, out, h5dir, read_from=None):
     if comm.rank == 0:
         with open(out, "w") as fh:
             json.dump(res, fh)
+
+
+def _csr(A):
+    return [np.asarray(a).copy() for a in A.getValuesCSR()]
+
+
+def _blockwise_differs(B, nest, Vc, Vf, P, R):
+    """1.0 when P, R or the lattice of Vf differ when built from blocks of 5 fine cells,
+    on any rank; else 0.0."""
+    from femtools import hierarchical_transfer
+    chunk = hierarchical_transfer.EVAL_CHUNK
+    lat = nest.lattice(Vf)
+    hierarchical_transfer.EVAL_CHUNK = 5
+    try:
+        pairs = [(_csr(P), _csr(nest.prolongation(Vc, Vf))),
+                 (_csr(R), _csr(nest.injection(Vf, Vc)))]
+        small = nest.lattice(Vf)
+    finally:
+        hierarchical_transfer.EVAL_CHUNK = chunk
+    pairs.append(([lat.cell_of, lat.slot, lat.dof], [small.cell_of, small.slot, small.dof]))
+    differs = any(a.shape != b.shape or not np.array_equal(a, b)
+                  for one, other in pairs for a, b in zip(one, other))
+    return float(B.comm.allreduce(int(differs)))
 
 
 def _mult(A, x):

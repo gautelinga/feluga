@@ -28,21 +28,54 @@ def _node_keys(V, n_local):
     """Sort keys that put the components of a mixed space at a node next to each other:
     component i of the node of component 0's dof d gets n_sub*d + i. The components'
     cell dofmaps pair them (the same local dof of the same cell is at the same node).
-    Spaces that are not mixed, or whose components differ, keep their order."""
+    Spaces that are not mixed, or whose components differ, keep their order. Returns
+    the keys and the number of dofs per node, n_sub or 1 (key // it is the node)."""
     n_sub = V.element.num_sub_elements
     keys = np.arange(n_local, dtype=np.int64)
     if n_sub == 0 or V.dofmap.index_map_bs != 1:
-        return keys
+        return keys, 1
     elements = [V.sub(i).ufl_element() for i in range(n_sub)]
     if any(e != elements[0] for e in elements[1:]):
-        return keys
+        return keys, 1
     first = V.sub(0).dofmap.list.ravel().astype(np.int64)
     keys = np.full(n_local, -1, dtype=np.int64)
     for i in range(n_sub):
         keys[V.sub(i).dofmap.list.ravel()] = n_sub * first + i
     missing = keys < 0  # dofs on no cell (none in a Lagrange space): keep them last
     keys[missing] = n_sub * n_local + np.flatnonzero(missing)
-    return keys
+    return keys, n_sub
+
+
+def _gps_order(V, owned_unique, rep, nodes):
+    """`owned_unique` reordered by the Gibbs-Poole-Stockmeyer ordering (DOLFINx's
+    bandwidth reduction) of the graph of their nodes, in which two nodes are joined when
+    a cell has dofs at both. `rep[i]` is the owned unique dof that local dof i stands
+    for (a slave its master), -1 if none; `nodes[i]` is the node of local dof i. The
+    dofs of a node keep their order in `owned_unique`."""
+    from dolfinx.cpp.graph import AdjacencyList_int32, reorder_gps
+
+    node_ids, node_of = np.unique(nodes[owned_unique], return_inverse=True)
+    n_nodes = len(node_ids)
+    index = np.full(len(rep), -1, dtype=np.int64)  # node (into node_ids) of an owned unique dof
+    index[owned_unique] = node_of
+    r = rep[V.dofmap.list.reshape(V.dofmap.list.shape[0], -1)]
+    cells = np.where(r >= 0, index[np.maximum(r, 0)], -1)
+    edges = [np.zeros(0, np.int64)]  # each edge once, as lower * n_nodes + higher
+    for i in range(cells.shape[1]):
+        for j in range(i + 1, cells.shape[1]):
+            a, b = cells[:, i], cells[:, j]
+            keep = (a >= 0) & (b >= 0) & (a != b)
+            a, b = a[keep], b[keep]
+            edges.append(np.minimum(a, b) * n_nodes + np.maximum(a, b))
+    lower, higher = np.divmod(np.unique(np.concatenate(edges)), n_nodes)
+    src, dst = np.concatenate([lower, higher]), np.concatenate([higher, lower])
+    order = np.lexsort((dst, src))
+    src, dst = src[order], dst[order]
+    offsets = np.zeros(n_nodes + 1, dtype=np.int32)
+    np.cumsum(np.bincount(src, minlength=n_nodes), out=offsets[1:])
+    place = np.asarray(reorder_gps(AdjacencyList_int32(dst.astype(np.int32), offsets)),
+                       dtype=np.int64)  # place[node]: its position in the new order
+    return owned_unique[np.argsort(place[node_of], kind="stable")]
 
 
 class UniqueDofs:
@@ -55,9 +88,15 @@ class UniqueDofs:
     components at a node are numbered one after the other, as dolfin numbers a mixed
     space (DOLFINx numbers each component's dofs of a cell in a run). Incomplete
     factorizations such as ILU(0), which depend on the order, then work as on dolfin.
+
+    With `reorder`, each rank numbers its unique dofs in a bandwidth-reducing order of
+    the periodic (folded) cell graph, node by node (with `interleave`, a mixed space's
+    components at a node stay together). The space's own order does not see the
+    periodic couplings; in the reduced order incomplete factorizations converge in
+    fewer iterations, and algebraic multigrid cycles (BoomerAMG) take less time.
     """
 
-    def __init__(self, V, slaves=None, masters=None, interleave=False):
+    def __init__(self, V, slaves=None, masters=None, interleave=False, reorder=False):
         from petsc4py import PETSc
 
         self.V = V
@@ -75,9 +114,17 @@ class UniqueDofs:
         is_slave = np.zeros(n_loc, dtype=bool)
         is_slave[slaves] = True
         owned_unique = np.flatnonzero(~is_slave[:n_own])
+        keys, per_node = _node_keys(V, n_loc) if interleave else (None, 1)
         if interleave:
-            owned_unique = owned_unique[np.argsort(_node_keys(V, n_loc)[owned_unique],
-                                                   kind="stable")]
+            owned_unique = owned_unique[np.argsort(keys[owned_unique], kind="stable")]
+        if reorder:
+            lo = imap.local_range[0]
+            rep = np.full(n_loc, -1, dtype=np.int64)
+            rep[owned_unique] = owned_unique
+            here = (masters >= lo) & (masters < lo + n_own)
+            rep[slaves[here]] = masters[here] - lo
+            nodes = np.arange(n_loc) if keys is None else keys // per_node
+            owned_unique = _gps_order(V, owned_unique, rep, nodes)
         n_unique = len(owned_unique)
         start = self.comm.exscan(n_unique) or 0
         n_global = self.comm.allreduce(n_unique)

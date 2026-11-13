@@ -413,9 +413,10 @@ def unique_dofs(V):
             raise ValueError("a space not made by femtools.backend.dolfinx (FunctionSpace or "
                              "subspace): its periodicity is unknown")
         box = V._box
-        # Mixed spaces numbered node by node, as dolfin numbers them (ILU depends on it).
+        # Mixed spaces numbered node by node, as dolfin numbers them, and the nodes in a
+        # bandwidth-reducing order: ILU and AMG depend on both.
         if box is None or not any(box.periodic):
-            U = UniqueDofs(V, interleave=True)
+            U = UniqueDofs(V, interleave=True, reorder=True)
         else:
             mesh = V.mesh
             gdim = mesh.geometry.dim
@@ -424,7 +425,7 @@ def unique_dofs(V):
             U = UniqueDofs(V, *periodic_box(V, upper=box.upper[:gdim],
                                             periodic=box.periodic[:gdim],
                                             lower=box.lower[:gdim], tol=tol),
-                           interleave=True)
+                           interleave=True, reorder=True)
         V._unique_dofs = U
     return U
 

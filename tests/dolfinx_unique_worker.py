@@ -254,6 +254,45 @@ c = UWi.restrict(w, UWi.create_vector())
 c2 = UWi.restrict(UWi.prolong(c, fem.Function(W)), UWi.create_vector())
 res["interleaved_roundtrip"] = rel(c2, c)
 
+
+# 6. reordered numbering: the same operator up to the permutation, the components at a
+# node still together, values through restrict and prolong, and a narrower band than
+# the space's own order (whose band the periodic couplings widen)
+def pairs_at_nodes(U):
+    own = U.owned_unique
+    ok = (len(own) % 2 == 0 and np.all(comp[own] == np.arange(len(own)) % 2)
+          and np.allclose(X[own[0::2]], X[own[1::2]]))
+    return bool(comm.allreduce(int(not ok)) == 0)
+
+
+def bandwidth(K):
+    """The largest distance of an entry from the diagonal in the diagonal blocks (the
+    rows and columns a rank owns: its order does not move the others)."""
+    lo, hi = K.getOwnershipRange()
+    ia, ja, _ = K.getValuesCSR()
+    rows = lo + np.repeat(np.arange(len(ia) - 1), np.diff(ia))
+    own = (ja >= lo) & (ja < hi)
+    return comm.allreduce(int(np.abs(ja[own] - rows[own]).max(initial=0)), op=MPI.MAX)
+
+
+UWr = UniqueDofs(W, *periodic_box(W, periodic=(True, False)), interleave=True, reorder=True)
+K = create_matrix(a_W, UWr)
+assemble_matrix(K, a_W)
+res["fold_mixed_reordered_exact"] = exact(K)
+res["fold_mixed_reordered"] = rel(K, explicit_P(UWr).transposeMatMult(
+    plain_matrix(a_W).matMult(explicit_P(UWr))))
+res["reordered_interleaved"] = pairs_at_nodes(UWr)
+c = UWr.restrict(w, UWr.create_vector())
+c2 = UWr.restrict(UWr.prolong(c, fem.Function(W)), UWr.create_vector())
+res["reordered_roundtrip"] = rel(c2, c)
+band = []
+for reorder in (False, True):
+    U = UniqueDofs(Q, *periodic_box(Q, periodic=(True, True)), reorder=reorder)
+    K = create_matrix(a_lap, U)
+    assemble_matrix(K, a_lap)
+    band.append(bandwidth(K))
+res["band_own_order"], res["band_reordered"] = band
+
 if comm.rank == 0:
     with open(sys.argv[1], "w") as fh:
         json.dump(res, fh)

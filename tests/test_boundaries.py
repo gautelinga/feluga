@@ -104,3 +104,30 @@ def test_three_ranks_write_nothing(tmp_path, h5py_build):
     for a, b in zip(boundaries.read(one), boundaries.read(three)):
         assert a.shape == b.shape and len(a) == 0 and a.dtype == b.dtype
     assert open(one).read() == open(three).read().replace("three.h5", "one.h5")
+
+
+@pytest.mark.parametrize("dim", [2, 3])
+@pytest.mark.parametrize("ranks", [1, 5, 64])
+def test_facets_go_to_every_box_holding_them(dim, ranks):
+    """`_in_boxes`, which bins the ranks' boxes, gives every (facet, box) pair whose box
+    holds all the facet's points, ordered by box and facet, as testing every facet
+    against every box does: overlapping and nested boxes, empty ones, a box flat along
+    an axis, facets outside all of them."""
+    from femtools.boundaries import _in_boxes
+    rng = np.random.default_rng(ranks + dim)
+    pts = rng.uniform(-0.2, 1.2, (400, dim, dim))
+    pts[:200] = pts[:200, :1] + 0.05 * rng.standard_normal((200, dim, dim))
+    lo = rng.uniform(-0.1, 0.8, (ranks, dim))
+    hi = lo + rng.uniform(0.0, 0.6, (ranks, dim))
+    if ranks > 1:
+        lo[::3] = np.inf                                 # empty boxes
+        hi[::3] = -np.inf
+        hi[2, 0] = lo[2, 0]                              # flat along x
+        pts[-1] = lo[2] + 0.5 * (hi[2] - lo[2])
+    whole = min(1, ranks - 1)                            # the unit square or cube
+    lo[whole], hi[whole] = 0.0, 1.0
+    facet, box = _in_boxes(pts, lo, hi)
+    want = [(f, r) for r in range(ranks) for f in range(len(pts))
+            if ((pts[f] >= lo[r]) & (pts[f] <= hi[r])).all()]
+    assert len(want) > 0
+    assert list(zip(facet.tolist(), box.tolist())) == want

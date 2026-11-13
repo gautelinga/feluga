@@ -131,6 +131,50 @@ def _row_keys(rows):
     return rows.view([("", np.int64)] * rows.shape[1]).ravel()
 
 
+def _in_boxes(pts, lo, hi):
+    """`(facet, box)`: every pair of a facet `pts` (n, nv, gdim) and a box `lo[r]`,
+    `hi[r]` (rows of (P, gdim); an empty box has lo > hi) holding all its points,
+    ordered by box and then facet. The boxes are binned on a grid of about P cells over
+    them, and each facet tested against the boxes of the cell its lowest corner is in
+    alone: a box holding the facet holds that corner, so it is among them."""
+    n, gdim = len(pts), pts.shape[2]
+    full = np.flatnonzero((lo <= hi).all(axis=1))
+    if not n or not len(full):
+        return np.zeros(0, np.int64), np.zeros(0, np.int64)
+    low, high = pts.min(axis=1), pts.max(axis=1)        # each facet's bounding box
+    g = max(1, int(round(len(full) ** (1.0 / gdim))))   # cells an axis
+    origin = lo[full].min(axis=0)
+    width = (hi[full].max(axis=0) - origin) / g
+    width[width <= 0] = 1.0
+
+    def cell(p):
+        return np.clip(np.floor((p - origin) / width), 0, g - 1).astype(np.int64)
+    first, last = cell(lo[full]), cell(hi[full])
+    span = last - first + 1
+    count = np.prod(span, axis=1)
+    # each box in every cell its range covers, as (cell, box) sorted by cell
+    box = np.repeat(full, count)
+    k = np.arange(int(count.sum())) - np.repeat(np.cumsum(count) - count, count)
+    at = np.zeros(len(box), np.int64)
+    for a in range(gdim):
+        s = np.repeat(span[:, a], count)
+        at = at * g + np.repeat(first[:, a], count) + k % s
+        k //= s
+    order = np.argsort(at, kind="stable")
+    at, box = at[order], box[order]
+    starts = np.searchsorted(at, np.arange(g ** gdim + 1))
+    # each facet against its corner's cell's boxes
+    c = cell(low) @ (g ** np.arange(gdim)[::-1])
+    many = starts[c + 1] - starts[c]
+    facet = np.repeat(np.arange(n), many)
+    cand = box[np.arange(int(many.sum())) - np.repeat(np.cumsum(many) - many, many)
+               + np.repeat(starts[c], many)]
+    inside = ((low[facet] >= lo[cand]) & (high[facet] <= hi[cand])).all(axis=1)
+    facet, cand = facet[inside], cand[inside]
+    order = np.lexsort((facet, cand))
+    return facet[order].astype(np.int64), cand[order].astype(np.int64)
+
+
 def match_exterior(path, x, facet_vertices, owned, comm=None):
     """`(facet_index, marks)`: which of a mesh's local exterior facets the facet file
     `path` holds, matched by vertex coordinates, and their markers. `x` are the local
@@ -140,9 +184,10 @@ def match_exterior(path, x, facet_vertices, owned, comm=None):
 
     No rank reads the file whole: each reads one block of the facets and their markers,
     fetches those facets' points (`hdf5_rows.fetch_rows`), and sends each facet to every
-    rank whose exterior vertices' bounding box holds all its points, which matches it
-    there. Refuses, on every rank, a negative marker and a facet that matches no owned
-    exterior facet. Collective on comm (None for one rank)."""
+    rank whose exterior vertices' bounding box holds all its points (the boxes binned,
+    `_in_boxes`), which matches it there. Refuses, on every rank, a negative marker and
+    a facet that matches no owned exterior facet. Collective on comm (None for one
+    rank)."""
     import h5py
     from scipy.spatial import cKDTree
     from femtools import hdf5_rows
@@ -178,13 +223,10 @@ def match_exterior(path, x, facet_vertices, owned, comm=None):
     if comm is not None:
         box = ((x[local].min(axis=0) - tol, x[local].max(axis=0) + tol) if len(local)
                else (np.full(gdim, np.inf), np.full(gdim, -np.inf)))
-        take, dest = [], []
-        for r, (lo, hi) in enumerate(comm.allgather(box)):
-            inside = np.flatnonzero(((pts >= lo) & (pts <= hi)).all(axis=(1, 2)))
-            take.append(inside)
-            dest.append(np.full(len(inside), r, np.int64))
-        take = np.concatenate(take)
-        pts, marks = hdf5_rows.route(comm, np.concatenate(dest),
+        boxes = comm.allgather(box)
+        take, dest = _in_boxes(pts, np.array([b[0] for b in boxes], dtype=float),
+                               np.array([b[1] for b in boxes], dtype=float))
+        pts, marks = hdf5_rows.route(comm, dest,
                                      pts[take].reshape(len(take), nv * gdim),
                                      marks[take]).received
         pts = pts.reshape(len(pts), nv, gdim)

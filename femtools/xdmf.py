@@ -63,6 +63,11 @@ or edge (a periodic slave's and master's nodes hold the same value); onto any ot
 the field goes via an unconstrained space of the grid's degree and is interpolated from
 there.
 
+A time series' writes share what they take of a mesh and a space with the other files
+open on them (one file a field: the mesh's node layout is made once), keep only what a
+step needs, and route each step's values with a plan made at the first (`hdf5_rows`);
+no rank holds the XML of the steps already written.
+
 Every dataset is shuffled and gzipped (`femtools.compress`), and written from every
 rank's own rows (`hdf5_rows.write_rows`): nothing is gathered. With h5py's MPI build
 every rank writes its blocks through MPI-IO; with the serial build rank zero writes the
@@ -73,6 +78,7 @@ dolfin, mpi4py and scipy are imported only inside the functions that need them:
 `XdmfDocument`, `write_quadratic` and the readers need numpy and h5py alone.
 """
 import os
+import weakref
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -678,7 +684,11 @@ class XDMFFile2(object):
         self._name, self._label = '', ''
         self._grids = {}            # (mesh id, degree, time) -> grid element
         self._stored = {}           # (mesh id, degree) -> (topology ref, geometry ref)
-        self._nodes = {}            # what a field's write takes of its mesh and space
+        self._nodes = {}            # what a read takes of its space, for the next read
+        # the keys of the node layouts and node dofs this file's writes share with other
+        # files' (`_shared`), let go of when it closes or is collected
+        self._held = set()
+        weakref.finalize(self, _unshare, self._held)
         self._time = None           # the time of the last timed write
         self._delegate = None       # a real dolfin.XDMFFile, for checkpoints
         self._mesh = None           # the last mesh seen, for a MeshValueCollection
@@ -710,7 +720,7 @@ class XDMFFile2(object):
         if self._doc is not None:
             self._doc.close()
             self._doc = None
-        _release_plain(self._nodes)
+        _release_plain(self._nodes, _unshare(self._held))
         if self._delegate is not None:
             self._delegate.close()
             self._delegate = None
@@ -846,11 +856,19 @@ class XDMFFile2(object):
         if not functions:
             raise ValueError('nothing to write')
         doc = self._document(encoding)
-        info = _function_nodes_distributed(functions, self._nodes)
-        self._mesh = info['mesh']
-        mesh, degree = info['mesh'], info['degree']
-        conn, n_nodes, n_cells = info['conn'], info['n_nodes'], info['n_cells']
-        topology_type = XDMF_TOPOLOGY[(mesh.ufl_cell().cellname(), conn.shape[1])]
+        mesh, degree, widths = _check_functions(functions)
+        self._mesh = mesh
+        layout = _shared(self._held, mesh.mpi_comm(), ('mesh', mesh.id(), degree),
+                         lambda: _node_layout(mesh, degree))
+        fields = []
+        for index, (func, width) in enumerate(zip(functions, widths)):
+            V = func.function_space()
+            takes = _shared(self._held, mesh.mpi_comm(), ('space', V.id(), degree),
+                            lambda: _node_dofs(V, mesh, degree, width, layout))
+            fields.append((func.name() if func.name() else 'f{}'.format(index),
+                           _node_values(func, takes)))
+        n_nodes, n_cells, per_cell = layout['n_nodes'], layout['n_cells'], layout['per_cell']
+        topology_type = XDMF_TOPOLOGY[(mesh.ufl_cell().cellname(), per_cell)]
 
         if time is not None and time != self._time:
             if self._time is not None:
@@ -863,41 +881,43 @@ class XDMFFile2(object):
             parent = doc.collection() if time is not None else None
             grid = doc.grid('mesh', parent)
             store = self._stored.get((mesh.id(), degree))
-            if store is None or self.parameters['rewrite_function_mesh']:
+            rewrite = self.parameters['rewrite_function_mesh']
+            if store is None or rewrite:
                 group = doc.mesh_group(time is not None)
-                coords = node_positions(_geometry(mesh.coordinates()), info['layout'])
-                store = (doc.slab(group + '/topology', info['cell_offset'],
+                conn, coords = _mesh_nodes(mesh, degree, layout)
+                store = (doc.slab(group + '/topology', layout['cell_offset'],
                                   topology_array(conn, n_nodes), n_cells),
-                         doc.rows(group + '/geometry', info['layout']['rows'], coords,
-                                  n_nodes))
+                         doc.rows(group + '/geometry', layout['rows'], coords, n_nodes,
+                                  plans=layout['plans'] if rewrite else None))
+                conn = coords = None
                 self._stored[(mesh.id(), degree)] = store
-            doc.topology(grid, conn, topology_type, ref=store[0],
-                         shape=(n_cells, conn.shape[1]), wide=is_wide(n_nodes))
+            doc.topology(grid, None, topology_type, ref=store[0],
+                         shape=(n_cells, per_cell), wide=is_wide(n_nodes))
             doc.geometry(grid, None, ref=store[1],
                          shape=(n_nodes, _gwidth(mesh)))
             if time is not None:
                 doc.time(grid, time)
             self._grids[key] = grid
 
-        for name, rows, values in info['fields']:
+        for name, values in fields:
             values = _pad3(values)
             if values.ndim == 1:
                 values = values.reshape(-1, 1)
             ref = doc.rows('VisualisationVector/{}'.format(doc._next('VisualisationVector')),
-                           rows, values, n_nodes)
+                           layout['rows'], values, n_nodes, plans=layout['plans'])
             doc.attribute(grid, name, values, 'Node', ref=ref,
                           shape=(n_nodes, values.shape[1]))
         # A cell attribute takes the same rank-major block the topology took, at the
-        # same offset -- the file's row order for a cell is the order `conn` was
+        # same offset -- the file's row order for a cell is the order the cells were
         # written in, and `mf.array()` is over the same local cells in the same
         # order. Cells are not shared between ranks, so unlike the node fields there
         # is no ownership question to settle. They live under VisualisationVector
         # too: that group is where an attribute of a function grid goes, whatever it
         # is centred on and whatever its rank -- dolfin puts scalars there as readily
         # as vectors.
-        for name, values in _local_cell_tags(tags, mesh, len(conn)):
+        for name, values in _local_cell_tags(tags, mesh, layout['n_own']):
             ref = doc.slab('VisualisationVector/{}'.format(doc._next('VisualisationVector')),
-                           info['cell_offset'], values, n_cells)
+                           layout['cell_offset'], values, n_cells)
             doc.attribute(grid, name, values, 'Cell', ref=ref, shape=(n_cells, 1))
         self._finish()
 
@@ -1277,6 +1297,7 @@ _CPP_CODE = r'''
 #include <dolfin/mesh/MeshConnectivity.h>
 #include <dolfin/mesh/MeshValueCollection.h>
 #include <dolfin/mesh/MeshEditor.h>
+#include <dolfin/fem/GenericDofMap.h>
 namespace py = pybind11;
 
 // MeshConnectivity stores the whole table as one contiguous vector, which the
@@ -1287,6 +1308,17 @@ py::array_t<unsigned int> connectivity(const dolfin::Mesh& mesh,
 {
   const std::vector<unsigned int>& c = mesh.topology()(d0, d1)();
   return py::array_t<unsigned int>(c.size(), c.data());
+}
+
+// A dofmap's dofs of every entity of a dimension, entity by entity, as
+// `GenericDofMap::entity_dofs` lists them; from Python that is a list of ints.
+py::array_t<std::int64_t> entity_dofs(const dolfin::GenericDofMap& dofmap,
+                                      const dolfin::Mesh& mesh, std::size_t dim)
+{
+  const std::vector<dolfin::la_index> d = dofmap.entity_dofs(mesh, dim);
+  py::array_t<std::int64_t> out(d.size());
+  std::copy(d.begin(), d.end(), out.mutable_data());
+  return out;
 }
 
 // A list of Points costs three Python method calls per point to read from
@@ -1346,6 +1378,7 @@ void build_mesh(dolfin::Mesh& mesh, const std::string& cellname, std::size_t tdi
 PYBIND11_MODULE(SIGNATURE, m)
 {
   m.def("connectivity", &connectivity);
+  m.def("entity_dofs", &entity_dofs);
   m.def("points_array", &points_array);
   m.def("mvc_values", &mvc_values);
   m.def("build_mesh", &build_mesh);
@@ -1446,17 +1479,18 @@ def _plain_space(mesh, degree, width, cache):
     return space
 
 
-def _release_plain(cache):
-    """Let go of what `cache` holds -- its unconstrained spaces, the transfers onto and
-    from them, the node layouts and node dofs -- and hand the heap back
-    (`femtools.memory`) whenever it held anything: a write's own transients (the dofmap's
-    entity lists, the compressed chunks) otherwise stay resident."""
+def _release_plain(cache, anything=False):
+    """Let go of what `cache` holds -- a file's unconstrained spaces, the transfers onto
+    and from them, and its reads' node dofs -- and hand the heap back
+    (`femtools.memory`) whenever it, or the file's shares (`anything`, `_unshare`), held
+    anything: a write's own transients (the dofmap's entity dofs, the compressed chunks)
+    otherwise stay resident."""
     from femtools import fast_interpolation
     from femtools.memory import drop
     held = [v for k, v in cache.items() if isinstance(k, tuple) and k[:1] == ('plain',)]
     for space in held:
         fast_interpolation.forget(space)
-    anything = bool(cache)
+    anything = anything or bool(cache)
     cache.clear()
     if anything:
         drop()
@@ -1581,10 +1615,9 @@ def _check_functions(functions):
 
 
 def _entity_dofs(dofmap, mesh, dim):
-    """`dofmap.entity_dofs` as an integer array, empty or not: it hands back a list, and
-    `np.asarray([])` is float64, which cannot index -- on a rank with no entities of the
-    dimension (a mesh built by hand can leave one so) that would raise there alone."""
-    return np.asarray(dofmap.entity_dofs(mesh, dim), dtype=np.int64)
+    """`dofmap.entity_dofs(mesh, dim)` as an int64 array, empty or not, through the C++
+    helper: dolfin's hands back a Python list, about 36 B an entry where this is 8."""
+    return np.asarray(_cpp().entity_dofs(dofmap, mesh, int(dim)), dtype=np.int64)
 
 
 def owned_entities(mesh, dim):
@@ -1656,6 +1689,19 @@ def _owned_cells(mesh):
     return np.asarray(mesh.cells())[:mesh.topology().ghost_offset(tdim)]
 
 
+def cell_nodes(gvert, cells, n_vertices, edges=None):
+    """The cells' global node numbers (`node_layout`'s `conn`): each cell's vertices'
+    global ids, then at degree 2 `n_vertices` plus its edges' (`edges` as `node_layout`
+    takes them), put in XDMF's order."""
+    conn = np.asarray(gvert)[cells]
+    if edges is not None:
+        gedge = np.asarray(edges['gedge'])
+        conn = np.hstack((conn, gedge[edges['cells']] + n_vertices))
+        if edges.get('order') is not None:
+            conn = conn[:, edges['order']]
+    return conn
+
+
 def node_layout(comm, gvert, cells, owned_vertices, n_vertices, n_cells, edges=None):
     """What a write of a degree-1 or 2 field takes of the mesh's topology, from either
     backend's arrays: `gvert` each local vertex's global id, `cells` this rank's own cells
@@ -1666,19 +1712,16 @@ def node_layout(comm, gvert, cells, owned_vertices, n_vertices, n_cells, edges=N
     and `order` (a cell's vertex then edge columns put in XDMF's order, or None).
 
     Returns a dict: `conn` the own cells' global node numbers (a node's number is its
-    vertex's global id, or `n_vertices` plus its edge's), `rows` the numbers of the nodes
-    this rank writes, `owned` their masks (vertices, then edges), `ends`, the counts
-    `n_nodes` and `n_cells`, and `cell_offset`, the cells' first row in the rank-major
-    topology."""
+    vertex's global id, or `n_vertices` plus its edge's; `cell_nodes`), `rows` the
+    numbers of the nodes this rank writes, `owned` their masks (vertices, then edges),
+    `ends`, the counts `n_nodes` and `n_cells`, and `cell_offset`, the cells' first row in
+    the rank-major topology."""
     gvert = np.asarray(gvert)
-    conn = gvert[cells]
+    conn = cell_nodes(gvert, cells, n_vertices, edges)
     owned, rows = [owned_vertices], [gvert[owned_vertices]]
     n_nodes, ends = n_vertices, None
     if edges is not None:
         gedge = np.asarray(edges['gedge'])
-        conn = np.hstack((conn, gedge[edges['cells']] + n_vertices))
-        if edges.get('order') is not None:
-            conn = conn[:, edges['order']]
         owned.append(edges['owned'])
         rows.append(gedge[edges['owned']] + n_vertices)
         n_nodes += edges['n']
@@ -1714,43 +1757,106 @@ def node_dofs(layout, vertex_dofs, edge_dofs=None):
     return np.concatenate(direct), ends
 
 
-def _node_layout(mesh, degree, cache):
-    """`node_layout` of a dolfin mesh, kept in `cache` by (mesh id, degree); the
-    coordinates are not, a mesh may move between writes (`node_positions`). dolfin
-    numbers a cell's edges by the vertex pairs QUADRATIC names, which is checked on the
-    local cells (`_check_midsides`). Collective (`owned_entities`)."""
-    key = ('mesh', mesh.id(), degree)
-    if key in cache:
-        return cache[key]
+#: what writes take of a mesh and a space (`_node_layout`, `_node_dofs`), shared by the
+#: files writing them: key -> [value, files holding it]. A file holds the keys it used
+#: (`_shared`) until it closes or is collected (`_unshare`), the last one letting go.
+_SHARED = {}
+
+
+def _shared(held, comm, key, build):
+    """The value of `key` in `_SHARED`, built (collectively) when no file holds it on some
+    rank, and `held`, a file's set of keys, recording that the file holds it."""
+    from femtools.hdf5_rows import agreed
+    entry = _SHARED.get(key)
+    if agreed(comm, entry is None):
+        entry = [build(), entry[1] if entry is not None else 0]
+        _SHARED[key] = entry
+    if key not in held:
+        held.add(key)
+        entry[1] += 1
+    return entry[0]
+
+
+def _unshare(held):
+    """A file's keys (`_shared`) let go of: what no other file holds is dropped. Whether
+    anything was held."""
+    anything = bool(held)
+    for key in held:
+        entry = _SHARED.get(key)
+        if entry is not None:
+            entry[1] -= 1
+            if entry[1] <= 0:
+                del _SHARED[key]
+    held.clear()
+    return anything
+
+
+def _edges(mesh, n_own, check=False):
+    """The degree-2 `edges` of `node_layout` but `owned` and `n`: each local edge's global
+    id, the own cells' edges, each edge's ends, and XDMF's column order; with `check`,
+    the midsides checked to lie on the edges QUADRATIC names (`_check_midsides`).
+    Collective (the edges' global numbering, made once a mesh)."""
+    tdim = mesh.topology().dim()
+    mesh.init(1)
+    mesh.init(tdim, 1)
+    mesh.init(1, 0)
+    mesh.init_global(1)
+    ends = _connectivity(mesh, 1)
+    cellname = mesh.ufl_cell().cellname()
+    order = QUADRATIC[cellname][2]
+    cell_edges = _connectivity(mesh, tdim, 1)[:n_own]
+    if check and n_own:
+        vertices = np.asarray(mesh.coordinates())
+        mid = 0.5 * (vertices[ends[:, 0]] + vertices[ends[:, 1]])
+        cells = _owned_cells(mesh)
+        _check_midsides(np.vstack((vertices, mid)),
+                        np.hstack((cells, cell_edges + len(vertices)))[:, order], cellname)
+    return dict(gedge=mesh.topology().global_indices(1), cells=cell_edges, ends=ends,
+                order=order)
+
+
+def _node_layout(mesh, degree):
+    """`node_layout` of a dolfin mesh at `degree`, keeping what every write takes: `rows`
+    (read-only, with `plans`, their routing, `XdmfDocument.rows`), the `owned` masks, the
+    counts, `cell_offset`, and `per_cell` and `n_own`, the topology's columns and this
+    rank's cells. The cells' node numbers and the edges' ends, which a write of the mesh
+    alone takes, are made again then (`_mesh_nodes`), and the coordinates are read at each
+    such write: a mesh may move. dolfin numbers a cell's edges by the vertex pairs
+    QUADRATIC names, which is checked on the local cells (`_check_midsides`).
+    Collective (`owned_entities`)."""
     tdim = mesh.topology().dim()
     cells = _owned_cells(mesh)
     owned = owned_entities(mesh, 0)
     edges = None
     if degree == 2:
-        mesh.init(1)
-        mesh.init(tdim, 1)
-        mesh.init(1, 0)
-        mesh.init_global(1)
-        ends = _connectivity(mesh, 1)
-        cellname = mesh.ufl_cell().cellname()
-        order = QUADRATIC[cellname][2]
-        cell_edges = _connectivity(mesh, tdim, 1)[:len(cells)]
-        if len(cells):
-            vertices = np.asarray(mesh.coordinates())
-            mid = 0.5 * (vertices[ends[:, 0]] + vertices[ends[:, 1]])
-            _check_midsides(np.vstack((vertices, mid)),
-                            np.hstack((cells, cell_edges + len(vertices)))[:, order],
-                            cellname)
-        edges = dict(gedge=mesh.topology().global_indices(1), cells=cell_edges, ends=ends,
-                     owned=owned_entities(mesh, 1), n=mesh.num_entities_global(1),
-                     order=order)
+        edges = _edges(mesh, len(cells), check=True)
+        edges.update(owned=owned_entities(mesh, 1), n=mesh.num_entities_global(1))
     layout = node_layout(mesh.mpi_comm(), mesh.topology().global_indices(0), cells, owned,
                          mesh.num_entities_global(0), mesh.num_entities_global(tdim), edges)
-    cache[key] = layout
+    layout['per_cell'], layout['n_own'] = layout['conn'].shape[1], len(layout['conn'])
+    del layout['conn'], layout['ends']
+    layout['rows'].flags.writeable = False
+    layout['plans'] = {}
     return layout
 
 
-def _node_dofs(V, mesh, degree, width, layout, cache):
+def _with_ends(mesh, degree, layout):
+    """`layout` with the edges' ends (`node_positions` and `node_dofs` take them)."""
+    return dict(layout, ends=_connectivity(mesh, 1) if degree == 2 else None)
+
+
+def _mesh_nodes(mesh, degree, layout):
+    """`(conn, coords)`: this rank's cells' global node numbers and the positions of the
+    nodes it writes, for a write of the mesh (`_node_layout`). Collective (`_edges`)."""
+    cells = _owned_cells(mesh)
+    edges = _edges(mesh, len(cells)) if degree == 2 else None
+    conn = cell_nodes(mesh.topology().global_indices(0), cells,
+                      mesh.num_entities_global(0), edges)
+    coords = node_positions(_geometry(mesh.coordinates()), _with_ends(mesh, degree, layout))
+    return conn, coords
+
+
+def _node_dofs(V, mesh, degree, width, layout):
     """Where each component's values at this rank's nodes sit in the local form of a V
     Function's vector -- owned dofs, then ghosts -- as a pair per component (`node_dofs`):
     the local dof of each node that has one of its own, and, for a linear field on the
@@ -1767,11 +1873,8 @@ def _node_dofs(V, mesh, degree, width, layout, cache):
     component -- its `width` columns are what `V.sub(c).dofmap()` gives -- rather than
     from the sub-dofmaps, each of which V keeps for its own lifetime with a copy of the
     cell table. A component of a mixed Function (`Function.split()`) is read the same
-    way, its dofmap indexing the mixed vector. Kept in `cache` by (V's id, degree): a
-    time series writes the same space every step."""
-    key = ('space', V.id(), degree)
-    if key in cache:
-        return cache[key]
+    way, its dofmap indexing the mixed vector. Shared by V's id and the degree
+    (`_shared`): a time series writes the same space every step."""
     linear = degree == 2 and V.ufl_element().degree() == 1
 
     def entity_dofs(dim):
@@ -1782,13 +1885,12 @@ def _node_dofs(V, mesh, degree, width, layout, cache):
                                  len(dofs), mesh.num_entities(dim), dim, width))
         return dofs.reshape(-1, width)
 
-    direct, ends = node_dofs(layout, entity_dofs(0),
+    direct, ends = node_dofs(_with_ends(mesh, degree, layout) if linear else layout,
+                             entity_dofs(0),
                              entity_dofs(1) if degree == 2 and not linear else None)
-    takes = [(np.ascontiguousarray(direct[:, c]),
-              None if ends is None else tuple(np.ascontiguousarray(e[:, c]) for e in ends))
-             for c in range(width)]
-    cache[key] = takes
-    return takes
+    return [(np.ascontiguousarray(direct[:, c]),
+             None if ends is None else tuple(np.ascontiguousarray(e[:, c]) for e in ends))
+            for c in range(width)]
 
 
 def _node_values(func, takes):
@@ -1830,37 +1932,6 @@ def _node_values(func, takes):
     copy.vector().set_local(func.vector().get_local())
     copy.vector().apply('insert')
     return _node_values(copy, takes)
-
-
-def _function_nodes_distributed(functions, cache=None):
-    """The functions' node set -- the mesh's vertices, then (at degree 2) one per edge
-    -- left where it already is: every rank returns only the nodes it owns, so nothing
-    is gathered. Node ids are the global entity ids -- vertex index, then `n_vert +`
-    edge index -- whose order is the file's row order (`XdmfDocument.rows`).
-
-    A node is written by the rank that owns its entity (`owned_entities`), and its value
-    is read straight off the field's own dofmap: the dof the space gives that vertex or
-    edge, from the vector's local form, ghosts included (`_node_dofs`, `_node_values`).
-    A linear field on the quadratic node set takes its midsides as the mean of the
-    edge's ends. A periodic field needs nothing more: its slave entities share their
-    masters' dofs, so both sides of the period are written from the same values, and
-    nothing the size of a space is built.
-
-    What depends on the mesh and the spaces alone is kept in `cache` (`_node_layout`,
-    `_node_dofs`), so a step of a time series costs its values.
-    """
-    cache = {} if cache is None else cache
-    mesh, degree, widths = _check_functions(functions)
-    layout = _node_layout(mesh, degree, cache)
-    fields = []
-    for index, (func, width) in enumerate(zip(functions, widths)):
-        takes = _node_dofs(func.function_space(), mesh, degree, width, layout, cache)
-        fields.append((func.name() if func.name() else 'f{}'.format(index),
-                       layout['rows'], _node_values(func, takes)))
-    return {'n_nodes': layout['n_nodes'], 'n_cells': layout['n_cells'],
-            'degree': degree, 'mesh': mesh, 'layout': layout,
-            'conn': layout['conn'], 'cell_offset': layout['cell_offset'],
-            'fields': fields}
 
 
 def _block_of(path, item, comm):

@@ -802,35 +802,50 @@ def test_split_component_written_as_collapsed(monkeypatch):
 
 
 def test_periodic_write_lets_go_on_close():
-    """what a file builds for its fields is its own, kept across its steps and let go of
-    when it closes; a read into a space of the grid's degree, periodic too, builds no
-    space and no transfer, and a read into another degree builds them for the file
+    """what writes build for their fields is shared by the files writing them, kept
+    across their steps and let go of when the last of them closes; a read into a space of
+    the grid's degree, periodic too, builds no space and no transfer, and a read into
+    another degree builds them for the file alone
 
     A write keeps its node layout and each space's node dofs for the next step, and
     holds no unconstrained space and no transfer at all
-    (`test_periodic_write_builds_no_transfer`). Held module-wide, they outlived every
-    file: a Stokes tensor solve writing each direction between its solves carried them
-    into the next solves, and at 224 M dofs that took the job past its node's memory
+    (`test_periodic_write_builds_no_transfer`). Held module-wide for good, they outlived
+    every file: a Stokes tensor solve writing each direction between its solves carried
+    them into the next solves, and at 224 M dofs that took the job past its node's memory
     (stokes-beadpack, 2026-11-12).
     """
     from femtools import fast_interpolation
     mesh = unit_mesh(4, 'triangle')
     V = df.VectorFunctionSpace(mesh, 'CG', 2, constrained_domain=periodic_x())
-    u = df.Function(V)
+    u, v = df.Function(V), df.Function(V)
     u.rename('u', 'u')
+    v.rename('v', 'v')
     u.interpolate(df.Expression(PERIODIC_VELOCITY, t=0.0, degree=4))
+    v.interpolate(df.Expression(PERIODIC_VELOCITY, t=1.0, degree=4))
     before = set(fast_interpolation._TRANSFERS)
+    shared_before = set(export_p2_xdmf._SHARED)
     f = XDMFFile2(df.MPI.comm_world, tmp('letgo.xdmf'))
+    g = XDMFFile2(df.MPI.comm_world, tmp('letgo_v.xdmf'))
+    f.parameters['rewrite_function_mesh'] = False
     f.write(u, 0.0)
-    kept = dict(f._nodes)
-    assert kept, 'the write kept nothing for its next step'
+    kept = {k: export_p2_xdmf._SHARED[k][0] for k in f._held}
+    assert kept and set(kept) == set(export_p2_xdmf._SHARED) - shared_before, \
+        'the write kept nothing for its next step'
+    layout = kept[('mesh', mesh.id(), 2)]
+    assert 'conn' not in layout and 'ends' not in layout, 'the layout keeps the cells'
+    g.write(v, 0.0)
+    assert g._held == f._held, 'a second file over the same space built its own'
     f.write(u, 1.0)
-    assert all(f._nodes[k] is v for k, v in kept.items()), \
+    assert all(export_p2_xdmf._SHARED[k][0] is val for k, val in kept.items()), \
         'a second step built its layout or node dofs again'
-    assert not [k for k in f._nodes if k[:1] == ('plain',)], 'a write built a space'
+    assert not f._nodes, 'a write built a space'
     assert set(fast_interpolation._TRANSFERS) == before, 'a write built a transfer'
     f.close()
-    assert not f._nodes, 'the file still holds its node layout after close'
+    assert not f._held and set(kept) <= set(export_p2_xdmf._SHARED), \
+        'the first file to close let go of what another holds'
+    g.close()
+    assert not set(kept) & set(export_p2_xdmf._SHARED), \
+        'the shares outlived the files holding them'
 
     r = XDMFFile2(df.MPI.comm_world, tmp('letgo.xdmf'))
     back = df.Function(V)
@@ -856,8 +871,8 @@ def test_periodic_write_lets_go_on_close():
     assert not set(fast_interpolation._TRANSFERS) & made, 'its transfers outlived the file'
     assert_close(linear.vector().get_local(),
                  df.interpolate(u, W).vector().get_local(), 1e-14, 'read into P1')
-    print('two steps written with no space or transfer; the P1 read\'s {} transfer(s) '
-          'gone after close'.format(len(made)))
+    print('two files, one layout; two steps written with no space or transfer; the P1 '
+          'read\'s {} transfer(s) gone after close'.format(len(made)))
 
 
 DIRECT_SCRIPT = """

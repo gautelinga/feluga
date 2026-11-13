@@ -690,6 +690,8 @@ class XDMFFile2(object):
         self._held = set()
         weakref.finalize(self, _unshare, self._held)
         self._time = None           # the time of the last timed write
+        self._timed = set()         # (mesh id, degree) whose mesh a timed grid stored
+        self._warned = False        # rank zero said that the mesh is stored every step
         self._delegate = None       # a real dolfin.XDMFFile, for checkpoints
         self._mesh = None           # the last mesh seen, for a MeshValueCollection
 
@@ -883,6 +885,8 @@ class XDMFFile2(object):
             store = self._stored.get((mesh.id(), degree))
             rewrite = self.parameters['rewrite_function_mesh']
             if store is None or rewrite:
+                if rewrite and time is not None:
+                    self._warn_rewrite((mesh.id(), degree))
                 group = doc.mesh_group(time is not None)
                 conn, coords = _mesh_nodes(mesh, degree, layout)
                 store = (doc.slab(group + '/topology', layout['cell_offset'],
@@ -920,6 +924,20 @@ class XDMFFile2(object):
                            layout['cell_offset'], values, n_cells)
             doc.attribute(grid, name, values, 'Cell', ref=ref, shape=(n_cells, 1))
         self._finish()
+
+    def _warn_rewrite(self, key):
+        """Said once, on rank zero, at the second timed grid storing the same mesh:
+        `rewrite_function_mesh` (dolfin's default) stores the mesh at every step."""
+        if key in self._timed and not self._warned:
+            self._warned = True
+            if self._rank() == 0:
+                import warnings
+                warnings.warn(
+                    "XDMFFile2: {} stores its mesh again at every step, as dolfin does "
+                    "with rewrite_function_mesh on (its default); set "
+                    "f.parameters['rewrite_function_mesh'] = False to store it once"
+                    .format(self.path), stacklevel=4)
+        self._timed.add(key)
 
     # -- mesh ------------------------------------------------------------------
 

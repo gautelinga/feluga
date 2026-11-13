@@ -534,7 +534,9 @@ def test_time_series(cell):
 
 @CELLS
 def test_rewrite_function_mesh(cell):
-    """rewrite_function_mesh stores the mesh once or per step"""
+    """rewrite_function_mesh stores the mesh once or per step, and per step says so once,
+    at the second step"""
+    import warnings
     mesh = unit_mesh(cell=cell)
     u = quadratic_field(mesh)
     sizes = {}
@@ -542,8 +544,13 @@ def test_rewrite_function_mesh(cell):
         path = tmp('rw_{}.xdmf'.format(flag))
         with XDMFFile2(df.MPI.comm_world, path) as f:
             f.parameters['rewrite_function_mesh'] = flag
+            said = []
             for t in (0.0, 1.0, 2.0):
-                f.write(u, t)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    f.write(u, t)
+                said.append(sum('rewrite_function_mesh' in str(w.message) for w in caught))
+            assert said == ([0, 1, 0] if flag else [0, 0, 0]), (flag, said)
         grids = _scan(path)
         assert len(grids) == 3, len(grids)
         refs = {g['geometry_item'][1] for g in grids}

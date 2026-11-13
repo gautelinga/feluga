@@ -114,6 +114,14 @@ def sync(f):
     return f
 
 
+def collect_garbage():
+    """Destroy the PETSc objects Python has dropped, which petsc4py keeps until then
+    (femtools.garbage). Collective: call it at the same point on every rank, such as
+    once a time step."""
+    from femtools.garbage import cleanup
+    cleanup()
+
+
 def assemble(form, tensor=None):
     """femtools.fast_assembly's assemble (compiled once per form), after bringing the
     form's Functions that follow another up to date (`sync`), as on DOLFINx."""

@@ -787,6 +787,14 @@ def sync(f):
     return f
 
 
+def collect_garbage():
+    """Destroy the PETSc objects Python has dropped, which petsc4py keeps until then
+    (femtools.garbage). Collective: call it at the same point on every rank, such as
+    once a time step."""
+    from femtools.garbage import cleanup
+    cleanup()
+
+
 class Constant(fem.Constant):
     """dolfin's Constant(value): on the last mesh a space was made on, unless given."""
 

@@ -94,6 +94,10 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   and put back by `recover` after a kill between the renames: never a mix of two.
 - **`memory`**: hands freed heap back to the operating system, and reports what a process
   holds.
+- **`garbage`**: destroys the PETSc objects Python has dropped. petsc4py keeps an object
+  on a parallel communicator until `PETSc.garbage_cleanup` is called on it, collectively;
+  the backends' `collect_garbage` calls it (once a time step, say), and the DOLFINx
+  backend does before it makes a matrix.
 
 ### DOLFINx
 
@@ -101,9 +105,10 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   DOLFINx space (scalar, vector or mixed), paired by coordinates in parallel: the same
   rule as `periodic.periodic_box`, without dolfinx_mpc.
 - **`dolfinx.unique`**: `UniqueDofs`, a space's unique dofs (periodic slaves folded onto
-  their masters) numbered compactly, as dolfin's `constrained_domain` numbers them; one
-  PETSc scatter moves a Function to a compact vector and folds an assembled right-hand
-  side. A solver then sees vectors without slave entries, on either backend.
+  their masters) numbered compactly, as dolfin's `constrained_domain` numbers them,
+  each rank's in a bandwidth-reducing order of the periodic cell graph (for ILU and
+  AMG); one PETSc scatter moves a Function to a compact vector and folds an assembled
+  right-hand side. A solver then sees vectors without slave entries, on either backend.
 - **`dolfinx.assembly`**: matrices over unique dofs, folded during assembly through the
   dof map and preallocated exactly from the dofmaps (no slave rows, no product);
   right-hand sides folded by one scatter; the constants' null space. A reassembly adds

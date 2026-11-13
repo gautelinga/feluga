@@ -47,14 +47,19 @@ def _domains_key(a, comm):
 def create_matrix(a, rows, cols=None):
     """The matrix of bilinear form `a` over unique dofs (`rows`, `cols`: UniqueDofs),
     preallocated exactly. The preallocation is computed once per pair of UniqueDofs and
-    integration domains, and shared by the forms that have the same. Collective."""
+    integration domains, and shared by the forms that have the same. The PETSc objects
+    Python has dropped on the rows' communicator are destroyed first
+    (femtools.garbage). Collective."""
     from mpi4py import MPI
     from petsc4py import PETSc
+
+    from femtools.garbage import cleanup
 
     cols = rows if cols is None else cols
     if rows.bs != 1 or cols.bs != 1:
         raise NotImplementedError("matrices over blocked spaces")
     comm = rows.comm
+    cleanup(comm)  # matrices dropped since the last one, destroyed before another is made
     patterns = _PATTERNS.get((rows, cols), dict)
     key = _domains_key(a, comm)
     nnz = patterns.get(key)

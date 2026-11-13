@@ -113,8 +113,11 @@ class UniqueDofs:
     def __init__(self, V, slaves=None, masters=None, interleave=False, reorder=False):
         from petsc4py import PETSc
 
+        from femtools.garbage import register
+
         self.V = V
         self.comm = V.mesh.comm
+        register(self.comm)
         imap = V.dofmap.index_map
         bs = self.bs = V.dofmap.index_map_bs
         n_own, n_loc = imap.size_local, imap.size_local + imap.num_ghosts

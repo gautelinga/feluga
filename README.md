@@ -105,9 +105,12 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   PETSc scatter moves a Function to a compact vector and folds an assembled right-hand
   side. A solver then sees vectors without slave entries, on either backend.
 - **`dolfinx.assembly`**: matrices over unique dofs, folded during assembly through the
-  dof map and preallocated exactly (no slave rows, no product); right-hand sides with
-  lifting and Dirichlet values; the constants' null space. Each reassembly costs what a
-  plain DOLFINx one does.
+  dof map and preallocated exactly from the dofmaps (no slave rows, no product);
+  right-hand sides folded by one scatter; the constants' null space. A reassembly adds
+  each element matrix straight into PETSc's arrays through DOLFINx's assembler (a C++
+  extension built with CMake on first use, as `dolfinx.refine`'s; without it,
+  `MatSetValuesLocal`): 1.5-2x faster than `MatSetValuesLocal`, and a value outside the
+  pattern is an error.
 - **`dolfinx.mixed`**: `subfunction`, `set_subfunction`, `subspace` and
   `AssignedVectorFunction`, as in `mixed`, for DOLFINx Functions (index copies through
   the collapse dof maps, built once).
@@ -146,7 +149,9 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 `import femtools` needs numpy and h5py only. dolfin, mpi4py and scipy are imported where
 they are used. `probes` and `gradient` compile their C++ with cppimport (pybind11, a
 compiler and `libdolfin-dev`) on first import; `periodic`, `periodic_partition` and
-`plaza_periodic` use dolfin's JIT on first use. `periodic_partition` needs a ParMETIS with
+`plaza_periodic` use dolfin's JIT on first use. `dolfinx.refine` and `dolfinx.assembly`
+build their C++ with CMake, a compiler and nanobind against the installed DOLFINx on
+first use, cached in FEMTOOLS_JIT_DIR (else ~/.cache/femtools). `periodic_partition` needs a ParMETIS with
 64-bit `idx_t` past 2^31 cells.
 
 Parallel HDF5 I/O needs h5py built with MPI (Debian/Ubuntu: `python3-h5py-mpi`, which

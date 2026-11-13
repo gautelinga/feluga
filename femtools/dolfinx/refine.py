@@ -26,85 +26,17 @@ is made (`TooManyCells`).
 
 The children stay on their parent's rank (DOLFINx's identity partitioner) unless
 `redistribute`; the parent-cell map (`parent`, new local cell -> old local cell) is
-returned when they stay. The C++ (femtools/dolfinx/cpp) is built on first use with CMake
-against the installed DOLFINx and nanobind, into femtools' cache folder
-(FEMTOOLS_JIT_DIR, else ~/.cache/femtools), rank 0 building while the others wait
-(femtools.jit: a failed build raises on every rank, concurrent jobs share the cache).
+returned when they stay. The C++ (femtools/dolfinx/cpp/plaza_periodic.cpp) is built on
+first use (femtools.dolfinx.compiled).
 """
-import hashlib
-import importlib.util
-import os
-import subprocess
-import sys
-
 import numpy as np
 
 from femtools.periodic_core import TOL, TooManyCells  # noqa: F401  (raised here)
 
-HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp")
-_MODULE = [None]
-
 
 def _module(comm):
-    """The compiled extension, built once per source and installation: by rank 0 into a
-    fresh folder renamed into the cache when complete (femtools.jit), its path then
-    broadcast. A failed build raises on every rank, naming the installed DOLFINx."""
-    if _MODULE[0] is not None:
-        return _MODULE[0]
-    import tempfile
-
-    import dolfinx
-
-    from femtools.jit import install_dir, on_every_rank, on_rank0
-    sources = [os.path.join(HERE, f) for f in ("plaza_periodic.cpp", "CMakeLists.txt")]
-    sources.append(os.path.join(HERE, "..", "..", "cpp", "plaza_periodic_rules.h"))
-    h = hashlib.sha1()
-    for path in sources:
-        with open(path, "rb") as f:
-            h.update(f.read())
-    h.update((dolfinx.__version__ + sys.version).encode())
-    root = os.environ.get("FEMTOOLS_JIT_DIR") or os.path.join(
-        os.path.expanduser("~"), ".cache", "femtools")
-    name = "plaza_periodic_x_" + h.hexdigest()[:16]
-
-    def built_in(folder):
-        found = [f for f in os.listdir(folder)
-                 if f.startswith("plaza_periodic_x") and f.endswith(".so")]
-        if len(found) != 1:
-            raise RuntimeError("{} holds {} extension libraries, not one".format(
-                folder, len(found)))
-        return os.path.join(folder, found[0])
-
-    def build():
-        final = os.path.join(root, name)
-        if os.path.exists(os.path.join(final, "done")):
-            return built_in(final)
-        os.makedirs(root, exist_ok=True)
-        tmp = tempfile.mkdtemp(prefix=name + ".", dir=root)
-        steps = [["cmake", "-S", HERE, "-B", tmp, "-DCMAKE_BUILD_TYPE=Release",
-                  "-DPython_EXECUTABLE=" + sys.executable],
-                 ["cmake", "--build", tmp, "-j", str(min(8, os.cpu_count() or 1))]]
-        for step in steps:
-            proc = subprocess.run(step, capture_output=True, text=True)
-            if proc.returncode:
-                raise RuntimeError("{} failed against DOLFINx {}:\n{}".format(
-                    " ".join(step[:2]), dolfinx.__version__,
-                    (proc.stdout + proc.stderr)[-4000:]))
-        open(os.path.join(tmp, "done"), "w").close()
-        return built_in(install_dir(tmp, final))
-
-    so = on_rank0(comm, build, "femtools.dolfinx.refine: building the extension against "
-                  "DOLFINx {}".format(dolfinx.__version__))
-
-    def load():
-        spec = importlib.util.spec_from_file_location("plaza_periodic_x", so)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    _MODULE[0] = on_every_rank(comm, load, "femtools.dolfinx.refine: loading " + so,
-                               wait_for=so)
-    return _MODULE[0]
+    from femtools.dolfinx.compiled import module
+    return module(comm, "plaza_periodic", "femtools.dolfinx.refine")
 
 
 def _cells(mesh, markers):

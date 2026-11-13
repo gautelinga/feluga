@@ -1,10 +1,14 @@
 """Worker for tests/test_dolfinx_unique.py: the preallocation of `create_matrix`, which
 enumerates the dofs each integration entity couples, against the pattern of a plain
 DOLFINx assembly folded onto unique dofs; (d_nnz, o_nnz) must be equal entry by entry.
+And the values of `assemble_matrix`'s own inserter (every assembly after the first)
+against those of MatSetValuesLocal (the first), and its refusal of a form whose values
+fall outside the matrix's pattern.
 Scalar P1 and P2, mixed P2xP2 and Taylor-Hood spaces, periodic in no axis, in x, in x
 and y; cell, exterior-facet, interior-facet and cell-subdomain integrals; square and
 rectangular forms; 2D and 3D; the pairs enumerated at once and in small batches.
-Writes {case: mismatching rows over all ranks} as JSON (rank 0).
+Writes {case: mismatching rows over all ranks, plus 1 if the values differ} and
+{"refused": whether every rank refused} as JSON (rank 0).
 
     [mpirun -n k] python3 tests/dolfinx_pattern_worker.py out.json
 """
@@ -134,7 +138,27 @@ def compare(a, rows, cols):
         finally:
             assembly._CHUNK = default
         bad += int(np.count_nonzero((new[0] != ref[0]) | (new[1] != ref[1])))
-    return comm.allreduce(bad)
+    K = assembly.assemble_matrix(assembly.create_matrix(a, rows, cols), a)
+    first = K.copy()
+    assembly.assemble_matrix(K, a)
+    K.axpy(-1, first)
+    differ = K.norm(PETSc.NormType.NORM_INFINITY) > 1e-14 * max(
+        first.norm(PETSc.NormType.NORM_INFINITY), 1)
+    return comm.allreduce(bad) + int(differ)
+
+
+def refused(msh, V):
+    """Whether a form coupling across interior facets, assembled into the matrix of one
+    coupling within cells only, is refused on every rank."""
+    u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
+    U = UniqueDofs(V)
+    K = assembly.assemble_matrix(assembly.create_matrix(fem.form(u * v * ufl.dx), U),
+                                 fem.form(u * v * ufl.dx))
+    try:
+        assembly.assemble_matrix(K, fem.form(ufl.jump(u) * ufl.jump(v) * ufl.dS))
+    except RuntimeError as e:
+        return comm.allreduce("outside the matrix's pattern" in str(e), op=MPI.LAND)
+    return False
 
 
 res = {}
@@ -157,6 +181,10 @@ for dim, msh in ((2, mesh.create_rectangle(comm, [[0, 0], [1, 1]], [7, 9])),
                 res["{}d/{}/{}x{}/{}".format(dim, per, rk, ck, name)] = compare(
                     a, U[rk], U[ck])
 
+    if dim == 2:
+        res_refused = refused(msh, S["P1"])
+
 if comm.rank == 0:
+    res["refused"] = res_refused
     with open(sys.argv[1], "w") as fh:
         json.dump(res, fh)

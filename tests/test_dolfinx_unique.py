@@ -65,6 +65,7 @@ def test_unique_dofs_three_ranks(tmp_path):
 
 
 def _check_pattern(r):
+    assert r.pop("refused") is True
     assert len(r) == 198
     assert not {k: v for k, v in r.items() if v}
 

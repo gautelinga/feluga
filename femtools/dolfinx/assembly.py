@@ -11,6 +11,10 @@ one scatter.
 column space's UniqueDofs as `cols`. Dirichlet conditions act on the assembled compact
 tensors (`femtools.backend.dolfinx.DirichletBC`). Matrices over blocked spaces are not
 supported (scalar and mixed spaces are).
+
+A matrix is assembled by DOLFINx's assembler with an inserter of femtools' own
+(cpp/folded_assembly.cpp), which adds each element matrix straight into PETSc's arrays
+instead of through MatSetValuesLocal's index mapping and lookups.
 """
 import hashlib
 
@@ -22,6 +26,8 @@ from femtools.lru import WeakCache
 _PATTERNS = WeakCache()
 # Pairs of dofs enumerated at a time (int64 keys: 8 bytes each)
 _CHUNK = 1 << 21
+# [the C++ inserter, or None where it cannot be built], once tried
+_INSERTER = []
 
 
 def _domains_key(a, comm):
@@ -142,12 +148,43 @@ def _preallocation(a, rows, cols):
     return d_nnz.astype(PETSc.IntType), (nnz - d_nnz).astype(PETSc.IntType)
 
 
+def _inserter(comm):
+    """The C++ extension that adds element matrices straight into a matrix's AIJ arrays
+    (cpp/folded_assembly.cpp), or None if it cannot be built here: then rank 0 warns
+    once and matrices are assembled through MatSetValuesLocal. Collective."""
+    if _INSERTER:
+        return _INSERTER[0]
+    from femtools.dolfinx.compiled import module
+    try:
+        _INSERTER.append(module(comm, "folded_assembly", "femtools.dolfinx.assembly"))
+    except RuntimeError as e:
+        if comm.rank == 0:
+            import sys
+            print("femtools: assembling matrices through PETSc's MatSetValuesLocal, more "
+                  "slowly, since the C++ inserter could not be built:\n{}".format(e),
+                  file=sys.stderr)
+        _INSERTER.append(None)
+    return _INSERTER[0]
+
+
 def assemble_matrix(K, a):
-    """Assemble form `a` into `K` (from `create_matrix`)."""
+    """Assemble form `a` into `K` (from `create_matrix`). From the second assembly on,
+    the element matrices are added straight into K's arrays (its pattern then final);
+    the first goes through MatSetValuesLocal. A value outside K's pattern in a row owned
+    here raises on every rank; in a row owned elsewhere, PETSc refuses it there.
+    Collective."""
+    from mpi4py import MPI
     from dolfinx.fem import petsc
 
+    comm = K.comm.tompi4py()
+    inserter = _inserter(comm) if a.dtype == np.float64 else None
     K.zeroEntries()
-    petsc.assemble_matrix(K, a)
+    missed = inserter.assemble(a._cpp_object, K.handle) if inserter is not None else -1
+    if missed < 0:
+        petsc.assemble_matrix(K, a)
+    elif comm.allreduce(missed, op=MPI.SUM):
+        raise RuntimeError("assemble_matrix: {} values of the form fall outside the "
+                           "matrix's pattern".format(comm.allreduce(missed, op=MPI.SUM)))
     K.assemble()
     return K
 

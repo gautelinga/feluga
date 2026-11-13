@@ -82,3 +82,10 @@ def test_assemble_matrix_once_per_form_and_conditions():
     assert Mbc is not M and same(Mbc.array(), expected.array())
     with pytest.raises(ValueError):
         fa.assemble_matrix(v * df.dx)
+    # conditions on the same rows with other values (a copy, homogenized) apply the same
+    # rows to the matrix: the same matrix; conditions on other rows another
+    same_rows = df.DirichletBC(bc)
+    same_rows.homogenize()
+    assert fa.assemble_matrix(u * v * df.dx, [same_rows]) is Mbc
+    left = df.DirichletBC(V, df.Constant(1.), "near(x[0], 0.0)")
+    assert fa.assemble_matrix(u * v * df.dx, [left]) is not Mbc

@@ -57,13 +57,36 @@ MATRIX_CAPACITY = 64
 _MATRICES = LRU(MATRIX_CAPACITY)
 
 
+def _rows(bc):
+    """What applying Dirichlet condition `bc` does to a matrix: its constrained rows,
+    which become the identity's whatever the condition's values; as bytes of the sorted
+    local indices."""
+    import numpy as np
+    rows = getattr(bc, "global_rows", None)       # femtools.backend.dolfinx's
+    if rows is not None:
+        r = np.asarray(rows(), dtype=np.int64)
+    else:                                         # dolfin's: its local dofs
+        r = np.fromiter(bc.get_boundary_values().keys(), dtype=np.int64)
+    return np.sort(r).tobytes()
+
+
+def _comm(form):
+    """The communicator of the form's mesh (mpi4py), on either backend."""
+    mesh = form.ufl_domain().ufl_cargo()
+    return mesh.mpi_comm() if callable(getattr(mesh, "mpi_comm", None)) else mesh.comm
+
+
 def constant_matrix(form, bcs, assemble, cache=_MATRICES):
     """The matrix of the bilinear `form` (`assemble(form)`, either backend's) with the
-    Dirichlet conditions `bcs` applied, made on the first call for an equal form and the
-    same conditions and returned again on later ones (while among the `cache`'s most
-    recently used)."""
-    key = (form, tuple(bcs))
+    Dirichlet conditions `bcs` applied, made on the first call for an equal form and
+    conditions that constrain the same rows, and returned again on later ones (while
+    among the `cache`'s most recently used). Conditions differing only in their values
+    give the same matrix. Collective: the ranks agree on whether it is cached."""
+    from mpi4py import MPI
+    key = (form, tuple(_rows(bc) for bc in bcs))
     A = cache.get(key)
+    if not _comm(form).allreduce(A is not None, op=MPI.LAND):
+        A = None
     if A is None:
         if len(form.arguments()) != 2:
             raise ValueError("assemble_matrix takes a bilinear form")

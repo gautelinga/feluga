@@ -10,6 +10,13 @@
 // whose values are added where a binary search finds their columns in the row. Rows
 // owned by another rank are kept and given to MatSetValues afterwards (PETSc stashes
 // and sends them); the caller zeroes the matrix before and finalises it after.
+//
+// Both this and the vector assembly (assemble_vector, into a ghosted vector's local
+// array) take the cells of a cell integral a block at a time, packing the coefficients
+// of that block alone: DOLFINx's assembler packs every cell's at once, an array of
+// cells x coefficient values that is often larger than the matrix's share of a cell.
+// The cells and the order of the additions are DOLFINx's, so the result is its result.
+// Facet integrals, over far fewer entities, are packed whole, as DOLFINx does.
 
 #include <algorithm>
 #include <cstdint>
@@ -19,11 +26,19 @@
 #include <string>
 #include <vector>
 
+#include <map>
+#include <utility>
+
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 
 #include <dolfinx/fem/DirichletBC.h>
 #include <dolfinx/fem/Form.h>
+#include <dolfinx/fem/assemble_matrix_impl.h>
+#include <dolfinx/fem/assemble_vector_impl.h>
 #include <dolfinx/fem/assembler.h>
+#include <dolfinx/fem/pack.h>
+#include <dolfinx/fem/utils.h>
 
 #include <petscmat.h>
 
@@ -37,6 +52,296 @@ void check(PetscErrorCode ierr, const char* what)
   if (ierr != 0)
     throw std::runtime_error(std::string("PETSc error ") + std::to_string(ierr) + " in "
                              + what);
+}
+
+using T = double;
+using Form = fem::Form<T, T>;
+using IT = fem::IntegralType;
+using xmap_t = md::mdspan<const T, md::extents<std::size_t, md::dynamic_extent, 3>>;
+using map2_t = md::mdspan<const std::int32_t, md::dextents<std::size_t, 2>>;
+using ents2_t = md::mdspan<const std::int32_t, md::extents<std::size_t, md::dynamic_extent, 2>>;
+using ents22_t
+    = md::mdspan<const std::int32_t, md::extents<std::size_t, md::dynamic_extent, 2, 2>>;
+using c2x_t = md::mdspan<const T, md::extents<std::size_t, md::dynamic_extent, 2,
+                                               md::dynamic_extent>>;
+
+// Cells of a cell integral taken at a time (set_block changes it, for tests)
+std::size_t BLOCK = 8192;
+
+// The coefficients of cell integral i for its cells [start, start + m), into c
+void pack_cells(std::vector<T>& c, const Form& a, int i, std::size_t start, std::size_t m,
+                int cstride)
+{
+  const auto& coefficients = a.coefficients();
+  const std::vector<int> offsets = a.coefficient_offsets();
+  c.assign(m * cstride, 0);
+  for (int k : a.active_coeffs(IT::cell, i))
+  {
+    std::span<const std::int32_t> cells = a.domain_coeff(IT::cell, i, k);
+    md::mdspan<const std::int32_t, md::dextents<std::size_t, 1>> block(cells.data() + start,
+                                                                       m);
+    fem::impl::pack_coefficient_entity(std::span<T>(c), cstride, *coefficients[k],
+                                       fem::impl::get_cell_orientation_info(*coefficients[k]),
+                                       block, offsets[k]);
+  }
+}
+
+// The coefficients of the form's facet (and vertex, ridge) integrals, packed whole
+std::map<std::pair<IT, int>, std::pair<std::vector<T>, int>> pack_facets(const Form& a)
+{
+  std::map<std::pair<IT, int>, std::pair<std::vector<T>, int>> coeffs;
+  for (IT type : {IT::interior_facet, IT::exterior_facet, IT::vertex, IT::ridge})
+    for (int i = 0; i < a.num_integrals(type, 0); ++i)
+      coeffs.emplace(std::pair{type, i}, fem::allocate_coefficient_storage(a, type, i));
+  fem::pack_coefficients(a, coeffs);
+  return coeffs;
+}
+
+md::mdspan<const std::uint8_t, md::dextents<std::size_t, 2>> facet_permutations(const Form& a)
+{
+  md::mdspan<const std::uint8_t, md::dextents<std::size_t, 2>> perms;
+  if (a.needs_facet_permutations())
+  {
+    auto mesh = a.mesh();
+    int n = mesh::cell_num_entities(mesh->topology()->cell_types()[0],
+                                    mesh->topology()->dim() - 1);
+    mesh->topology_mutable()->create_entity_permutations();
+    const std::vector<std::uint8_t>& p = mesh->topology()->get_facet_permutations();
+    perms = md::mdspan(p.data(), p.size() / n, n);
+  }
+  return perms;
+}
+
+std::span<const std::uint32_t> cell_info(const Form& a, const fem::FiniteElement<T>& e,
+                                         const mesh::Mesh<T>& m)
+{
+  if (e.needs_dof_transformations() or a.needs_facet_permutations())
+  {
+    m.topology_mutable()->create_entity_permutations();
+    return std::span(m.topology()->get_cell_permutation_info());
+  }
+  return {};
+}
+
+// Matrix form a's element matrices given to `add`, as fem::assemble_matrix(add, a, {})
+// gives them, the cells a block at a time (one cell type; else DOLFINx's own)
+template <typename Add>
+void assemble_matrix_blocks(Add add, const Form& a)
+{
+  auto mesh = a.mesh();
+  if (mesh->topology()->cell_types().size() != 1)
+  {
+    fem::assemble_matrix(
+        add, a, std::vector<std::reference_wrapper<const fem::DirichletBC<T, T>>>{});
+    return;
+  }
+  const std::vector<T> constants = fem::pack_constants(a);
+  auto xg = mesh->geometry().x();
+  xmap_t x(xg.data(), xg.size() / 3, 3);
+  map2_t x_dofmap = mesh->geometry().dofmap();
+  auto V0 = a.function_spaces().at(0), V1 = a.function_spaces().at(1);
+  auto dofmap0 = V0->dofmap(), dofmap1 = V1->dofmap();
+  auto dofs0 = dofmap0->map(), dofs1 = dofmap1->map();
+  const int bs0 = dofmap0->bs(), bs1 = dofmap1->bs();
+  auto element0 = V0->element(), element1 = V1->element();
+  auto P0 = element0->template dof_transformation_fn<T>(fem::doftransform::standard);
+  auto P1T
+      = element1->template dof_transformation_right_fn<T>(fem::doftransform::transpose);
+  std::span<const std::uint32_t> info0 = cell_info(a, *element0, *V0->mesh());
+  std::span<const std::uint32_t> info1 = cell_info(a, *element1, *V1->mesh());
+  std::span<const std::int8_t> bc0, bc1;
+  const std::vector<int> offsets = a.coefficient_offsets();
+  const int cstride = offsets.empty() ? 0 : offsets.back();
+
+  std::vector<T> c;
+  for (int i = 0; i < a.num_integrals(IT::cell, 0); ++i)
+  {
+    auto fn = a.kernel(IT::cell, i, 0);
+    std::span<const std::int32_t> cells = a.domain(IT::cell, i, 0);
+    std::span<const std::int32_t> cells0 = a.domain_arg(IT::cell, 0, i, 0);
+    std::span<const std::int32_t> cells1 = a.domain_arg(IT::cell, 1, i, 0);
+    for (std::size_t start = 0; start < cells.size(); start += BLOCK)
+    {
+      const std::size_t m = std::min(BLOCK, cells.size() - start);
+      pack_cells(c, a, i, start, m, cstride);
+      fem::impl::assemble_cells_matrix<T, false>(
+          add, x_dofmap, x, cells.subspan(start, m), {dofs0, bs0, cells0.subspan(start, m)},
+          P0, {dofs1, bs1, cells1.subspan(start, m)}, P1T, bc0, bc1, fn,
+          md::mdspan<const T, md::dextents<std::size_t, 2>>(c.data(), m, cstride),
+          std::span<const T>(constants), info0, info1);
+    }
+  }
+
+  auto coeffs = pack_facets(a);
+  auto perms = facet_permutations(a);
+  for (int i = 0; i < a.num_integrals(IT::interior_facet, 0); ++i)
+  {
+    auto fn = a.kernel(IT::interior_facet, i, 0);
+    auto& [cf, cs] = coeffs.at({IT::interior_facet, i});
+    std::span f = a.domain(IT::interior_facet, i, 0);
+    std::span f0 = a.domain_arg(IT::interior_facet, 0, i, 0);
+    std::span f1 = a.domain_arg(IT::interior_facet, 1, i, 0);
+    fem::impl::assemble_interior_facets<T, false>(
+        add, x_dofmap, x, ents22_t(f.data(), f.size() / 4, 2, 2),
+        {*dofmap0, bs0, ents22_t(f0.data(), f0.size() / 4, 2, 2)}, P0,
+        {*dofmap1, bs1, ents22_t(f1.data(), f1.size() / 4, 2, 2)}, P1T, bc0, bc1, fn,
+        c2x_t(cf.data(), f.size() / 4, 2, cs), std::span<const T>(constants), info0, info1,
+        perms);
+  }
+  for (IT type : {IT::exterior_facet, IT::vertex, IT::ridge})
+  {
+    auto p = type == IT::exterior_facet
+                 ? perms
+                 : md::mdspan<const std::uint8_t, md::dextents<std::size_t, 2>>{};
+    for (int i = 0; i < a.num_integrals(type, 0); ++i)
+    {
+      auto fn = a.kernel(type, i, 0);
+      auto& [cf, cs] = coeffs.at({type, i});
+      std::span e = a.domain(type, i, 0);
+      std::span e0 = a.domain_arg(type, 0, i, 0);
+      std::span e1 = a.domain_arg(type, 1, i, 0);
+      ents2_t ents(e.data(), e.size() / 2, 2);
+      fem::impl::assemble_entities<T, false>(
+          add, x_dofmap, x, ents, {dofs0, bs0, ents2_t(e0.data(), e0.size() / 2, 2)}, P0,
+          {dofs1, bs1, ents2_t(e1.data(), e1.size() / 2, 2)}, P1T, bc0, bc1, fn,
+          md::mdspan<const T, md::dextents<std::size_t, 2>>(cf.data(), ents.extent(0), cs),
+          std::span<const T>(constants), info0, info1, p);
+    }
+  }
+}
+
+// Vector form L assembled into b (a ghosted vector's local array, owned then ghost
+// entries), added to what b holds, the cells a block at a time
+template <int BS>
+void assemble_vector_blocks(std::span<T> b, const Form& L)
+{
+  auto mesh = L.mesh();
+  const std::vector<T> constants = fem::pack_constants(L);
+  auto xg = mesh->geometry().x();
+  xmap_t x(xg.data(), xg.size() / 3, 3);
+  map2_t x_dofmap = mesh->geometry().dofmap();
+  auto V0 = L.function_spaces().at(0);
+  auto dofmap = V0->dofmap();
+  auto dofs = dofmap->map();
+  const int bs = dofmap->bs();
+  auto element = V0->element();
+  auto P0 = element->template dof_transformation_fn<T>(fem::doftransform::standard);
+  std::span<const std::uint32_t> info0 = cell_info(L, *element, *V0->mesh());
+  const std::vector<int> offsets = L.coefficient_offsets();
+  const int cstride = offsets.empty() ? 0 : offsets.back();
+
+  std::vector<T> c;
+  for (int i = 0; i < L.num_integrals(IT::cell, 0); ++i)
+  {
+    auto fn = L.kernel(IT::cell, i, 0);
+    std::span<const std::int32_t> cells = L.domain(IT::cell, i, 0);
+    std::span<const std::int32_t> cells0 = L.domain_arg(IT::cell, 0, i, 0);
+    for (std::size_t start = 0; start < cells.size(); start += BLOCK)
+    {
+      const std::size_t m = std::min(BLOCK, cells.size() - start);
+      pack_cells(c, L, i, start, m, cstride);
+      fem::impl::assemble_cells<BS>(
+          P0, b, x_dofmap, x, cells.subspan(start, m),
+          {dofs, bs, cells0.subspan(start, m)}, fn, std::span<const T>(constants),
+          md::mdspan<const T, md::dextents<std::size_t, 2>>(c.data(), m, cstride), info0);
+    }
+  }
+
+  auto coeffs = pack_facets(L);
+  auto perms = facet_permutations(L);
+  for (int i = 0; i < L.num_integrals(IT::interior_facet, 0); ++i)
+  {
+    auto fn = L.kernel(IT::interior_facet, i, 0);
+    auto& [cf, cs] = coeffs.at({IT::interior_facet, i});
+    std::span f = L.domain(IT::interior_facet, i, 0);
+    std::span f1 = L.domain_arg(IT::interior_facet, 0, i, 0);
+    fem::impl::assemble_interior_facets<BS>(
+        P0, b, x_dofmap, x, ents22_t(f.data(), f.size() / 4, 2, 2),
+        {*dofmap, bs, ents22_t(f1.data(), f1.size() / 4, 2, 2)}, fn,
+        std::span<const T>(constants), c2x_t(cf.data(), f.size() / 4, 2, cs), info0, perms);
+  }
+  for (IT type : {IT::exterior_facet, IT::vertex, IT::ridge})
+  {
+    auto p = type == IT::exterior_facet
+                 ? perms
+                 : md::mdspan<const std::uint8_t, md::dextents<std::size_t, 2>>{};
+    for (int i = 0; i < L.num_integrals(type, 0); ++i)
+    {
+      auto fn = L.kernel(type, i, 0);
+      auto& [cf, cs] = coeffs.at({type, i});
+      std::span e = L.domain(type, i, 0);
+      std::span e1 = L.domain_arg(type, 0, i, 0);
+      ents2_t ents(e.data(), e.size() / 2, 2);
+      fem::impl::assemble_entities<BS>(
+          P0, b, x_dofmap, x, ents, {dofs, bs, ents2_t(e1.data(), e1.size() / 2, 2)}, fn,
+          std::span<const T>(constants),
+          md::mdspan<const T, md::dextents<std::size_t, 2>>(cf.data(), ents.extent(0), cs),
+          info0, p);
+    }
+  }
+}
+
+/// Add the matrix of form `a` into the PETSc matrix at `handle` through
+/// MatSetValuesLocal (its local-to-global maps), the cells a block at a time: for a
+/// matrix whose pattern is not yet final (its first assembly). The caller zeroes and
+/// finalises it. Returns false, adding nothing, unless the matrix has local-to-global
+/// maps of block size 1 over the local dofs of the form's spaces.
+bool assemble_local(const Form& a, std::uintptr_t handle)
+{
+  Mat A = reinterpret_cast<Mat>(handle);
+  ISLocalToGlobalMapping maps[2];
+  check(MatGetLocalToGlobalMapping(A, &maps[0], &maps[1]), "MatGetLocalToGlobalMapping");
+  for (int k = 0; k < 2; ++k)
+  {
+    PetscInt bs, n;
+    if (!maps[k])
+      return false;
+    check(ISLocalToGlobalMappingGetBlockSize(maps[k], &bs), "ISLocalToGlobalMappingGetBlockSize");
+    check(ISLocalToGlobalMappingGetSize(maps[k], &n), "ISLocalToGlobalMappingGetSize");
+    auto dofmap = a.function_spaces().at(k)->dofmap();
+    if (bs != 1
+        or n != PetscInt(dofmap->index_map_bs()
+                         * (dofmap->index_map->size_local() + dofmap->index_map->num_ghosts())))
+    {
+      return false;
+    }
+  }
+  auto add = [A](std::span<const std::int32_t> rows, std::span<const std::int32_t> cols,
+                 std::span<const double> vals) -> int
+  {
+    static_assert(sizeof(PetscInt) == sizeof(std::int32_t),
+                  "local indices passed as PetscInt");
+    check(MatSetValuesLocal(A, rows.size(), reinterpret_cast<const PetscInt*>(rows.data()),
+                            cols.size(), reinterpret_cast<const PetscInt*>(cols.data()),
+                            vals.data(), ADD_VALUES),
+          "MatSetValuesLocal");
+    return 0;
+  };
+  assemble_matrix_blocks(add, a);
+  return true;
+}
+
+/// Add the vector of form `L` into `b`, the local array (owned then ghost entries) of a
+/// vector over L's space, the cells a block at a time. Returns false, adding nothing,
+/// for a mesh of several cell types.
+bool assemble_vector(const Form& L,
+                     nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu> b)
+{
+  if (L.mesh()->topology()->cell_types().size() != 1)
+    return false;
+  std::span<T> out(b.data(), b.size());
+  switch (L.function_spaces().at(0)->dofmap()->bs())
+  {
+  case 1:
+    assemble_vector_blocks<1>(out, L);
+    break;
+  case 3:
+    assemble_vector_blocks<3>(out, L);
+    break;
+  default:
+    assemble_vector_blocks<-1>(out, L);
+  }
+  return true;
 }
 
 // One AIJ block opened for writing: its rows' column indices and its values.
@@ -114,9 +419,10 @@ struct Indices
 
 /// Add the matrix of form `a` into the PETSc matrix at `handle` (a petsc4py
 /// Mat.handle). Returns the number of values that fell outside the matrix's pattern
-/// (not added), or -1 if the matrix is not one this can fill (not AIJ, never assembled,
-/// without local-to-global maps of block size 1 over the local dofs of the form's
-/// spaces), when nothing is added.
+/// (not added); -1 if the matrix was never assembled (its pattern not final: see
+/// assemble_local), -2 if it is not one this can fill (not AIJ, or without
+/// local-to-global maps of block size 1 over the local dofs of the form's spaces),
+/// when nothing is added.
 std::int64_t assemble(const fem::Form<double, double>& a, std::uintptr_t handle)
 {
   Mat A = reinterpret_cast<Mat>(handle);
@@ -124,7 +430,9 @@ std::int64_t assemble(const fem::Form<double, double>& a, std::uintptr_t handle)
   check(PetscObjectTypeCompare((PetscObject)A, MATMPIAIJ, &mpi), "PetscObjectTypeCompare");
   check(PetscObjectTypeCompare((PetscObject)A, MATSEQAIJ, &seq), "PetscObjectTypeCompare");
   check(MatAssembled(A, &assembled), "MatAssembled");
-  if (!(mpi || seq) || !assembled)
+  if (!(mpi || seq))
+    return -2;
+  if (!assembled)
     return -1;
 
   Mat Ad = A, Ao = nullptr;
@@ -161,7 +469,7 @@ std::int64_t assemble(const fem::Form<double, double>& a, std::uintptr_t handle)
     {
       rg.close();
       cg.close();
-      return -1;
+      return -2;
     }
     // row[i]: row of local dof i in the blocks, -1 if another rank owns it
     std::vector<PetscInt> row(rg.n);
@@ -215,8 +523,7 @@ std::int64_t assemble(const fem::Form<double, double>& a, std::uintptr_t handle)
       }
       return 0;
     };
-    fem::assemble_matrix(
-        add, a, std::vector<std::reference_wrapper<const fem::DirichletBC<double, double>>>{});
+    assemble_matrix_blocks(add, a);
   }
   catch (...)
   {
@@ -244,4 +551,8 @@ std::int64_t assemble(const fem::Form<double, double>& a, std::uintptr_t handle)
 NB_MODULE(folded_assembly_x, m)
 {
   m.def("assemble", &assemble, nb::arg("form"), nb::arg("handle"));
+  m.def("assemble_vector", &assemble_vector, nb::arg("form"), nb::arg("b"));
+  m.def("assemble_local", &assemble_local, nb::arg("form"), nb::arg("handle"));
+  m.def("set_block", [](std::size_t n) { BLOCK = std::max<std::size_t>(n, 1); },
+        nb::arg("cells"));
 }

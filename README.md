@@ -116,7 +116,8 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   each element matrix straight into PETSc's arrays through DOLFINx's assembler (a C++
   extension built with CMake on first use, as `dolfinx.refine`'s; without it,
   `MatSetValuesLocal`): 1.5-2x faster than `MatSetValuesLocal`, and a value outside the
-  pattern is an error.
+  pattern is an error. Matrices and vectors are assembled a block of cells at a time,
+  with the coefficients of that block alone packed (DOLFINx packs every cell's at once).
 - **`dolfinx.mixed`**: `subfunction`, `set_subfunction`, `subspace` and
   `AssignedVectorFunction`, as in `mixed`, for DOLFINx Functions (index copies through
   the collapse dof maps, built once).

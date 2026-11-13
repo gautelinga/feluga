@@ -187,7 +187,8 @@ def _inserter(comm):
 def assemble_matrix(K, a):
     """Assemble form `a` into `K` (from `create_matrix`). From the second assembly on,
     the element matrices are added straight into K's arrays (its pattern then final);
-    the first goes through MatSetValuesLocal. A value outside K's pattern in a row owned
+    the first goes through MatSetValuesLocal. Either way the extension packs the form's
+    coefficients a block of cells at a time. A value outside K's pattern in a row owned
     here raises on every rank; in a row owned elsewhere, PETSc refuses it there.
     Collective."""
     from mpi4py import MPI
@@ -196,8 +197,10 @@ def assemble_matrix(K, a):
     comm = K.comm.tompi4py()
     inserter = _inserter(comm) if a.dtype == np.float64 else None
     K.zeroEntries()
-    missed = inserter.assemble(a._cpp_object, K.handle) if inserter is not None else -1
-    if missed < 0:
+    missed = inserter.assemble(a._cpp_object, K.handle) if inserter is not None else -2
+    if missed == -1 and inserter.assemble_local(a._cpp_object, K.handle):
+        pass                            # the first assembly, through the local maps
+    elif missed < 0:
         petsc.assemble_matrix(K, a)
     elif comm.allreduce(missed, op=MPI.SUM):
         raise RuntimeError("assemble_matrix: {} values of the form fall outside the "
@@ -207,13 +210,19 @@ def assemble_matrix(K, a):
 
 
 def assemble_vector(b, L, space):
-    """Assemble linear form `L` into compact vector `b` over `space` (UniqueDofs)."""
+    """Assemble linear form `L` into compact vector `b` over `space` (UniqueDofs): by
+    the C++ extension, which packs the coefficients a block of cells at a time, else by
+    DOLFINx. Collective."""
     from dolfinx.fem import petsc
 
     s = space.plain_vector()
+    inserter = _inserter(space.comm) if L.dtype == np.float64 else None
     with s.localForm() as loc:
         loc.set(0.0)
-    petsc.assemble_vector(s, L)
+        done = inserter is not None and inserter.assemble_vector(L._cpp_object,
+                                                                 loc.getArray())
+    if not done:
+        petsc.assemble_vector(s, L)
     return space.fold(s, b)
 
 

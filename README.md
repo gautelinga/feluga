@@ -149,6 +149,11 @@ compiler and `libdolfin-dev`) on first import; `periodic`, `periodic_partition` 
 `plaza_periodic` use dolfin's JIT on first use. `periodic_partition` needs a ParMETIS with
 64-bit `idx_t` past 2^31 cells.
 
+Parallel HDF5 I/O needs h5py built with MPI (Debian/Ubuntu: `python3-h5py-mpi`, which
+Debian's h5py loads under `mpirun`; on a cluster, an h5py built against the cluster's MPI
+and a parallel HDF5). Without it every file is written and read through rank 0, which is
+correct but does not scale to large meshes; femtools says so once, on rank 0's stderr.
+
 ## Install
 
 Into the interpreter that has dolfin, without dependencies (a pip mpi4py would be built

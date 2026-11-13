@@ -417,10 +417,12 @@ PYBIND11_MODULE(SIGNATURE, m)
 _MODULE = [None]
 
 
-def _cpp():
-    """The compiled extension, built once; raises where it will not build."""
+def _cpp(comm=None):
+    """The compiled extension, built once, on rank 0 of `comm` (None: dolfin's world;
+    `jit.dolfin_module`, collective then); raises where it will not build."""
     if _MODULE[0] is None:
-        _MODULE[0] = df.compile_cpp_code(_CODE)
+        from femtools.jit import dolfin_module
+        _MODULE[0] = dolfin_module(_CODE, comm, "femtools.plaza_periodic")
     return _MODULE[0]
 
 
@@ -490,7 +492,8 @@ def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
     if agreed(mesh.mpi_comm(), bool(len(frozen)) and (
             frozen.min() < 0 or frozen.max() >= mesh.num_edges())):
         raise ValueError("refine_periodic: frozen edge indices outside the local edges")
-    npair, parent, n_children, n_rank, n_unmarked, n_frozen = _cpp().refine_periodic(
+    module = _cpp(mesh.mpi_comm())
+    npair, parent, n_children, n_rank, n_unmarked, n_frozen = module.refine_periodic(
         new_mesh, mesh, markers, [int(a) for a in axes], [float(v) for v in lower],
         [float(b) for b in xyz(box)], float(tol) * box_scale(lower, xyz(box)),
         redistribute, cap, rank_cap, [int(e) for e in frozen])

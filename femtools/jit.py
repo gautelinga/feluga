@@ -3,6 +3,8 @@
     path = on_rank0(comm, build, "what")    build() on rank 0, its result on every rank
     lib = on_every_rank(comm, load, "what") load() on every rank, all raising if one did
     path = install_dir(tmp, final)          a finished build moved into the cache
+    mod = dolfin_module(code, comm, "what") dolfin.compile_cpp_code, built on rank 0
+    mod = cppimport_module(path, name, comm) cppimport's build, on rank 0
 
 A rank-local `raise` before a collective is the shape that hangs: rank 0 fails to build
 (no compiler on PATH, a cache folder it may not write) and leaves, while the others wait
@@ -15,7 +17,15 @@ to its final place and is renamed there when complete (atomic on one file system
 job loads a half-built library; a job that loses the race to the same folder uses the
 winner's. Nothing is ever deleted.
 
-Used by femtools.dolfinx.refine (CMake) and femtools.dolfinx.expression (the compiler).
+Every rank loads what rank 0 built, so the caches must be on a file system all ranks
+see (a home or project folder on a cluster, not a node's /tmp): femtools' own
+(FEMTOOLS_JIT_DIR), dijitso's for dolfin's JIT (DIJITSO_CACHE_DIR, else
+~/.cache/dijitso) and, for cppimport, the folder of the C++ source. A rank that does not
+see the build builds it again, which costs time, not correctness.
+
+Used by femtools.dolfinx.refine (CMake), femtools.dolfinx.expression (the compiler), the
+dolfin modules' `compile_cpp_code` (`dolfin_module`) and femtools.gradient
+(`cppimport_module`).
 """
 import os
 import time
@@ -72,3 +82,43 @@ def install_dir(tmp, final):
         if os.path.exists(os.path.join(final, "done")):
             return final
         return tmp
+
+
+def dolfin_module(code, comm=None, what="dolfin.compile_cpp_code", **kwargs):
+    """`dolfin.compile_cpp_code(code, **kwargs)`, built on rank 0 of `comm` and then
+    loaded from the cache on every rank of it. dolfin's own compiles on rank 0 of its
+    world and waits for the others there, whatever communicator the caller works on:
+    on a smaller one it hangs. Here dolfin's compile runs without that wait (the
+    function its MPI wrapper wraps), on `comm`'s rank 0 (`on_rank0`), and the load on
+    every rank (`on_every_rank`). `comm` None is dolfin's world. Collective on `comm`."""
+    import dolfin
+    import dolfin.jit.pybind11jit as pybind11jit
+    wrapper = pybind11jit.dijitso_jit
+    compile_alone = getattr(wrapper, "__wrapped__", None)
+    if compile_alone is None:          # a dolfin without the wrapper: its own way
+        return dolfin.compile_cpp_code(code, **kwargs)
+    if comm is None:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+
+    def compiled():
+        pybind11jit.dijitso_jit = compile_alone
+        try:
+            return dolfin.compile_cpp_code(code, **kwargs)
+        finally:
+            pybind11jit.dijitso_jit = wrapper
+    on_rank0(comm, lambda: compiled() and None, what)
+    return on_every_rank(comm, compiled, what)
+
+
+def cppimport_module(path, name, comm=None):
+    """`cppimport.imp_from_filepath(path, name)`, built on rank 0 of `comm` and then
+    loaded on every rank of it: cppimport builds beside the source under a lock file,
+    which every rank otherwise polls, and on a folder no rank may write every rank
+    fails its own way. `comm` None is MPI's world. Collective on `comm`."""
+    import cppimport
+    if comm is None:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+    on_rank0(comm, lambda: cppimport.imp_from_filepath(path, name) and None, name)
+    return on_every_rank(comm, lambda: cppimport.imp_from_filepath(path, name), name)

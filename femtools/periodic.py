@@ -23,7 +23,9 @@ Python SubDomain each call crosses the pybind boundary. The two give identical d
 `PERIODIC_BOX_SOURCE` is the C++ class alone, for a module that embeds it in its own
 translation unit (it needs <dolfin/common/Array.h> and <cmath>).
 
-The compiled helpers need a compiler and `libdolfin-dev`, and raise without them.
+The compiled helpers need a compiler and `libdolfin-dev`, and raise without them. They
+are built on rank 0 and loaded by every rank from dijitso's cache, which must be on a
+file system all ranks see (`femtools.jit`).
 """
 
 import dolfin as df
@@ -197,16 +199,20 @@ PYBIND11_MODULE(SIGNATURE, m)
 _MODULE = [None]                 # the compiled module, built once
 
 
-def _module():
+def _module(comm=None):
+    """The compiled module, built on rank 0 of `comm` (None: dolfin's world) the first
+    time (`jit.dolfin_module`, collective then)."""
     if _MODULE[0] is None:
-        _MODULE[0] = df.compile_cpp_code(_CODE)
+        from femtools.jit import dolfin_module
+        _MODULE[0] = dolfin_module(_CODE, comm, "femtools.periodic")
     return _MODULE[0]
 
 
-def cell_dofs(dofmap, cells, n):
+def cell_dofs(dofmap, cells, n, comm=None):
     """The first `n` local dofs of every cell in `cells`, as a (len(cells), n) int64
-    array -- `dofmap.cell_dofs` for many cells in one call."""
-    return np.asarray(_module().cell_dofs_of(
+    array -- `dofmap.cell_dofs` for many cells in one call. Collective on `comm` (None:
+    dolfin's world) the first time, which compiles."""
+    return np.asarray(_module(comm).cell_dofs_of(
         dofmap, np.ascontiguousarray(cells, dtype=np.int64), int(n)), dtype=np.int64)
 
 
@@ -218,12 +224,13 @@ def connectivity(mesh, d0, d1, rows=None):
     from math import comb
     if not 0 <= d1 < d0 <= 3:
         raise ValueError("connectivity: d0 > d1, not ({}, {})".format(d0, d1))
+    module = _module(mesh.mpi_comm())
     mesh.init(d0, d1)
     k = comb(d0 + 1, d1 + 1)
     if rows is None:
-        return np.asarray(_module().connectivity_of(mesh, d0, d1, k))
+        return np.asarray(module.connectivity_of(mesh, d0, d1, k))
     rows = np.ascontiguousarray(rows, dtype=np.int64).reshape(-1)
-    return np.asarray(_module().connectivity_rows_of(mesh, d0, d1, k, rows))
+    return np.asarray(module.connectivity_rows_of(mesh, d0, d1, k, rows))
 
 
 def periodic_box(upper, tol=df.DOLFIN_EPS_LARGE, periodic=None, lower=None, map_tol=None):

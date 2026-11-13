@@ -367,12 +367,13 @@ PYBIND11_MODULE(SIGNATURE, m)
 _MODULE = [None]
 
 
-def _cpp():
-    """The compiled rebuild, once; it raises without a compiler, like every JIT helper
-    here."""
-    import dolfin as df
+def _cpp(comm=None):
+    """The compiled rebuild, once, built on rank 0 of `comm` (None: dolfin's world;
+    `jit.dolfin_module`, collective then); it raises without a compiler, like every JIT
+    helper here."""
     if _MODULE[0] is None:
-        _MODULE[0] = df.compile_cpp_code(_CODE)
+        from femtools.jit import dolfin_module
+        _MODULE[0] = dolfin_module(_CODE, comm, "femtools.periodic_partition rebuild")
     return _MODULE[0]
 
 
@@ -411,14 +412,14 @@ class Rebuild:
         if agreed(comm, not seen.all()):
             raise RuntimeError('rebuild: the global vertex numbering has gaps; no rank '
                                'goes on')
-        self.data = _cpp().local_data(self.like, cells, gc, x, lo, self.n[1], self.n[0],
+        self.data = _cpp(comm).local_data(self.like, cells, gc, x, lo, self.n[1], self.n[0],
                                       np.asarray(partition, dtype=np.int32))
 
     def build(self):
         """The mesh, built; once."""
         import dolfin as df
         out = df.Mesh(self.like.mpi_comm())
-        _cpp().build(out, self.data)
+        _cpp(out.mpi_comm()).build(out, self.data)
         self.data = None
         return out
 
@@ -447,7 +448,7 @@ def dual_graph_of(cells, comm):
     size, n = comm.size, len(cells)
     nf = np.shape(cells)[1] - 1                      # a facet's vertices
     offset = comm.exscan(n) or 0
-    rows, cols, f, o = _graph_module().local_dual(np.ascontiguousarray(cells, np.int64),
+    rows, cols, f, o = _graph_module(comm).local_dual(np.ascontiguousarray(cells, np.int64),
                                                   offset)
     rows, cols = [np.asarray(rows)], [np.asarray(cols)]
     f, o = np.asarray(f).reshape(-1, nf), np.asarray(o)
@@ -700,11 +701,13 @@ PYBIND11_MODULE(SIGNATURE, m)
 _PARMETIS = [None]
 
 
-def _graph_module():
-    """The compiled ParMETIS and dual-graph helper, once."""
-    import dolfin as df
+def _graph_module(comm=None):
+    """The compiled ParMETIS and dual-graph helper, once, built on rank 0 of `comm`
+    (None: dolfin's world; `jit.dolfin_module`, collective then)."""
     if _PARMETIS[0] is None:
-        _PARMETIS[0] = df.compile_cpp_code(_PARMETIS_CODE, libraries=['dl'])
+        from femtools.jit import dolfin_module
+        _PARMETIS[0] = dolfin_module(_PARMETIS_CODE, comm, "femtools.periodic_partition "
+                                     "ParMETIS", libraries=['dl'])
     return _PARMETIS[0]
 
 #: ParMETIS's balance tolerance: the busiest rank's cells at most this times the mean
@@ -752,7 +755,7 @@ def _parmetis(like, csr, adaptive):
     xadj, adjncy = csr
     vtxdist = np.r_[0, np.cumsum(comm.allgather(len(xadj) - 1))].astype(np.int64)
     none = np.zeros(0, np.int64)
-    return np.asarray(_graph_module().partition(like, vtxdist, xadj, adjncy, False, none,
+    return np.asarray(_graph_module(comm).partition(like, vtxdist, xadj, adjncy, False, none,
                                                 False, none, bool(adaptive), ITR, IMBALANCE),
                       dtype=np.int64)
 
@@ -793,7 +796,7 @@ class Families:
         k = np.lexsort((held[:, 1], -held[:, 0], idx))
         first = np.r_[True, idx[k][1:] != idx[k][:-1]]
         current[idx[k][first] - lo] = held[k][first, 1]
-        part = np.asarray(_graph_module().partition(
+        part = np.asarray(_graph_module(comm).partition(
             like, self.edges, self.xadj, self.adjncy, True, weight, True, current, True, ITR,
             IMBALANCE), dtype=np.int64)
         return lookup(comm, self.edges, part, np.asarray(ancestors, dtype=np.int64))
@@ -957,10 +960,10 @@ def read_partitioned(mesh_file, L, periodic, comm, log=print, tol=None, families
     vmask = upper_mask(x, L, periodic, _face_tol(side, tol))
     cmask = lookup(comm, ve, vmask, cells.reshape(-1)).reshape(cells.shape)
     part = _apply_moves(ids, part, _layer_moves(comm, ids, cells, cmask, part, log)[0])
-    data = _cpp().local_data(like, cells, ids, x, lo, n_v, n_c, part.astype(np.int32))
+    data = _cpp(comm).local_data(like, cells, ids, x, lo, n_v, n_c, part.astype(np.int32))
     cells = ids = x = cmask = vmask = part = None       # dolfin's copy alone through the build
     out = df.Mesh(comm)
-    _cpp().build(out, data)
+    _cpp(comm).build(out, data)
     data = None
     log('mesh: partitioned by ParMETIS for {} ranks{}'.format(
         comm.size, "" if families is None else ", by family"))
@@ -1134,7 +1137,7 @@ def _check(mesh, dofmaps, L, periodic, comm, what, exempt=None, tol=None, lower=
     dofs = []
     for dm, n in dofmaps:
         l2g = np.asarray(dm.tabulate_local_to_global_dofs(), dtype=np.int64)
-        cd = cell_dofs(dm, touching, n)
+        cd = cell_dofs(dm, touching, n, comm)
         g = np.full(face.shape, -1, np.int64)       # -1: no dof at this node (P1's edges)
         g[:, :n] = l2g[cd]
         dofs.append(g[face])

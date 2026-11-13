@@ -3,10 +3,13 @@ __date__ = "2013-12-13"
 __copyright__ = "Copyright (C) 2013 " + __author__
 __license__ = "GNU Lesser GPL version 3 or any later version"
 import os
-import cppimport
 from dolfin import Function, FunctionSpace, assemble, TrialFunction, TestFunction, dx
 
-compiled_gradient_module = cppimport.imp_from_filepath(
+from femtools.jit import cppimport_module
+
+# built by cppimport on rank 0 of MPI's world, then loaded on every rank (the import is
+# collective): femtools/cpp must be on a file system all ranks see
+compiled_gradient_module = cppimport_module(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp", "gradient_weight.cpp"),
     "femtools.cpp.gradient_weight")
 compute_weighted_gradient_matrix = compiled_gradient_module.compute_weighted_gradient_matrix

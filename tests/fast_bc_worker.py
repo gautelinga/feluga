@@ -1,7 +1,8 @@
 """fast_bc.apply against DirichletBC.apply on any number of ranks, on a periodic P2
 space: a Constant, a Function changed in place and a vector Constant changed in
-place, and a list of overlapping conditions, owned and ghost values; rank zero writes
-the largest difference to argv[1].
+place, and a list of overlapping conditions, owned and ghost values, and the dolfin
+backend's fixed_dofs (1 where they differ); rank zero writes the largest difference to
+argv[1].
 
     mpirun -n 3 python3 tests/fast_bc_worker.py OUT.txt
 """
@@ -55,6 +56,12 @@ for step in range(2):
         bc.apply(a)
     apply(several, b)
     err = max(err, np.abs(ghosted(a) - ghosted(b)).max(initial=0.))
+# the dolfin backend's fixed_dofs: the owned global dofs, condition after condition
+from femtools.backend.dolfin import fixed_dofs
+start = V.dofmap().ownership_range()[0]
+owned = V.dofmap().index_map().size(df.IndexMap.MapSize.OWNED)
+want = [start + k for bc in several for k in bc.get_boundary_values() if k < owned]
+err = max(err, 0. if fixed_dofs(V, several).tolist() == want else 1.)
 err = MPI.COMM_WORLD.allreduce(err, op=MPI.MAX)
 if MPI.COMM_WORLD.rank == 0:
     open(sys.argv[1], "w").write(repr(err))

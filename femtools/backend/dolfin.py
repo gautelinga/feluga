@@ -101,8 +101,12 @@ def fixed_dofs(W, bcs):
     global indices of its vectors."""
     start = W.dofmap().ownership_range()[0]
     owned = W.dofmap().index_map().size(IndexMap.MapSize.OWNED)
-    return np.array([start + k for bc in bcs for k in bc.get_boundary_values() if k < owned],
-                    dtype=np.int64)
+    found = [np.zeros(0, np.int64)]
+    for bc in bcs:
+        values = bc.get_boundary_values()
+        local = np.fromiter(values.keys(), dtype=np.int64, count=len(values))
+        found.append(start + local[local < owned])
+    return np.concatenate(found)
 
 
 def sync(f):

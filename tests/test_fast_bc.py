@@ -1,7 +1,8 @@
 """`femtools.fast_bc`: apply gives DirichletBC.apply's vector for a Constant, a vector
 Constant and a Function value, follows changes to the value, leaves an Expression and
 a component to dolfin, sets a matrix as dolfin does, applies a list of conditions in
-its order, and agrees on three ranks, ghost values included."""
+its order, and agrees on three ranks, ghost values included. The dolfin backend's
+`fixed_dofs` lists the dofs conditions fix."""
 import os
 import sys
 
@@ -128,6 +129,26 @@ def test_several_conditions_in_order(periodic):
     fast_bc.apply(tuple(bcs), B, b)
     assert np.array_equal(A.array(), B.array())
     assert np.array_equal(a.get_local(), b.get_local())
+
+
+def fixed_reference(V, bcs):
+    """The owned global dofs the conditions fix, one condition after another, each in
+    the order of its boundary values."""
+    start = V.dofmap().ownership_range()[0]
+    owned = V.dofmap().index_map().size(df.IndexMap.MapSize.OWNED)
+    return [start + k for bc in bcs for k in bc.get_boundary_values() if k < owned]
+
+
+@pytest.mark.parametrize("periodic", [False, True])
+def test_fixed_dofs(periodic):
+    """The dolfin backend's `fixed_dofs`: the owned global dofs of every condition, in
+    order, as int64; none for no conditions."""
+    from femtools.backend.dolfin import fixed_dofs
+    V = space(periodic)
+    bcs = overlapping(V)
+    got = fixed_dofs(V, bcs)
+    assert got.dtype == np.int64 and got.tolist() == fixed_reference(V, bcs)
+    assert fixed_dofs(V, []).shape == (0,)
 
 
 def test_found_once():

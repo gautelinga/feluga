@@ -107,6 +107,9 @@ class BoundaryMarkers:
         return self._tags
 
 
+_FACET_CHUNK = 1 << 18
+
+
 def compiled_facets(mesh, code):
     """The local facets where `code` holds, as dolfin's CompiledSubDomain marks them: C++
     in x[0], x[1], x[2] and `on_boundary` (true on exterior facets), compiled as an
@@ -114,21 +117,25 @@ def compiled_facets(mesh, code):
     vertices and its midpoint."""
     from femtools.dolfinx.expression import CompiledExpression
     n, exterior = local_facets(mesh)
-    facets = np.arange(n, dtype=np.int32)
-    nodes = dolfinx.mesh.entities_to_geometry(mesh, mesh.topology.dim - 1, facets)
-    x = mesh.geometry.x[nodes]                                          # (n, tdim, 3)
-    points = np.concatenate([x, x.mean(axis=1, keepdims=True)], axis=1)
     boundary = np.zeros(n, bool)
     boundary[exterior] = True
     on = "on_boundary" in code
     expr = CompiledExpression(code, mesh.comm, **({"on_boundary": 0.0} if on else {}))
-    inside = np.zeros(points.shape[:2], bool)
-    for flag in ((True, False) if on else (None,)):
-        rows = slice(None) if flag is None else (boundary if flag else ~boundary)
-        if on:
-            expr.on_boundary = 1.0 if flag else 0.0
-        pts = points[rows]
-        if len(pts):
-            inside[rows] = (np.asarray(expr(pts.reshape(-1, 3).T)).reshape(pts.shape[:2])
-                            != 0.0)
-    return facets[inside.all(axis=1)]
+    holds = np.zeros(n, bool)
+    for start in range(0, n, _FACET_CHUNK):        # the points of a block of facets at once
+        facets = np.arange(start, min(n, start + _FACET_CHUNK), dtype=np.int32)
+        nodes = dolfinx.mesh.entities_to_geometry(mesh, mesh.topology.dim - 1, facets)
+        x = mesh.geometry.x[nodes]                                      # (m, tdim, 3)
+        points = np.concatenate([x, x.mean(axis=1, keepdims=True)], axis=1)
+        inside = np.zeros(points.shape[:2], bool)
+        on_boundary = boundary[facets]
+        for flag in ((True, False) if on else (None,)):
+            rows = slice(None) if flag is None else (on_boundary if flag else ~on_boundary)
+            if on:
+                expr.on_boundary = 1.0 if flag else 0.0
+            pts = points[rows]
+            if len(pts):
+                inside[rows] = (np.asarray(expr(pts.reshape(-1, 3).T))
+                                .reshape(pts.shape[:2]) != 0.0)
+        holds[facets] = inside.all(axis=1)
+    return np.flatnonzero(holds).astype(np.int32)

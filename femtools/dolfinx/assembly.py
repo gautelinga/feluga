@@ -20,6 +20,8 @@ from femtools.lru import WeakCache
 
 # Preallocations per (rows, cols): {key of the integration domains: (d_nnz, o_nnz)}
 _PATTERNS = WeakCache()
+# Pairs of dofs enumerated at a time (int64 keys: 8 bytes each)
+_CHUNK = 1 << 21
 
 
 def _domains_key(a, comm):
@@ -59,71 +61,85 @@ def create_matrix(a, rows, cols=None):
     return K
 
 
+def _coupled_cells(a):
+    """Per integral of compiled form `a`, the cells whose dofs it couples, one row per
+    integration entity: (n, 1) for cells, exterior facets, ridges and vertices (the
+    entity's cell), (n, 2) for interior facets (the facet's two cells)."""
+    cpp = a._cpp_object
+    for itype in cpp.integral_types:
+        for i in range(cpp.num_integrals(itype, 0)):
+            d = np.asarray(cpp.domains(itype, i))
+            yield d.reshape(-1, 1) if d.ndim == 1 else d[..., 0].reshape(len(d), -1)
+
+
 def _preallocation(a, rows, cols):
-    """(d_nnz, o_nnz) of the folded matrix of `a`. One plain assembly gives the pattern
-    (DOLFINx's sparsity pattern does not expose the global columns of the ghost entries
-    it adds), which is folded onto unique dofs. The fold is one to one except at
-    periodic slaves, so only the entries in a slave's row or column, or in a column not
-    known on this rank, can meet another: those alone are sent to the owner of their row
-    and made unique there, with the other entries of the rows they reach. Collective."""
-    from dolfinx.fem import petsc
+    """(d_nnz, o_nnz) of the folded matrix of `a`, from the dofmaps alone: every (row,
+    column) pair of dofs that an integration entity couples (all dofs of its cells, as
+    in DOLFINx's sparsity pattern, which adds no diagonal of its own) is taken to
+    compact indices, sent to the owner of its row if another rank owns that, and
+    counted once. Pairs are made at most about `_CHUNK` at a time and kept as one int64
+    key each, split by row range so that each range is made unique on its own.
+    Collective."""
     from petsc4py import PETSc
     from femtools.hdf5_rows import route, unique_rows
 
     comm = rows.comm
-    A = petsc.create_matrix(a)
-    petsc.assemble_matrix(A, a)  # values do not matter, the pattern does
-    A.assemble()
-    indptr, gcols = A.getValuesCSR()[:2]
-    A.destroy()
-    n = len(indptr) - 1                         # the space's owned dofs: the rows
-    lrow = np.repeat(np.arange(n, dtype=np.int32), np.diff(indptr))
-    del indptr
-    # An owned row may hold columns that are not local dofs here (entries another rank
-    # assembled for its ghost row): their owners know them.
-    lcol = cols.local_of_global(gcols)
-    known = lcol >= 0
-    ccol = np.empty(len(gcols), np.int64)
-    ccol[known] = cols.compact[lcol[known]]
-    ccol[~known] = cols.compact_of_global(gcols[~known])
-    del gcols
-    loose = ~known
-    loose[known] = cols.is_slave[lcol[known]]
-    del lcol, known
-    loose |= rows.is_slave[lrow]
-    clean = ~loose
+    spaces = a._cpp_object.function_spaces
+    if any(V.mesh is not a._cpp_object.mesh for V in spaces):
+        raise NotImplementedError("forms whose spaces are on another mesh")
+    start, n = rows.start, rows.n_owned
     clo, chi = cols.owned_range
-    start, n_owned = rows.start, rows.n_owned
-    # the clean entries: unique, each in the owned row of a local row that is no slave
-    own = ~rows.is_slave[:n]
-    row_of = rows.compact[:n][own] - start
-    diag = (ccol >= clo) & (ccol < chi)
-    d_nnz = np.zeros(n_owned, np.int64)
-    o_nnz = np.zeros(n_owned, np.int64)
-    d_nnz[row_of] = np.bincount(lrow[clean & diag], minlength=n)[own]
-    o_nnz[row_of] = np.bincount(lrow[clean & ~diag], minlength=n)[own]
-    del diag
-    pairs = np.stack([rows.compact[lrow[loose]], ccol[loose]], axis=1)
+    width = max(cols.n_global, 1)
+    if n * width >= 2 ** 63:
+        raise NotImplementedError("more (row, column) pairs than an int64 numbers")
+    rmap, cmap = (V.dofmap.map() for V in spaces)
+    per_cell = rmap.shape[1] * cmap.shape[1]
+    domains = list(_coupled_cells(a))
+    total = sum(len(c) * c.shape[1] ** 2 * per_cell for c in domains)
+    # keys of the owned rows, split in row ranges of about _CHUNK keys
+    n_ranges = max(1, min(n, -(-total // _CHUNK)))
+    edges = np.linspace(0, n, n_ranges + 1).astype(np.int64)
+    bounds = edges[1:-1] * width
+    held = [[] for _ in range(n_ranges)]
+
+    def hold(keys):
+        keys = np.unique(keys)
+        for r, part in enumerate(np.split(keys, np.searchsorted(keys, bounds))):
+            if len(part):
+                held[r].append(part)
+
+    far = []  # pairs in rows owned elsewhere: (compact row, compact column)
+    for cells in domains:
+        step = max(1, _CHUNK // (cells.shape[1] ** 2 * per_cell))
+        for s in range(0, len(cells), step):
+            c = cells[s:s + step]
+            R = rows.compact[rmap[c].reshape(len(c), -1)] - start
+            C = cols.compact[cmap[c].reshape(len(c), -1)]
+            mine = (R >= 0) & (R < n)
+            hold(((R * width)[:, :, None] + C[:, None, :])[mine].ravel())
+            if not mine.all():
+                ent, k = np.nonzero(~mine)
+                far.append(unique_rows(np.stack(
+                    [np.repeat(R[ent, k] + start, C.shape[1]), C[ent].ravel()], axis=1)))
     if comm.size > 1:
+        pairs = unique_rows(np.concatenate(far)) if far else np.zeros((0, 2), np.int64)
+        del far
         starts = np.array(comm.allgather(start), dtype=np.int64)
         owner = np.searchsorted(starts, pairs[:, 0], side="right") - 1
         pairs = route(comm, owner, pairs).received[0]
-    if len(pairs):
-        # the rows the loose entries reach, recounted with their clean entries
-        touched = np.zeros(n_owned, bool)
-        touched[pairs[:, 0] - start] = True
-        reached = np.zeros(n, bool)
-        reached[rows.owned_unique[touched]] = True
-        also = clean & reached[lrow]
-        pairs = unique_rows(np.concatenate(
-            [pairs, np.stack([rows.compact[lrow[also]], ccol[also]], axis=1)]))
-        r = pairs[:, 0] - start
-        diag = (pairs[:, 1] >= clo) & (pairs[:, 1] < chi)
-        d_nnz[touched] = 0
-        o_nnz[touched] = 0
-        d_nnz += np.bincount(r[diag], minlength=n_owned)
-        o_nnz += np.bincount(r[~diag], minlength=n_owned)
-    return d_nnz.astype(PETSc.IntType), o_nnz.astype(PETSc.IntType)
+        hold((pairs[:, 0] - start) * width + pairs[:, 1])
+        del pairs
+    nnz = np.zeros(n, np.int64)
+    d_nnz = np.zeros(n, np.int64)
+    for r in range(n_ranges):
+        keys = np.unique(np.concatenate(held[r])) if held[r] else np.zeros(0, np.int64)
+        held[r] = None
+        lo, hi = edges[r], edges[r + 1]
+        row, col = np.divmod(keys, width)
+        row -= lo
+        nnz[lo:hi] = np.bincount(row, minlength=hi - lo)
+        d_nnz[lo:hi] = np.bincount(row[(col >= clo) & (col < chi)], minlength=hi - lo)
+    return d_nnz.astype(PETSc.IntType), (nnz - d_nnz).astype(PETSc.IntType)
 
 
 def assemble_matrix(K, a):

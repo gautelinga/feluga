@@ -121,7 +121,15 @@ def _preallocation(a, rows, cols):
 
     far = []  # pairs in rows owned elsewhere: (compact row, compact column)
     for cells in domains:
+        # The cells in the order of their first row: a row's pairs then come mostly in
+        # one chunk, where they are made unique before they are held.
         step = max(1, _CHUNK // (cells.shape[1] ** 2 * per_cell))
+        first = np.empty(len(cells), np.int64)
+        for s in range(0, len(cells), step):
+            c = cells[s:s + step]
+            first[s:s + step] = rows.compact[rmap[c].reshape(len(c), -1)].min(axis=1)
+        cells = cells[np.argsort(first, kind="stable")]
+        del first
         for s in range(0, len(cells), step):
             c = cells[s:s + step]
             R = rows.compact[rmap[c].reshape(len(c), -1)] - start
@@ -179,6 +187,7 @@ def assemble_matrix(K, a):
     here raises on every rank; in a row owned elsewhere, PETSc refuses it there.
     Collective."""
     from mpi4py import MPI
+    from petsc4py import PETSc
     from dolfinx.fem import petsc
 
     comm = K.comm.tompi4py()
@@ -191,6 +200,9 @@ def assemble_matrix(K, a):
         raise RuntimeError("assemble_matrix: {} values of the form fall outside the "
                            "matrix's pattern".format(comm.allreduce(missed, op=MPI.SUM)))
     K.assemble()
+    # The rows sent to other ranks are the same at every assembly, so PETSc can keep
+    # the communication pattern it set up instead of agreeing on it again each time.
+    K.setOption(PETSc.Mat.Option.SUBSET_OFF_PROC_ENTRIES, True)
     return K
 
 

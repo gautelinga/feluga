@@ -1148,7 +1148,8 @@ class XDMFFile2(object):
         """
         import dolfin as df
         comm = self._mpi_comm()
-        grids = _scan(self.path, comm)
+        # parsed on the ranks of the Function's mesh, which read the file together
+        grids = _scan(self.path, u.function_space().mesh().mpi_comm())
         if any(g['topology'] in _NODAL_DEGREE and
                (_NODAL_DEGREE[g['topology']] == 2
                 or g['centers'].get(function_name) == 'Node') for g in grids):
@@ -1192,7 +1193,7 @@ class XDMFFile2(object):
         parse, is read here instead.
         """
         import dolfin as df
-        grids = _scan(self.path, self._mpi_comm())
+        grids = _scan(self.path)
         quadratic = any(g['topology'] in ('Tetrahedron_10', 'Triangle_6', 'Edge_3')
                         for g in grids)
         if not quadratic:

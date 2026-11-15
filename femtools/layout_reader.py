@@ -54,9 +54,9 @@ class LayoutReader(object):
     `mesh/cell_indices` lives here alone.
     """
 
-    #: a dataset in a field's group that holds its values in vertex order already,
-    #: which `read_p1` returns as they are (None: no such dataset is looked for)
-    VERTEX_VALUES = None
+    #: a dataset in a field's group that holds its values in vertex order already
+    #: (femtools.vertex_field's), which `read_p1` returns as they are (None: none looked for)
+    VERTEX_VALUES = "vertex_values"
 
     def __init__(self, mesh_path, field_path=None):
         self.mesh_path, self.field_path = mesh_path, field_path

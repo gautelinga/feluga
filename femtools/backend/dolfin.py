@@ -148,6 +148,13 @@ def assemble(form, tensor=None, couplings=None, bcs=()):
         from femtools.couplings import dolfin_matrix, resolve, ones
         mask = resolve(couplings, form)
         tensor = dolfin_matrix(form, ones(form) if mask is None else mask, bcs)
+    elif tensor is not None:
+        if couplings is not None or bcs:
+            raise ValueError("assemble: couplings and bcs are the matrix's, given when it is "
+                             "made; assemble into it without them")
+        # a matrix made with conditions is filled with them (assemble_system): without,
+        # their rows would take the element entries, which its pattern refuses
+        bcs = _matrix_bcs(tensor)
     if bcs:
         import dolfin as df
         v = sorted(form.arguments(), key=lambda x: x.number())[0]
@@ -156,6 +163,14 @@ def assemble(form, tensor=None, couplings=None, bcs=()):
                            A_tensor=tensor, b_tensor=df.PETScVector(tensor.mpi_comm()))
         return tensor
     return _fast_assemble(form, tensor)
+
+
+def _matrix_bcs(tensor):
+    """The Dirichlet conditions a couplings matrix was made with (femtools.couplings), or
+    ()."""
+    mat = getattr(tensor, "mat", None)
+    return () if mat is None or not hasattr(tensor, "mpi_comm") else \
+        (mat().getAttr("femtools_bcs") or ())
 
 
 def interpolate(f, V, out=None):

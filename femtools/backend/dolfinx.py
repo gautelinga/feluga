@@ -1057,6 +1057,10 @@ def assemble(form, tensor=None, couplings=None, bcs=()):
                                                 unique_dofs(c.spaces[1]),
                                                 couplings=resolve(couplings, form),
                                                 bcs=tuple(bcs)))
+    elif couplings is not None or bcs:
+        # the same on every rank: the arguments are
+        raise ValueError("assemble: couplings and bcs are the matrix's, given when it is made; "
+                         "assemble into it without them")
     _assembly.assemble_matrix(tensor._m, c.cpp)
     return tensor
 

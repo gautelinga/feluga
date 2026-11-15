@@ -47,12 +47,14 @@ def _sub(W, path, legacy):
     return W
 
 
-def _paired(first, other, c):
-    """`other`'s entry at each distinct value of `first` (aligned), refusing two."""
+def _paired(first, other, c, comm):
+    """`other`'s entry at each distinct value of `first` (aligned), refusing two (on every
+    rank together)."""
+    from femtools.hdf5_rows import agreed
     keys, inv = np.unique(first, return_inverse=True)
     pair = np.full(len(keys), -1, dtype=np.int64)
     pair[inv] = other
-    if not np.array_equal(pair[inv], other):
+    if agreed(comm, not np.array_equal(pair[inv], other)):
         raise RuntimeError("component {} is paired with the first differently by two "
                            "cells".format(c))
     return keys, pair
@@ -91,14 +93,15 @@ def _dolfinx_sets(W, comm, components):
     keys = None
     sets = []
     for c in range(len(components)):
-        k, pair = _paired(first, U.compact[maps[c]].ravel(), c)
+        k, pair = _paired(first, U.compact[maps[c]].ravel(), c, comm)
         keys = k if keys is None else keys
         sets.append(pair[(k >= lo) & (k < hi)])
     # every unique dof of the first component this rank owns is in a cell here
     first_local = np.zeros(len(U.compact), dtype=bool)
     first_local[maps[0].ravel()] = True
     own = np.sort(U.compact[U.owned_unique[first_local[U.owned_unique]]])
-    if not np.array_equal(own, sets[0]):
+    from femtools.hdf5_rows import agreed
+    if agreed(comm, not np.array_equal(own, sets[0])):   # every rank raises, or none
         raise RuntimeError('an owned first component on rank {} is in no cell of its '
                            'own'.format(comm.rank))
     return sets

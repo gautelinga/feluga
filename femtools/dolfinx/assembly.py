@@ -74,6 +74,11 @@ def create_matrix(a, rows, cols=None, couplings=None, bcs=()):
     cleanup(comm)  # matrices dropped since the last one, destroyed before another is made
     if bcs and rows is not cols:
         raise ValueError("Dirichlet conditions on a matrix whose rows and columns differ")
+    if bcs and not _one_cell_integral(a):
+        # a fixed dof's diagonal is 1 an element (dolfin's assemble_system: the cells holding
+        # it), which facet integrals or a second cell integral would count again
+        raise NotImplementedError("Dirichlet conditions in the matrix's pattern: a form of one "
+                                  "cell integral")
     filt = None
     if couplings is not None or bcs:
         filt = _Couplings(a, couplings, rows is cols, rows, bcs)
@@ -87,13 +92,12 @@ def create_matrix(a, rows, cols=None, couplings=None, bcs=()):
     K.setLGMap(rows.lgmap, cols.lgmap)
     K.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, True)
     if filt is not None:
-        _FILTERS[K.handle] = filt
+        K.setAttr(_FILTER, filt)          # held by the matrix, gone with it
     return K
 
 
-# The couplings of the matrices create_matrix made with them, by PETSc handle (petsc4py
-# objects take no attributes); a handle reused by a later matrix is overwritten there
-_FILTERS = {}
+# the attribute under which a matrix holds the couplings it was made with
+_FILTER = "femtools_couplings"
 
 
 class _Couplings:
@@ -133,6 +137,13 @@ class _Couplings:
             fixed = (self.fixed[R_cells] != 0)[:, :, None] | (self.fixed[C_cells] != 0)[:, None, :]
             keep &= ~fixed | diagonal
         return keep
+
+
+def _one_cell_integral(a):
+    """Whether compiled form `a` is one cell integral and nothing else."""
+    cpp = a._cpp_object
+    types = list(cpp.integral_types)
+    return len(types) == 1 and types[0].name == "cell" and cpp.num_integrals(types[0], 0) == 1
 
 
 def _fixed_local(U, rows):
@@ -293,7 +304,7 @@ def assemble_matrix(K, a):
     from dolfinx.fem import petsc
 
     comm = K.comm.tompi4py()
-    filt = _FILTERS.get(K.handle)
+    filt = K.getAttr(_FILTER)
     inserter = _inserter(comm) if a.dtype == np.float64 else None
     if filt is not None and inserter is None:
         raise NotImplementedError("couplings need femtools' C++ inserter, which could not "
@@ -315,6 +326,9 @@ def assemble_matrix(K, a):
         else:
             missed = -2
     if missed == -2:
+        if filt is not None:          # PETSc's own assembly would ignore the couplings
+            raise NotImplementedError("a matrix with couplings that femtools' inserter "
+                                      "cannot fill (not AIJ, or other local maps)")
         petsc.assemble_matrix(K, a)
         missed = 0
     total = comm.allreduce(skipped, op=MPI.SUM)

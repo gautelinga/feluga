@@ -211,7 +211,8 @@ def _send_rows(comm, counts, recv_counts, send, rounds=None):
 
 class Routed:
     """What `route` received (`received`, one array per array sent) and how to answer it
-    (`reply`): the sort that grouped the rows (`order`) and both ways' counts."""
+    (`reply`): the sort that grouped the rows (`order`, None on one rank, where nothing
+    moved) and both ways' counts."""
 
     def __init__(self, received, order, counts, recv_counts):
         self.received, self.order = received, order
@@ -220,12 +221,16 @@ class Routed:
 
 def route(comm, dest, *arrays):
     """Row i of every array to rank `dest[i]` (checked in range on every rank); returns a
-    `Routed`. Collective; no comm is one rank."""
+    `Routed`. Collective; no comm is one rank, where the rows stay as they are (nothing
+    sorted or copied)."""
     dest = np.asarray(dest, dtype=np.int64)
     size = 1 if comm is None else comm.Get_size()
     bad = bool(dest.size) and (dest.min() < 0 or dest.max() >= size)
     if agreed(comm, bad):
         raise ValueError("route: a destination outside the {} ranks".format(size))
+    if size == 1:
+        n = np.array([len(dest)], dtype=np.int64)
+        return Routed([np.asarray(a) for a in arrays], None, n, n)
     order = rank_order(dest, size)
     counts = np.bincount(dest, minlength=size).astype(np.int64)
     recv_counts, got = exchange(comm, counts, *(np.asarray(a)[order] for a in arrays))
@@ -245,6 +250,8 @@ def rank_order(dest, size):
 def reply(comm, routed, *answers):
     """Answers to what `routed` received (aligned with its `received`) sent back to the
     ranks that asked; returns them aligned with the rows those ranks routed. Collective."""
+    if routed.order is None:                  # one rank: the rows never moved
+        return [np.asarray(b) for b in answers]
     _, back = exchange(comm, routed.recv_counts, *answers)
     out = []
     for b in back:
@@ -485,9 +492,16 @@ def lookup(comm, edges, block, wanted):
     """Rows `wanted` of an array whose blocks the ranks hold between them.
 
     The core of `fetch_rows`, factored out because `rows_of_labels` below needs the
-    same exchange over a block it computes rather than reads. No comm is one rank.
+    same exchange over a block it computes rather than reads. On one rank (or no comm)
+    it is an index into the block.
     """
-    rank = 0 if comm is None else comm.Get_rank()
+    if comm is None or comm.Get_size() == 1:
+        local = np.asarray(wanted, dtype=np.int64) - int(edges[0])
+        if local.size and (local.min() < 0 or local.max() >= len(block)):
+            raise ValueError("an index outside the {} rows the blocks cover".format(
+                len(block)))
+        return np.asarray(block)[local]
+    rank = comm.Get_rank()
     block = np.asarray(block)
 
     # ask for each distinct row once, at the rank whose block holds it

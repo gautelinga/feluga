@@ -104,17 +104,28 @@ struct Filter
     f = fixed.size() ? fixed.data() : nullptr;
   }
   bool on() const { return m != nullptr; }
-  // in a fixed dof's row or column: dropped off the diagonal, whatever the value
-  bool fixed(std::int32_t i, std::int32_t j) const
+
+  // What becomes of the element's entry v at local (i, j), the one rule every inserter
+  // follows: ADD (*x the value added), DROP (a fixed dof's row or column off its
+  // diagonal: the condition applied, whatever the value) or SKIP (components the mask
+  // does not couple: the caller counts it when v is nonzero). A fixed dof's diagonal is
+  // kept whatever the mask, and adds 1 (dolfin's assemble_system: the number of cells
+  // holding the dof, the form being one cell integral).
+  enum Fate { ADD, DROP, SKIP };
+  Fate fate(std::int32_t i, std::int32_t j, double v, double* x) const
   {
-    return f && (f[i] || f[j]) && gr[i] != gc[j];
+    *x = v;
+    if (!on())
+      return ADD;
+    if (f && (f[i] || f[j]))
+    {
+      if (gr[i] != gc[j])
+        return DROP;
+      *x = 1.0;
+      return ADD;
+    }
+    return m[r[i] * n1 + c[j]] != 0 ? ADD : SKIP;
   }
-  // what an element adds at (i, j): 1 on a fixed dof's diagonal, else its value
-  double value(std::int32_t i, std::int32_t j, double v) const
-  {
-    return (f && f[i] && gr[i] == gc[j]) ? 1.0 : v;
-  }
-  bool keep(std::int32_t i, std::int32_t j) const { return m[r[i] * n1 + c[j]] != 0; }
 };
 
 // The coefficients of cell integral i for its cells [start, start + m), into c
@@ -417,16 +428,20 @@ std::int64_t assemble_local(const Form& a, std::uintptr_t handle, const labels_t
       kept.clear();
       for (std::size_t j = 0; j < nc; ++j)
       {
-        const double v = filt.value(rows[i], cols[j], vals[i * nc + j]);
-        if (filt.fixed(rows[i], cols[j]))
-          continue;
-        if (filt.keep(rows[i], cols[j]))
+        double x;
+        const double v = vals[i * nc + j];
+        switch (filt.fate(rows[i], cols[j], v, &x))
         {
+        case Filter::ADD:
           c.push_back(cols[j]);
-          kept.push_back(v);
+          kept.push_back(x);
+          break;
+        case Filter::SKIP:
+          skipped += v != 0.0;
+          break;
+        case Filter::DROP:
+          break;
         }
-        else if (v != 0.0)
-          ++skipped;
       }
       const PetscInt ri = rows[i];
       if (!c.empty())
@@ -611,30 +626,25 @@ std::pair<std::int64_t, std::int64_t> assemble(const fem::Form<double, double>& 
           far_rows.push_back(rg.g[rows[i]]);
           for (std::size_t j = 0; j < nc; ++j)
           {
-            if (filt.on() && filt.fixed(rows[i], cols[j]))
+            double x;
+            const Filter::Fate what = filt.fate(rows[i], cols[j], v[j], &x);
+            skipped += what == Filter::SKIP && v[j] != 0.0;
+            if (what != Filter::ADD)
               continue;
-            if (filt.on() && !filt.keep(rows[i], cols[j]))
-            {
-              skipped += v[j] != 0.0;
-              continue;
-            }
             far_cols.push_back(cg.g[cols[j]]);
-            far_vals.push_back(filt.on() ? filt.value(rows[i], cols[j], v[j]) : v[j]);
+            far_vals.push_back(x);
           }
           far_start.push_back(far_cols.size());
           continue;
         }
         for (std::size_t j = 0; j < nc; ++j)
         {
-          if (filt.on() && filt.fixed(rows[i], cols[j]))
+          double x;
+          const Filter::Fate what = filt.fate(rows[i], cols[j], v[j], &x);
+          skipped += what == Filter::SKIP && v[j] != 0.0;
+          if (what != Filter::ADD)
             continue;
-          if (filt.on() && !filt.keep(rows[i], cols[j]))
-          {
-            skipped += v[j] != 0.0;
-            continue;
-          }
           const PetscInt c = mapped[j];
-          const double x = filt.on() ? filt.value(rows[i], cols[j], v[j]) : v[j];
           if (!(c >= 0 ? D.add(r, c, x) : c < -1 && O.add(r, -2 - c, x)))
             ++missed;
         }

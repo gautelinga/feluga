@@ -11,8 +11,9 @@ round-off on three ranks), stores 31464 entries against the full pattern's 71640
 backends, its diagonal included, and keeps them for a second assembly into it; a coupled
 block whose values are all zero is stored all the same (by component, never by value);
 a nonzero in a skipped block raises on every rank. With no-slip conditions on two plates
-(`bcs=`), the matrix is the full one with their dofs' rows and columns zeroed and on the
-diagonal the number of cells holding the dof (dolfin's assemble_system), symmetric, with fewer entries, the same count on both backends and rank counts.
+and the pressure pinned on one (`bcs=`), the matrix is the full one with their dofs' rows
+and columns zeroed and on the diagonal the number of cells holding the dof (dolfin's
+assemble_system), symmetric, held with the matrix (given again with it, refused), with fewer entries, the same count on both backends and rank counts.
 """
 import json
 import os
@@ -46,34 +47,28 @@ def _check(out, ranks):
         assert r["diagonal"]
         assert r["nnz_zero_coupling"] == r["nnz"]
         assert r["refused"]
-        # no-slip: the full matrix with the rows and columns zeroed; on the diagonal the
-        # number of cells holding the dof (dolfin's assemble_system)
+        # no-slip and a pinned pressure: the full matrix with their rows and columns
+        # zeroed, on the diagonal the number of cells holding the dof
         assert r["bc_diff"] <= (0.0 if ranks == 1 else 1e-14 * r["scale"])
-        assert r["bc_diag_whole"]
         assert r["bc_asymmetry"] <= 1e-14 * r["scale"]
-        assert r["n_fixed"] > 0 and r["bc_nnz"] < r["nnz"]
-    return out[0]["bc_nnz"], out[0]["bc_diag_sum"]
+        assert (r["n_fixed"], r["bc_nnz"]) == BC, (r["n_fixed"], r["bc_nnz"])
+        assert r["bcs_with_tensor_refused"]
 
 
-BC_NNZ = {}
-
-
-def _same_everywhere(backend, ranks, nnz):
-    """The pattern with the conditions, and the sum of the fixed dofs' diagonal, are the
-    same on either backend and rank count."""
-    BC_NNZ[(backend, ranks)] = nnz
-    assert len(set(BC_NNZ.values())) == 1, BC_NNZ
+# the conditions' dofs and the matrix's entries with them: the same on both backends and
+# every rank count (the pattern is the components', never the partition's)
+BC = (225, 19962)    # 2 plates x 36 periodic P2 nodes x 3 components + 9 P1 vertices
 
 
 @pytest.mark.parametrize("backend", ["dolfin", "dolfinx"])
 def test_one_rank(backend):
-    _same_everywhere(backend, 1, _check(_run(backend, 1), 1))
+    _check(_run(backend, 1), 1)
 
 
 @pytest.mark.mpi
 @pytest.mark.parametrize("backend", ["dolfin", "dolfinx"])
 def test_three_ranks(backend):
-    _same_everywhere(backend, 3, _check(_run(backend, 3), 3))
+    _check(_run(backend, 3), 3)
 
 
 def test_a_mask_of_the_wrong_shape_is_refused():

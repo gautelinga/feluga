@@ -48,30 +48,40 @@ out.update(diff=D.norm(PETSc.NormType.INFINITY), scale=Fm.norm(PETSc.NormType.IN
 zero = L.constant_on(0.0, mesh)
 Z = L.assemble(laplace + zero * (L.div(v) * p + q * L.div(u)) * L.dx, couplings=STOKES)
 out["nnz_zero_coupling"] = info(L.as_backend_type(Z).mat())
-# no-slip on the plates z = 0, 1: their dofs' rows and columns hold the diagonal alone
+# no-slip on the plates z = 0, 1, and (the pressure uncoupled with itself) the pressure
+# pinned on z = 1: their dofs' rows and columns hold the diagonal alone, the number of cells
+# holding the dof (dolfin's assemble_system), counted here from the cells' dofs
 walls = "on_boundary && (near(x[2], 0.0) || near(x[2], 1.0))"
 bcs = [L.DirichletBC(W.sub(c), 0.0, walls) for c in range(3)]
+bcs.append(L.DirichletBC(W.sub(3), 0.0, "on_boundary && near(x[2], 1.0)"))
 B = L.assemble(a, couplings="form", bcs=bcs)
-L.assemble(a, tensor=B, bcs=bcs) if sys.argv[1] == "dolfin" else L.assemble(a, tensor=B)
+L.assemble(a, tensor=B)                   # again, the matrix's own conditions
 Bm = L.as_backend_type(B).mat()
-fixed = np.concatenate([np.asarray(L.fixed_dofs(W, [bc]), dtype=PETSc.IntType) for bc in bcs])
-fixed = np.unique(fixed).astype(PETSc.IntType)
+fixed = np.unique(np.concatenate([np.asarray(L.fixed_dofs(W, [bc]), dtype=PETSc.IntType)
+                                  for bc in bcs])).astype(PETSc.IntType)
+from femtools.tables import space_tables
+cells = Bm.createVecLeft()
+d = space_tables(W).dofs.astype(PETSc.IntType).ravel()
+cells.setValues(d, np.ones(len(d)), addv=PETSc.InsertMode.ADD_VALUES)
+cells.assemblyBegin()
+cells.assemblyEnd()
 R = Fm.copy()
 R.zeroRowsColumns(fixed, diag=1.0)
-d = Bm.getDiagonal()                # dolfin's assemble_system: the cells holding the dof
-R.setDiagonal(d)
-lo = d.getOwnershipRange()[0]
-counts = d.getArray()[fixed - lo]
-out.update(bc_diag_whole=bool(comm.allreduce(bool(np.all((counts >= 1) & (counts == np.rint(counts)))),
-                                              op=MPI.LAND)),
-           bc_diag_sum=float(comm.allreduce(counts.sum())))
+lo = cells.getOwnershipRange()[0]
+dR = R.getDiagonal()
+dR.getArray()[fixed - lo] = cells.getArray()[fixed - lo]
+R.setDiagonal(dR)
 E = R.copy()
 E.axpy(-1.0, Bm, structure=PETSc.Mat.Structure.SUBSET_NONZERO_PATTERN)
 T = Bm.copy()
 T.axpy(-1.0, Bm.transpose(), structure=PETSc.Mat.Structure.SAME_NONZERO_PATTERN)
 out.update(bc_diff=E.norm(PETSc.NormType.INFINITY), bc_nnz=info(Bm),
-           bc_asymmetry=T.norm(PETSc.NormType.INFINITY),
-           n_fixed=comm.allreduce(len(np.unique(fixed))))
+           bc_asymmetry=T.norm(PETSc.NormType.INFINITY), n_fixed=comm.allreduce(len(fixed)))
+try:                                      # conditions belong to the matrix
+    L.assemble(a, tensor=B, bcs=bcs)
+    out["bcs_with_tensor_refused"] = False
+except ValueError:
+    out["bcs_with_tensor_refused"] = True
 bad = STOKES.copy()
 bad[0, 3] = False
 try:

@@ -91,3 +91,30 @@ def test_the_function_digest_is_its_blocks_in_order_on_any_rank_count(tmp_path):
             for r in range(P):
                 assert function_digest(f["u"], _Rank(P, r, parts), block=7) == serial
         assert function_digest(f["v"], block=7) != serial
+
+
+def _golden(path):
+    with h5py.File(path, "w") as h5:
+        h5["u/vector_0"] = np.arange(30, dtype=np.float64) / 7.0
+        h5["u/cell_dofs"] = (np.arange(60, dtype=np.int32) * 7) % 30
+        h5["u/x_cell_dofs"] = (30 * np.arange(3)).astype(np.uint64)
+        h5["u/cells"] = np.array([1, 0], dtype=np.uint64)
+        h5["mesh/coordinates"] = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1],
+                                           [1, 1, 1]], float)
+        h5["mesh/topology"] = np.array([[0, 1, 2, 3], [1, 2, 3, 4]], np.int64)
+        h5["mesh/cell_indices"] = np.array([0, 1], np.int64)
+
+
+def test_the_digests_are_the_ones_files_hold(tmp_path):
+    """Literal values, computed by the code these replaced (stokes-beadpack a7cc6c0's
+    `slabs.order.velocity_digest` and `io.rung.mesh_digest`, 2026-11-15): digests already
+    stored in slab and ladder files keep verifying."""
+    path = str(tmp_path / "g.h5")
+    _golden(path)
+    with h5py.File(path, "r") as f:
+        assert function_digest(f["u"]) == \
+            "28ec522e5cff7f6b5159a89d39083fcdeda343f8188852e3f13ee86aacaf3510"
+        assert function_digest(f["u"], block=4) == \
+            "5074664617820a495a1e3949a93446085c845d82f93ad01c155c92889312397e"
+    assert mesh_digest(path) == \
+        "8039a5754b935e3c7278ba6c6b597867277e8d3bac38e1002a691d564e0dbf70"

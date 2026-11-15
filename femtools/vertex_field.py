@@ -192,10 +192,12 @@ def _write_dolfinx(path, f, field):
     V = f.function_space
     f.sync()
     dofs, nodes, rows = _p1_nodes(V)
-    own = nodes < V.mesh.geometry.index_map().size_local        # each node from its owner
+    # each node once (it is in ~20 cells), and from the rank that owns it
+    nodes, first = np.unique(nodes, return_index=True)
+    own = nodes < V.mesh.geometry.index_map().size_local
     n_cells, n_vertices = _counts_dolfinx(V.mesh)
     comm = V.mesh.comm
-    vals = np.asarray(f.x.array, dtype=np.float64)[dofs[own]]
+    vals = np.asarray(f.x.array, dtype=np.float64)[dofs[first[own]]]
     tmp = path + ".writing"
     write_ordered(tmp, field + "/" + VALUES, rows[nodes[own]], vals, n_vertices,
                   comm if comm.size > 1 else None, mode="w")

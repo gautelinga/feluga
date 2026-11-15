@@ -250,6 +250,9 @@ def _cell_mean_norm_dolfinx(u, DG0):
     from femtools.backend.dolfinx import Function
     comps = scalar_components(u)
     funcs = comps if comps is not None else (u,)
+    if any(hasattr(f, "_parent") or not hasattr(f, "sync") for f in funcs):
+        raise ValueError("cell_mean_norm: a Function of its own space (collapse a mixed "
+                         "Function's component first)")
     for f in funcs:
         f.sync()
     V = funcs[0].function_space

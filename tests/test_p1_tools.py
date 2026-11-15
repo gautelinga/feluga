@@ -5,8 +5,9 @@
 
 On a box periodic in x and y, read from a mesh file whose rows are shuffled (so file order
 is not cell order), on one rank and three, legacy dolfin then DOLFINx then dolfin again:
-the P1 -> P2 matrix from the dofmaps equals dolfin's geometric transfer matrix, and on
-DOLFINx the backend's interpolation, to round-off; the cell-mean norm of a P1 and a P2
+the P1 -> P2 matrix from the dofmaps holds weights 1 and 1/2 exactly, its rows summing to
+1, and equals dolfin's geometric transfer matrix, and on DOLFINx the backend's
+interpolation, to round-off; the cell-mean norm of a P1 and a P2
 velocity (vector or three scalars) is the assembled cell mean's norm, and a P3 one is
 refused; the recovered vertex gradients of the two backends agree vertex by vertex; a
 P1 field holding each vertex's file row is written by either backend, on either rank
@@ -66,6 +67,7 @@ def _case(tmp_path, ranks):
     results.append(_run(folder, "dolfin", ranks, "read"))
     for r in results:
         assert r["p1_to_p2"] <= 1e-14 * r["p1_to_p2_scale"], r
+        assert r["p1_to_p2_exact"], r        # weights 1 and 1/2 exactly, rows summing to 1
         assert r["cell_mean"] <= 1e-14, r
         assert r["cell_mean_p3_refused"], r
     for r in (results[0], results[2]):

@@ -48,6 +48,14 @@ if backend == "dolfin":
 else:
     out["p1_to_p2"] = gmax(g.vector().get_local() - L.interpolate(f1, S2).vector().get_local())
 out["p1_to_p2_scale"] = gmax(g.vector().get_local())
+_, _, w = P.getValuesCSR()
+sums = P.createVecLeft()
+ones = P.createVecRight()
+ones.set(1.0)
+P.mult(ones, sums)
+out["p1_to_p2_exact"] = bool(comm.allreduce(bool(np.isin(w, (0.5, 1.0)).all()
+                                                 and (sums.getArray() == 1.0).all()),
+                                            op=MPI.LAND))
 
 # cell_mean_norm against the assembled means, P1 and P2, vector and three scalars
 DG0 = L.FunctionSpace(mesh, "DG", 0)

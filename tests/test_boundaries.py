@@ -131,3 +131,12 @@ def test_facets_go_to_every_box_holding_them(dim, ranks):
             if ((pts[f] >= lo[r]) & (pts[f] <= hi[r])).all()]
     assert len(want) > 0
     assert list(zip(facet.tolist(), box.tolist())) == want
+
+
+def test_marker_counts_are_read_a_block_at_a_time(tmp_path):
+    points, facets, markers = case()
+    path = str(tmp_path / "b.xdmf")
+    boundaries.write(path, points, facets, markers)
+    want = np.bincount(markers)
+    assert np.array_equal(boundaries.written_marker_counts(path), want)
+    assert np.array_equal(boundaries.written_marker_counts(path, chunk=7), want)

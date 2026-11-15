@@ -40,6 +40,16 @@ BOOMERAMG_3D = {"pc_hypre_boomeramg_strong_threshold": 0.5,
                 "pc_hypre_boomeramg_interp_type": "ext+i",
                 "pc_hypre_boomeramg_P_max": 4,
                 "pc_hypre_boomeramg_agg_nl": 1}
+# hypre's own defaults, Falgout coarsening and classical interpolation, written out so a
+# PETSc or hypre release cannot change them underneath; the strong threshold is the
+# caller's (0.25, hypre's, is a 2D setting; 0.5-0.7 the 3D one). Dearer to set up than
+# BOOMERAMG_3D, and its iterations grow far slower with the mesh: on the Stokes velocity
+# blocks of a sphere packing (stokes-beadpack, Olivia) 439 against 861 at h0.02, 506
+# against 1213 at h0.012, where BOOMERAMG_3D took 11 % more node time.
+BOOMERAMG_CLASSICAL = {"pc_hypre_boomeramg_coarsen_type": "Falgout",
+                       "pc_hypre_boomeramg_interp_type": "classical",
+                       "pc_hypre_boomeramg_P_max": 0,
+                       "pc_hypre_boomeramg_agg_nl": 0}
 
 
 def solver_options(solver_type, preconditioner_type, petsc_options=None, pc_options=None):
@@ -95,6 +105,32 @@ def scoped(prefix, options):
                 db.delValue(name)
             else:
                 db[name] = before[name]
+
+
+def defaults(prefix, options):
+    """`options` under `prefix`, by their full names, less those PETSc's options database
+    already holds (from PETSC_OPTIONS, say), which win."""
+    from petsc4py import PETSc
+    db = PETSc.Options()
+    return {prefix + k: v for k, v in options.items() if not db.hasName(prefix + k)}
+
+
+def diagonal_matrix(values, comm):
+    """A distributed AIJ matrix holding `values` (this rank's rows) on its diagonal and
+    nothing else, rows in rank order; `comm` an mpi4py or PETSc communicator. petsc4py
+    3.19 has no MatCreateDiagonal."""
+    import numpy as np
+    from petsc4py import PETSc
+    comm = comm.tompi4py() if hasattr(comm, "tompi4py") else comm
+    n = len(values)
+    offset = comm.exscan(n) or 0
+    N = comm.allreduce(n)
+    rows = np.arange(n + 1, dtype=PETSc.IntType)
+    cols = (offset + np.arange(n)).astype(PETSc.IntType)
+    D = PETSc.Mat().createAIJ(((n, N), (n, N)), csr=(rows, cols, np.asarray(values, float)),
+                              comm=comm)
+    D.assemble()
+    return D
 
 
 def apply_parameters(ksp, parameters):

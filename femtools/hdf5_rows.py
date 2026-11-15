@@ -156,8 +156,10 @@ def exchange(comm, counts, *arrays):
     order. Every array has `counts.sum()` rows, of any row shape. Their dtypes and row
     shapes are agreed over the ranks (`_agreed_layout`), and an array a rank would send
     or receive more than `ROUND` entries of goes in rounds, so MPI's 32-bit counts never
-    wrap. Collective."""
+    wrap. Collective. With no comm (one rank) the arrays come back as they are."""
     counts = np.asarray(counts, dtype=np.int64)
+    if comm is None:
+        return counts, [np.asarray(a) for a in arrays]
     recv_counts = _alltoall_counts(comm, counts)
     n_send = int(counts.sum())
     out = []
@@ -218,9 +220,9 @@ class Routed:
 
 def route(comm, dest, *arrays):
     """Row i of every array to rank `dest[i]` (checked in range on every rank); returns a
-    `Routed`. Collective."""
+    `Routed`. Collective; no comm is one rank."""
     dest = np.asarray(dest, dtype=np.int64)
-    size = comm.Get_size()
+    size = 1 if comm is None else comm.Get_size()
     bad = bool(dest.size) and (dest.min() < 0 or dest.max() >= size)
     if agreed(comm, bad):
         raise ValueError("route: a destination outside the {} ranks".format(size))
@@ -483,9 +485,9 @@ def lookup(comm, edges, block, wanted):
     """Rows `wanted` of an array whose blocks the ranks hold between them.
 
     The core of `fetch_rows`, factored out because `rows_of_labels` below needs the
-    same exchange over a block it computes rather than reads.
+    same exchange over a block it computes rather than reads. No comm is one rank.
     """
-    rank = comm.Get_rank()
+    rank = 0 if comm is None else comm.Get_rank()
     block = np.asarray(block)
 
     # ask for each distinct row once, at the rank whose block holds it

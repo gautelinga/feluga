@@ -25,8 +25,14 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   compressed, which dolfin reads on any number of ranks; `write_dofs` writes a space's dof
   tables once, for Functions that link them (a checkpoint of vectors alone);
   `write_mesh_arrays` without dolfin.
+- **`layout_reader`**: a Mesh and its Functions in that layout read with numpy and h5py
+  alone: the P2 nodes and values in XDMF's order (for `xdmf.write_quadratic`), a P1
+  scalar at the vertices, or each cell's volume and nodal values streamed a block at a time.
+- **`digest`**: a SHA-256 of what a stored Mesh or Function is (its arrays, not the
+  file's bytes), read in blocks; a Function's spread over the ranks, the same on any count.
 - **`boundaries`**: a boundary facet file (facets, an integer marker each, the points they
-  use), written serially or from blocks on many ranks, and read back. It is the layout
+  use), written serially or from blocks on many ranks, and read back; how many facets
+  carry each marker, read a block at a time. It is the layout
   partrac's `wall_facets` reads. `BoundaryMarkers` is a facet MeshFunction that writes its
   marked exterior facets as that file and reads them back onto a mesh, on any number of
   ranks.
@@ -76,7 +82,10 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   names for methods and preconditioners translated, with a check that PETSc built the
   method and preconditioner asked for (a name it does not take is otherwise ignored, and
   the solver runs with its default); `scoped`, options set for one solve and the database
-  restored after it; BoomerAMG settings that make 3D Poisson solves several times faster.
+  restored after it; BoomerAMG settings that make 3D Poisson solves several times faster
+  (`BOOMERAMG_3D`), and hypre's classical ones written out (`BOOMERAMG_CLASSICAL`), whose
+  iterations grow far slower with the mesh; `defaults`, options PETSC_OPTIONS can
+  override; `diagonal_matrix`.
 - **`nullspace`**: `constant_nullspace`, the constants on a space or on one component of
   a mixed space, attached to a matrix as its null space (set through the component's
   dofmap: setting `Function(W).sub(1).vector()` sets every component).
@@ -94,7 +103,8 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 - **`swap`**: a folder (a checkpoint, a result) written aside, swapped in by renaming,
   and put back by `recover` after a kill between the renames: never a mix of two.
 - **`memory`**: hands freed heap back to the operating system, and reports what a process
-  holds.
+  holds; **`phases`**: a line a phase of a run (wall time, peak and current memory over
+  the ranks) and `mpi_print`, on rank zero.
 - **`garbage`**: destroys the PETSc objects Python has dropped. petsc4py keeps an object
   on a parallel communicator until `PETSc.garbage_cleanup` is called on it, collectively;
   the backends' `collect_garbage` calls it (once a time step, say), and the DOLFINx

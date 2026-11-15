@@ -109,3 +109,21 @@ def test_rows_reach_their_ranks_and_answers_come_back(tmp_path):
 def test_a_bad_exchange_is_refused_on_every_rank(tmp_path, kind, text):
     proc = mpirun(tmp_path, kind)
     assert proc.returncode != 0 and text in proc.stdout + proc.stderr, proc.stderr[-2000:]
+
+
+def test_no_communicator_is_one_rank():
+    """route, reply and lookup with comm None: the rows stay, answers come back aligned,
+    a lookup is an index into the block (and refuses a row outside it)."""
+    import numpy as np
+    from femtools.hdf5_rows import lookup, reply, route
+    a = np.arange(12.0).reshape(6, 2)
+    r = route(None, np.zeros(6, np.int64), a)
+    assert np.array_equal(r.received[0], a)
+    back, = reply(None, r, r.received[0] * 2)
+    assert np.array_equal(back, a * 2)
+    with pytest.raises(ValueError, match="outside the 1 ranks"):
+        route(None, np.array([1]), a[:1])
+    edges = np.array([0, 6])
+    assert np.array_equal(lookup(None, edges, a, [5, 0, 5]), a[[5, 0, 5]])
+    with pytest.raises(ValueError, match="outside the 6 rows"):
+        lookup(None, edges, a, [6])

@@ -14,6 +14,8 @@ a communicator is passed, dolfin never.
                                           a mesh's facets, numbered by global vertex
     facet_index, marks = match_exterior(path, x, facet_vertices, owned, comm)
                                           a file's markers on a mesh's exterior facets
+    counts = written_marker_counts(path)  how many facets carry each marker, the markers
+                                          read a block at a time
     BoundaryMarkers(mesh)                 a facet MeshFunction written and read as this file
                                           (femtools.boundary_markers; imports dolfin)
 """
@@ -298,3 +300,34 @@ def read(xdmf):
     points, facets = load(points), load(facets)
     return points, facets, None if markers is None else load(markers).ravel()
 
+
+
+def written_marker_counts(path, chunk=1 << 24):
+    """How many facets a facet file gives each marker (`np.bincount` of its markers).
+
+    Reads the `markers` array alone, straight from its HDF5 dataset, a block at a time:
+    `meshio.read` brings in the points and the facets as well, and a facet file may carry
+    every vertex of the mesh (a Hele-Shaw mesher's does), so on a large mesh that is the
+    volume's coordinates on one rank to count a surface. Anything but XDMF over HDF5 goes
+    through meshio.
+    """
+    import xml.etree.ElementTree as ET
+    item = None
+    for attr in ET.parse(path).getroot().iter("Attribute"):
+        if attr.get("Name") == "markers":
+            item = attr.find("DataItem")
+    if item is None or item.get("Format") != "HDF":
+        import meshio
+        written = np.asarray(meshio.read(path).cell_data_dict["markers"]["triangle"])
+        return np.bincount(written.astype(np.int64).ravel())
+    import h5py
+    fname, _, dataset = item.text.strip().partition(":")
+    counts = np.zeros(0, dtype=np.int64)
+    with h5py.File(os.path.join(os.path.dirname(path), fname), "r") as h5:
+        data = h5[dataset]
+        for start in range(0, data.shape[0], chunk):
+            block = np.bincount(np.asarray(data[start:start + chunk]).astype(np.int64).ravel())
+            if len(block) > len(counts):
+                counts = np.pad(counts, (0, len(block) - len(counts)))
+            counts[:len(block)] += block
+    return counts

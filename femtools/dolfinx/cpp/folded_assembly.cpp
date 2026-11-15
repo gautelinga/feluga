@@ -17,6 +17,15 @@
 // cells x coefficient values that is often larger than the matrix's share of a cell.
 // The cells and the order of the additions are DOLFINx's, so the result is its result.
 // Facet integrals, over far fewer entities, are packed whole, as DOLFINx does.
+//
+// With couplings (femtools.couplings: each local dof's component, and a mask of the
+// component pairs kept), an element matrix's entries between components the mask does
+// not couple are skipped, whatever their value, and the nonzeros among them counted:
+// the caller raises if there are any. The entries in the rows and columns of dofs that
+// Dirichlet conditions fix (a flag a local dof) are dropped, and each element adds 1 on
+// such a dof's diagonal (the same unique dof): the conditions applied symmetrically, as
+// dolfin's assemble_system applies them (its diagonal is the number of cells holding the
+// dof).
 
 #include <algorithm>
 #include <cstdint>
@@ -31,6 +40,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/pair.h>
 
 #include <dolfinx/fem/DirichletBC.h>
 #include <dolfinx/fem/Form.h>
@@ -67,6 +77,45 @@ using c2x_t = md::mdspan<const T, md::extents<std::size_t, md::dynamic_extent, 2
 
 // Cells of a cell integral taken at a time (set_block changes it, for tests)
 std::size_t BLOCK = 8192;
+
+using labels_t = nb::ndarray<const std::int8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+using mask_t = nb::ndarray<const std::uint8_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+
+// Which entries of an element matrix are kept: all, or (with couplings) those whose row
+// and column dofs' components the mask couples. Local dof indices.
+struct Filter
+{
+  const std::int8_t* r = nullptr;
+  const std::int8_t* c = nullptr;
+  const std::uint8_t* m = nullptr;
+  const std::int8_t* f = nullptr;
+  const PetscInt* gr = nullptr;   // the unique (global) index of each local dof, rows
+  const PetscInt* gc = nullptr;   // ... and columns: set once the maps are open
+  std::size_t n1 = 0;
+
+  Filter(const labels_t& rows, const labels_t& cols, const mask_t& mask, const labels_t& fixed)
+  {
+    if (mask.size() == 0)
+      return;
+    r = rows.data();
+    c = cols.data();
+    m = mask.data();
+    n1 = mask.shape(1);
+    f = fixed.size() ? fixed.data() : nullptr;
+  }
+  bool on() const { return m != nullptr; }
+  // in a fixed dof's row or column: dropped off the diagonal, whatever the value
+  bool fixed(std::int32_t i, std::int32_t j) const
+  {
+    return f && (f[i] || f[j]) && gr[i] != gc[j];
+  }
+  // what an element adds at (i, j): 1 on a fixed dof's diagonal, else its value
+  double value(std::int32_t i, std::int32_t j, double v) const
+  {
+    return (f && f[i] && gr[i] == gc[j]) ? 1.0 : v;
+  }
+  bool keep(std::int32_t i, std::int32_t j) const { return m[r[i] * n1 + c[j]] != 0; }
+};
 
 // The coefficients of cell integral i for its cells [start, start + m), into c
 void pack_cells(std::vector<T>& c, const Form& a, int i, std::size_t start, std::size_t m,
@@ -281,13 +330,44 @@ void assemble_vector_blocks(std::span<T> b, const Form& L)
   }
 }
 
+// The local-to-global indices of a map of block size 1, held for the call.
+struct Indices
+{
+  ISLocalToGlobalMapping map = nullptr;
+  const PetscInt* g = nullptr;
+  PetscInt n = 0;
+
+  bool open(ISLocalToGlobalMapping m)
+  {
+    PetscInt bs;
+    if (!m)
+      return false;
+    check(ISLocalToGlobalMappingGetBlockSize(m, &bs), "ISLocalToGlobalMappingGetBlockSize");
+    if (bs != 1)
+      return false;
+    map = m;
+    check(ISLocalToGlobalMappingGetSize(map, &n), "ISLocalToGlobalMappingGetSize");
+    check(ISLocalToGlobalMappingGetIndices(map, &g), "ISLocalToGlobalMappingGetIndices");
+    return true;
+  }
+
+  void close()
+  {
+    if (g)
+      ISLocalToGlobalMappingRestoreIndices(map, &g);
+    g = nullptr;
+  }
+};
+
 /// Add the matrix of form `a` into the PETSc matrix at `handle` through
 /// MatSetValuesLocal (its local-to-global maps), the cells a block at a time: for a
 /// matrix whose pattern is not yet final (its first assembly). The caller zeroes and
 /// finalises it. Returns false, adding nothing, unless the matrix has local-to-global
 /// maps of block size 1 over the local dofs of the form's spaces.
-bool assemble_local(const Form& a, std::uintptr_t handle)
+std::int64_t assemble_local(const Form& a, std::uintptr_t handle, const labels_t& rl,
+                            const labels_t& cl, const mask_t& mask, const labels_t& fixed)
 {
+  Filter filt(rl, cl, mask, fixed);
   Mat A = reinterpret_cast<Mat>(handle);
   ISLocalToGlobalMapping maps[2];
   check(MatGetLocalToGlobalMapping(A, &maps[0], &maps[1]), "MatGetLocalToGlobalMapping");
@@ -295,7 +375,7 @@ bool assemble_local(const Form& a, std::uintptr_t handle)
   {
     PetscInt bs, n;
     if (!maps[k])
-      return false;
+      return -1;
     check(ISLocalToGlobalMappingGetBlockSize(maps[k], &bs), "ISLocalToGlobalMappingGetBlockSize");
     check(ISLocalToGlobalMappingGetSize(maps[k], &n), "ISLocalToGlobalMappingGetSize");
     auto dofmap = a.function_spaces().at(k)->dofmap();
@@ -303,23 +383,62 @@ bool assemble_local(const Form& a, std::uintptr_t handle)
         or n != PetscInt(dofmap->index_map_bs()
                          * (dofmap->index_map->size_local() + dofmap->index_map->num_ghosts())))
     {
-      return false;
+      return -1;
     }
   }
   std::vector<PetscInt> r, c;   // the local indices as PetscInt, 32- or 64-bit
-  auto add = [A, &r, &c](std::span<const std::int32_t> rows,
-                         std::span<const std::int32_t> cols,
-                         std::span<const double> vals) -> int
+  std::vector<double> kept;
+  Indices rgi, cgi;             // the unique indices, for the diagonal of fixed dofs
+  if (filt.f)
   {
-    r.assign(rows.begin(), rows.end());
-    c.assign(cols.begin(), cols.end());
-    check(MatSetValuesLocal(A, r.size(), r.data(), c.size(), c.data(), vals.data(),
-                            ADD_VALUES),
-          "MatSetValuesLocal");
+    rgi.open(maps[0]);
+    cgi.open(maps[1]);
+    filt.gr = rgi.g;
+    filt.gc = cgi.g;
+  }
+  std::int64_t skipped = 0;     // nonzeros between components the mask does not couple
+  auto add = [A, &r, &c, &kept, &filt, &skipped](std::span<const std::int32_t> rows,
+                                                 std::span<const std::int32_t> cols,
+                                                 std::span<const double> vals) -> int
+  {
+    if (!filt.on())
+    {
+      r.assign(rows.begin(), rows.end());
+      c.assign(cols.begin(), cols.end());
+      check(MatSetValuesLocal(A, r.size(), r.data(), c.size(), c.data(), vals.data(),
+                              ADD_VALUES),
+            "MatSetValuesLocal");
+      return 0;
+    }
+    const std::size_t nc = cols.size();
+    for (std::size_t i = 0; i < rows.size(); ++i)
+    {
+      c.clear();
+      kept.clear();
+      for (std::size_t j = 0; j < nc; ++j)
+      {
+        const double v = filt.value(rows[i], cols[j], vals[i * nc + j]);
+        if (filt.fixed(rows[i], cols[j]))
+          continue;
+        if (filt.keep(rows[i], cols[j]))
+        {
+          c.push_back(cols[j]);
+          kept.push_back(v);
+        }
+        else if (v != 0.0)
+          ++skipped;
+      }
+      const PetscInt ri = rows[i];
+      if (!c.empty())
+        check(MatSetValuesLocal(A, 1, &ri, c.size(), c.data(), kept.data(), ADD_VALUES),
+              "MatSetValuesLocal");
+    }
     return 0;
   };
   assemble_matrix_blocks(add, a);
-  return true;
+  rgi.close();
+  cgi.close();
+  return skipped;
 }
 
 /// Add the vector of form `L` into `b`, the local array (owned then ghost entries) of a
@@ -389,52 +508,31 @@ struct Block
   }
 };
 
-// The local-to-global indices of a map of block size 1, held for the call.
-struct Indices
-{
-  ISLocalToGlobalMapping map = nullptr;
-  const PetscInt* g = nullptr;
-  PetscInt n = 0;
-
-  bool open(ISLocalToGlobalMapping m)
-  {
-    PetscInt bs;
-    if (!m)
-      return false;
-    check(ISLocalToGlobalMappingGetBlockSize(m, &bs), "ISLocalToGlobalMappingGetBlockSize");
-    if (bs != 1)
-      return false;
-    map = m;
-    check(ISLocalToGlobalMappingGetSize(map, &n), "ISLocalToGlobalMappingGetSize");
-    check(ISLocalToGlobalMappingGetIndices(map, &g), "ISLocalToGlobalMappingGetIndices");
-    return true;
-  }
-
-  void close()
-  {
-    if (g)
-      ISLocalToGlobalMappingRestoreIndices(map, &g);
-    g = nullptr;
-  }
-};
 
 /// Add the matrix of form `a` into the PETSc matrix at `handle` (a petsc4py
-/// Mat.handle). Returns the number of values that fell outside the matrix's pattern
-/// (not added); -1 if the matrix was never assembled (its pattern not final: see
+/// Mat.handle), skipping the entries the couplings do not keep (rl, cl, mask; an
+/// empty mask keeps all). Returns (the number of kept values that fell outside the
+/// matrix's pattern, not added; the number of skipped values that were nonzero); the
+/// first is -1 if the matrix was never assembled (its pattern not final: see
 /// assemble_local), -2 if it is not one this can fill (not AIJ, or without
 /// local-to-global maps of block size 1 over the local dofs of the form's spaces),
 /// when nothing is added.
-std::int64_t assemble(const fem::Form<double, double>& a, std::uintptr_t handle)
+std::pair<std::int64_t, std::int64_t> assemble(const fem::Form<double, double>& a,
+                                               std::uintptr_t handle, const labels_t& rl,
+                                               const labels_t& cl, const mask_t& mask,
+                                               const labels_t& fixed)
 {
+  Filter filt(rl, cl, mask, fixed);
+  std::int64_t skipped = 0;
   Mat A = reinterpret_cast<Mat>(handle);
   PetscBool mpi, seq, assembled;
   check(PetscObjectTypeCompare((PetscObject)A, MATMPIAIJ, &mpi), "PetscObjectTypeCompare");
   check(PetscObjectTypeCompare((PetscObject)A, MATSEQAIJ, &seq), "PetscObjectTypeCompare");
   check(MatAssembled(A, &assembled), "MatAssembled");
   if (!(mpi || seq))
-    return -2;
+    return {-2, 0};
   if (!assembled)
-    return -1;
+    return {-1, 0};
 
   Mat Ad = A, Ao = nullptr;
   const PetscInt* garray = nullptr;
@@ -470,7 +568,7 @@ std::int64_t assemble(const fem::Form<double, double>& a, std::uintptr_t handle)
     {
       rg.close();
       cg.close();
-      return -2;
+      return {-2, 0};
     }
     // row[i]: row of local dof i in the blocks, -1 if another rank owns it
     std::vector<PetscInt> row(rg.n);
@@ -491,6 +589,8 @@ std::int64_t assemble(const fem::Form<double, double>& a, std::uintptr_t handle)
       }
     }
 
+    filt.gr = rg.g;
+    filt.gc = cg.g;
     D.open(Ad);
     if (Ao)
       O.open(Ao);
@@ -510,15 +610,32 @@ std::int64_t assemble(const fem::Form<double, double>& a, std::uintptr_t handle)
         {
           far_rows.push_back(rg.g[rows[i]]);
           for (std::size_t j = 0; j < nc; ++j)
+          {
+            if (filt.on() && filt.fixed(rows[i], cols[j]))
+              continue;
+            if (filt.on() && !filt.keep(rows[i], cols[j]))
+            {
+              skipped += v[j] != 0.0;
+              continue;
+            }
             far_cols.push_back(cg.g[cols[j]]);
-          far_vals.insert(far_vals.end(), v, v + nc);
+            far_vals.push_back(filt.on() ? filt.value(rows[i], cols[j], v[j]) : v[j]);
+          }
           far_start.push_back(far_cols.size());
           continue;
         }
         for (std::size_t j = 0; j < nc; ++j)
         {
+          if (filt.on() && filt.fixed(rows[i], cols[j]))
+            continue;
+          if (filt.on() && !filt.keep(rows[i], cols[j]))
+          {
+            skipped += v[j] != 0.0;
+            continue;
+          }
           const PetscInt c = mapped[j];
-          if (!(c >= 0 ? D.add(r, c, v[j]) : c < -1 && O.add(r, -2 - c, v[j])))
+          const double x = filt.on() ? filt.value(rows[i], cols[j], v[j]) : v[j];
+          if (!(c >= 0 ? D.add(r, c, x) : c < -1 && O.add(r, -2 - c, x)))
             ++missed;
         }
       }
@@ -545,15 +662,17 @@ std::int64_t assemble(const fem::Form<double, double>& a, std::uintptr_t handle)
                        far_vals.data() + far_start[k], ADD_VALUES),
           "MatSetValues");
   }
-  return missed;
+  return {missed, skipped};
 }
 } // namespace
 
 NB_MODULE(folded_assembly_x, m)
 {
-  m.def("assemble", &assemble, nb::arg("form"), nb::arg("handle"));
+  m.def("assemble", &assemble, nb::arg("form"), nb::arg("handle"), nb::arg("rows"),
+        nb::arg("cols"), nb::arg("mask"), nb::arg("fixed"));
   m.def("assemble_vector", &assemble_vector, nb::arg("form"), nb::arg("b"));
-  m.def("assemble_local", &assemble_local, nb::arg("form"), nb::arg("handle"));
+  m.def("assemble_local", &assemble_local, nb::arg("form"), nb::arg("handle"),
+        nb::arg("rows"), nb::arg("cols"), nb::arg("mask"), nb::arg("fixed"));
   m.def("set_block", [](std::size_t n) { BLOCK = std::max<std::size_t>(n, 1); },
         nb::arg("cells"));
 }

@@ -12,6 +12,14 @@ column space's UniqueDofs as `cols`. Dirichlet conditions act on the assembled c
 tensors (`femtools.backend.dolfinx.DirichletBC`). Matrices over blocked spaces are not
 supported (scalar and mixed spaces are).
 
+`create_matrix(a, U, couplings=mask, bcs=bcs)` stores only the blocks of the components
+`mask` couples (femtools.couplings), and the diagonal of a square form; `assemble_matrix`
+then skips the other blocks' entries by component, and raises if one of them is nonzero.
+With Dirichlet conditions `bcs` the rows and columns of the dofs they constrain hold the
+diagonal alone, the number of cells holding the dof: the conditions applied symmetrically,
+as dolfin's assemble_system applies them (a right-hand side of inhomogeneous ones is the
+caller's: g times that diagonal, the columns lifted).
+
 A matrix is assembled by DOLFINx's assembler with an inserter of femtools' own
 (cpp/folded_assembly.cpp), which adds each element matrix straight into PETSc's arrays
 instead of through MatSetValuesLocal's index mapping and lookups.
@@ -44,12 +52,16 @@ def _domains_key(a, comm):
     return tuple(comm.allgather(h.digest()))
 
 
-def create_matrix(a, rows, cols=None):
+def create_matrix(a, rows, cols=None, couplings=None, bcs=()):
     """The matrix of bilinear form `a` over unique dofs (`rows`, `cols`: UniqueDofs),
-    preallocated exactly. The preallocation is computed once per pair of UniqueDofs and
-    integration domains, and shared by the forms that have the same. The PETSc objects
-    Python has dropped on the rows' communicator are destroyed first
-    (femtools.garbage). Collective."""
+    preallocated exactly. The preallocation is computed once per pair of UniqueDofs,
+    integration domains and couplings, and shared by the forms that have the same.
+    `couplings`, a boolean mask (test components x trial components, femtools.couplings),
+    keeps only the coupled blocks and, when `rows` is `cols`, the diagonal; Dirichlet
+    conditions `bcs` (femtools.backend.dolfinx's, on a square form) keep only the
+    diagonal in their dofs' rows and columns. The matrix remembers both for
+    `assemble_matrix`. The PETSc objects Python has dropped on the rows'
+    communicator are destroyed first (femtools.garbage). Collective."""
     from mpi4py import MPI
     from petsc4py import PETSc
 
@@ -60,16 +72,81 @@ def create_matrix(a, rows, cols=None):
         raise NotImplementedError("matrices over blocked spaces")
     comm = rows.comm
     cleanup(comm)  # matrices dropped since the last one, destroyed before another is made
+    if bcs and rows is not cols:
+        raise ValueError("Dirichlet conditions on a matrix whose rows and columns differ")
+    filt = None
+    if couplings is not None or bcs:
+        filt = _Couplings(a, couplings, rows is cols, rows, bcs)
     patterns = _PATTERNS.get((rows, cols), dict)
-    key = _domains_key(a, comm)
+    key = _domains_key(a, comm) + (None if filt is None else filt.key,)
     nnz = patterns.get(key)
     if not comm.allreduce(nnz is not None, op=MPI.LAND):
-        nnz = patterns[key] = _preallocation(a, rows, cols)
+        nnz = patterns[key] = _preallocation(a, rows, cols, filt)
     K = PETSc.Mat().createAIJ(((rows.n_owned, rows.n_global), (cols.n_owned, cols.n_global)),
                               nnz=nnz, comm=comm)
     K.setLGMap(rows.lgmap, cols.lgmap)
     K.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, True)
+    if filt is not None:
+        _FILTERS[K.handle] = filt
     return K
+
+
+# The couplings of the matrices create_matrix made with them, by PETSc handle (petsc4py
+# objects take no attributes); a handle reused by a later matrix is overwritten there
+_FILTERS = {}
+
+
+class _Couplings:
+    """A couplings mask with the component of each local dof of the form's two spaces."""
+
+    def __init__(self, a, mask, square, U, bcs=()):
+        from femtools.couplings import dolfinx_labels
+        V0, V1 = a._cpp_object.function_spaces
+        self.rows = dolfinx_labels(V0)
+        self.cols = self.rows if V1 is V0 else dolfinx_labels(V1)
+        n0, n1 = int(self.rows.max(initial=-1)) + 1, int(self.cols.max(initial=-1)) + 1
+        if mask is None:
+            mask = np.ones((n0, n1), dtype=bool)
+        self.mask = np.ascontiguousarray(np.asarray(mask, dtype=bool), dtype=np.uint8)
+        if self.mask.shape[0] < n0 or self.mask.shape[1] < n1:
+            raise ValueError("a couplings mask of shape {} for spaces of {} x {} components"
+                             .format(self.mask.shape, n0, n1))
+        self.square = bool(square)
+        self.has_bcs = len(bcs) > 0
+        # the dofs the conditions constrain: owned rows (compact, global) and every local
+        # dof (owned and ghost) whose unique dof is one of them
+        self.fixed_rows = np.unique(np.concatenate(
+            [np.asarray(bc.global_rows(), dtype=np.int64) for bc in bcs]
+            or [np.zeros(0, np.int64)]))
+        self.fixed = _fixed_local(U, self.fixed_rows) if len(bcs) else \
+            np.zeros(0, dtype=np.int8)
+        h = hashlib.blake2b(self.fixed_rows.tobytes(), digest_size=16).digest()
+        self.key = (self.mask.shape, self.mask.tobytes(), self.square,
+                    tuple(U.comm.allgather(h)))
+
+    def pairs(self, R_cells, C_cells, diagonal):
+        """Which (row, column) entries of each cell's element matrix are kept: (m, r, c);
+        `diagonal` (m, r, c) marks the entries on the matrix's diagonal, which a fixed dof
+        keeps."""
+        keep = self.mask[self.rows[R_cells][:, :, None], self.cols[C_cells][:, None, :]] != 0
+        if len(self.fixed):
+            fixed = (self.fixed[R_cells] != 0)[:, :, None] | (self.fixed[C_cells] != 0)[:, None, :]
+            keep &= ~fixed | diagonal
+        return keep
+
+
+def _fixed_local(U, rows):
+    """1 at each local dof of U's space (owned and ghost) whose unique dof is one of the
+    owned compact `rows` of some rank, else 0 (int8): one forward scatter."""
+    from petsc4py import PETSc
+    c = U.create_vector()
+    c.getArray()[np.asarray(rows, dtype=np.int64) - U.owned_range[0]] = 1.0
+    local = PETSc.Vec().createSeq(len(U.compact), comm=PETSc.COMM_SELF)
+    U._scatter.scatter(c, local, PETSc.InsertMode.INSERT, PETSc.ScatterMode.FORWARD)
+    out = (local.getArray(readonly=True) > 0.5).astype(np.int8)
+    for o in (c, local):
+        o.destroy()
+    return out
 
 
 def _coupled_cells(a):
@@ -83,10 +160,11 @@ def _coupled_cells(a):
             yield d.reshape(-1, 1) if d.ndim == 1 else d[..., 0].reshape(len(d), -1)
 
 
-def _preallocation(a, rows, cols):
+def _preallocation(a, rows, cols, filt=None):
     """(d_nnz, o_nnz) of the folded matrix of `a`, from the dofmaps alone: every (row,
     column) pair of dofs that an integration entity couples (all dofs of its cells, as
-    in DOLFINx's sparsity pattern, which adds no diagonal of its own) is taken to
+    in DOLFINx's sparsity pattern, which adds no diagonal of its own; with couplings
+    `filt`, those of coupled components, and the diagonal of a square form) is taken to
     compact indices, sent to the owner of its row if another rank owns that, and
     counted once. Pairs are made at most about `_CHUNK` at a time and kept as one int64
     key each, split by row range so that each range is made unique on its own.
@@ -132,14 +210,25 @@ def _preallocation(a, rows, cols):
         del first
         for s in range(0, len(cells), step):
             c = cells[s:s + step]
-            R = rows.compact[rmap[c].reshape(len(c), -1)] - start
-            C = cols.compact[cmap[c].reshape(len(c), -1)]
+            Rl, Cl = rmap[c].reshape(len(c), -1), cmap[c].reshape(len(c), -1)
+            R = rows.compact[Rl] - start
+            C = cols.compact[Cl]
             mine = (R >= 0) & (R < n)
-            hold(((R * width)[:, :, None] + C[:, None, :])[mine].ravel())
-            if not mine.all():
-                ent, k = np.nonzero(~mine)
-                far.append(unique_rows(np.stack(
-                    [np.repeat(R[ent, k] + start, C.shape[1]), C[ent].ravel()], axis=1)))
+            keys = (R * width)[:, :, None] + C[:, None, :]
+            if filt is None:
+                hold(keys[mine].ravel())
+                if not mine.all():
+                    ent, k = np.nonzero(~mine)
+                    far.append(unique_rows(np.stack(
+                        [np.repeat(R[ent, k] + start, C.shape[1]), C[ent].ravel()], axis=1)))
+                continue
+            keep = filt.pairs(Rl, Cl, (R + start)[:, :, None] == C[:, None, :])
+            hold(keys[keep & mine[:, :, None]])
+            fe, fk, fj = np.nonzero(keep & ~mine[:, :, None])
+            if len(fe):
+                far.append(unique_rows(np.stack([R[fe, fk] + start, C[fe, fj]], axis=1)))
+    if filt is not None and filt.square:
+        hold(np.arange(n, dtype=np.int64) * width + start + np.arange(n, dtype=np.int64))
     if comm.size > 1:
         pairs = unique_rows(np.concatenate(far)) if far else np.zeros((0, 2), np.int64)
         del far
@@ -184,25 +273,55 @@ def _inserter(comm):
     return _INSERTER[0]
 
 
+_NO_LABELS = np.zeros(0, dtype=np.int8)
+_NO_MASK = np.zeros((0, 0), dtype=np.uint8)
+
+
 def assemble_matrix(K, a):
-    """Assemble form `a` into `K` (from `create_matrix`). From the second assembly on,
+    """Assemble form `a` into `K` (from `create_matrix`), the Dirichlet conditions it was
+    made with applied (their rows' and columns' entries dropped, the diagonal the number of
+    cells holding the dof, as dolfin's assemble_system). From the
+    second assembly on,
     the element matrices are added straight into K's arrays (its pattern then final);
     the first goes through MatSetValuesLocal. Either way the extension packs the form's
     coefficients a block of cells at a time. A value outside K's pattern in a row owned
-    here raises on every rank; in a row owned elsewhere, PETSc refuses it there.
-    Collective."""
+    here raises on every rank; in a row owned elsewhere, PETSc refuses it there. A matrix
+    made with couplings skips the entries between components they do not couple, raising
+    on every rank if any of them is nonzero, and on its first assembly stores its
+    diagonal (zeros where the form leaves it empty). Collective."""
     from mpi4py import MPI
     from dolfinx.fem import petsc
 
     comm = K.comm.tompi4py()
+    filt = _FILTERS.get(K.handle)
     inserter = _inserter(comm) if a.dtype == np.float64 else None
+    if filt is not None and inserter is None:
+        raise NotImplementedError("couplings need femtools' C++ inserter, which could not "
+                                  "be built here")
+    labels = (_NO_LABELS, _NO_LABELS, _NO_MASK, _NO_LABELS) if filt is None else \
+        (filt.rows, filt.cols, filt.mask, filt.fixed)
     K.zeroEntries()
-    missed = inserter.assemble(a._cpp_object, K.handle) if inserter is not None else -2
-    if missed == -1 and inserter.assemble_local(a._cpp_object, K.handle):
-        pass                            # the first assembly, through the local maps
-    elif missed < 0:
+    missed, skipped = inserter.assemble(a._cpp_object, K.handle, *labels) \
+        if inserter is not None else (-2, 0)
+    if missed == -1:
+        first = inserter.assemble_local(a._cpp_object, K.handle, *labels)
+        if first >= 0:
+            missed, skipped = 0, first
+            if filt is not None and filt.square:
+                from petsc4py import PETSc
+                lo, hi = K.getOwnershipRange()
+                i = np.arange(lo, hi, dtype=PETSc.IntType).reshape(-1, 1)
+                K.setValuesRCV(i, i, np.zeros((len(i), 1)), addv=PETSc.InsertMode.ADD_VALUES)
+        else:
+            missed = -2
+    if missed == -2:
         petsc.assemble_matrix(K, a)
-    elif comm.allreduce(missed, op=MPI.SUM):
+        missed = 0
+    total = comm.allreduce(skipped, op=MPI.SUM)
+    if total:
+        raise RuntimeError("assemble_matrix: {} nonzero values of the form couple components "
+                           "the matrix's couplings leave out".format(total))
+    if comm.allreduce(missed, op=MPI.SUM):
         raise RuntimeError("assemble_matrix: {} values of the form fall outside the "
                            "matrix's pattern".format(comm.allreduce(missed, op=MPI.SUM)))
     K.assemble()

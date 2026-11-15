@@ -56,6 +56,7 @@ from ufl import (  # noqa: F401
     TrialFunctions)
 
 from femtools import ksp  # noqa: F401
+from femtools.couplings import form_couplings  # noqa: F401
 from femtools.dolfinx import assembly as _assembly
 from femtools.dolfinx.boundary_markers import BoundaryMarkers, compiled_facets  # noqa: F401
 from femtools.dolfinx import mixed as _mixed
@@ -1033,9 +1034,15 @@ def compiled(form):
     return entry
 
 
-def assemble(form, tensor=None):
+def assemble(form, tensor=None, couplings=None, bcs=()):
     """dolfin's assemble: a Matrix, a Vector or a number, into `tensor` if given (a
-    Matrix made for the same spaces, or a Vector over the test space's unique dofs)."""
+    Matrix made for the same spaces, or a Vector over the test space's unique dofs). A
+    Matrix made here with `couplings` (None, "form" or a mask: femtools.couplings)
+    stores only the blocks of the coupled components (and the diagonal), and keeps them
+    for later assemblies into it; a nonzero outside them raises. With Dirichlet
+    conditions `bcs` (on a square form) the rows and columns of their dofs hold only the
+    diagonal, the number of cells holding the dof: the conditions applied symmetrically,
+    as dolfin's assemble_system applies them."""
     c = compiled(form)
     if c.rank == 0:
         return c.comm.allreduce(fem.assemble_scalar(c.cpp), op=_MPI.SUM)
@@ -1045,8 +1052,11 @@ def assemble(form, tensor=None):
         _assembly.assemble_vector(b._v, c.cpp, U)
         return b
     if tensor is None:
+        from femtools.couplings import resolve
         tensor = Matrix(_assembly.create_matrix(c.cpp, unique_dofs(c.spaces[0]),
-                                                unique_dofs(c.spaces[1])))
+                                                unique_dofs(c.spaces[1]),
+                                                couplings=resolve(couplings, form),
+                                                bcs=tuple(bcs)))
     _assembly.assemble_matrix(tensor._m, c.cpp)
     return tensor
 

@@ -86,6 +86,11 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   (`BOOMERAMG_3D`), and hypre's classical ones written out (`BOOMERAMG_CLASSICAL`), whose
   iterations grow far slower with the mesh; `defaults`, options PETSC_OPTIONS can
   override; `diagonal_matrix`.
+- **`couplings`**: which components of a mixed space a bilinear form couples
+  (`form_couplings`, read off the UFL form), and matrices that store only those blocks:
+  `assemble(a, couplings="form")` on either backend, the other blocks skipped by component
+  (a nonzero among them an error). The Taylor-Hood Stokes operator keeps 44 % of the mixed
+  pattern.
 - **`nullspace`**: `constant_nullspace`, the constants on a space or on one component of
   a mixed space, attached to a matrix as its null space (set through the component's
   dofmap: setting `Function(W).sub(1).vector()` sets every component).

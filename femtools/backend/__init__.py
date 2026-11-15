@@ -35,6 +35,7 @@ NAMES = (
     "AssignedVectorFunction", "set_subfunction", "subfunction", "subspace",
     # linear algebra and solvers
     "Vector", "Matrix", "as_backend_type", "assemble", "assemble_matrix", "apply_bc",
+    "form_couplings",
     "interpolate", "nodal_values", "constant_nullspace", "norm", "normalize",
     "PETScKrylovSolver", "ksp", "solve", "weighted_gradient_matrix",
     # runtime

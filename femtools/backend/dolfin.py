@@ -22,6 +22,7 @@ from femtools.dolfin_layout import write_dofs as write_dof_tables  # noqa: F401
 from femtools.dolfin_layout import write_function as write_function_h5  # noqa: F401
 from femtools.dolfin_layout import write_functions as write_functions_h5  # noqa: F401
 from femtools.dolfin_layout import write_mesh as write_mesh_h5  # noqa: F401
+from femtools.couplings import form_couplings  # noqa: F401
 from femtools.fast_assembly import assemble as _fast_assemble
 from femtools.fast_assembly import assemble_matrix  # noqa: F401
 from femtools.fast_bc import apply as apply_bc  # noqa: F401
@@ -104,14 +105,14 @@ def owned_dofs(W, i):
 
 def fixed_dofs(W, bcs):
     """The owned dofs of space W that the Dirichlet conditions `bcs` constrain, as
-    global indices of its vectors."""
+    global indices of its vectors: every one, also those whose boundary facets another
+    rank holds (gathered, as dolfin's `DirichletBC.apply` gathers them; until 2026-11-15
+    a rank's own facets' alone). Collective."""
+    from femtools.couplings import dolfin_fixed_owned
     start = W.dofmap().ownership_range()[0]
-    owned = W.dofmap().index_map().size(IndexMap.MapSize.OWNED)
     found = [np.zeros(0, np.int64)]
     for bc in bcs:
-        values = bc.get_boundary_values()
-        local = np.fromiter(values.keys(), dtype=np.int64, count=len(values))
-        found.append(start + local[local < owned])
+        found.append(start + dolfin_fixed_owned(W, bc))
     return np.concatenate(found)
 
 
@@ -132,11 +133,28 @@ def collect_garbage():
     cleanup()
 
 
-def assemble(form, tensor=None):
+def assemble(form, tensor=None, couplings=None, bcs=()):
     """femtools.fast_assembly's assemble (compiled once per form), after bringing the
-    form's Functions that follow another up to date (`sync`), as on DOLFINx."""
+    form's Functions that follow another up to date (`sync`), as on DOLFINx. A matrix made
+    here with `couplings` (None, "form" or a mask: femtools.couplings) stores only the
+    blocks of the coupled components; a nonzero outside them is PETSc's error. With
+    Dirichlet conditions `bcs` (a bilinear form, square) the matrix holds only the
+    diagonal in their dofs' rows and columns, and is assembled with them applied
+    symmetrically (dolfin's assemble_system, a zero right-hand side: the diagonal the
+    number of cells holding the dof)."""
     for c in form.coefficients():
         sync(c)
+    if tensor is None and (couplings is not None or bcs):
+        from femtools.couplings import dolfin_matrix, resolve, ones
+        mask = resolve(couplings, form)
+        tensor = dolfin_matrix(form, ones(form) if mask is None else mask, bcs)
+    if bcs:
+        import dolfin as df
+        v = sorted(form.arguments(), key=lambda x: x.number())[0]
+        zero = df.Constant(np.zeros(v.ufl_shape)) if v.ufl_shape else df.Constant(0.0)
+        df.assemble_system(form, df.inner(zero, v) * df.dx(domain=v.ufl_domain()), list(bcs),
+                           A_tensor=tensor, b_tensor=df.PETScVector(tensor.mpi_comm()))
+        return tensor
     return _fast_assemble(form, tensor)
 
 

@@ -1,6 +1,6 @@
 """`import femtools`, its I/O modules, `hierarchical_transfer`, `dof_reorder`, `abort`,
-`memory`, `phases`, `digest`, `layout_reader`, `couplings`, `swap` and `ksp` need numpy and
-h5py alone: dolfin and mpi4py made unimportable, they import
+`memory`, `phases`, `digest`, `layout_reader`, `couplings`, `vertex_field`, `recovery`,
+`cell_mean`, `swap` and `ksp` need numpy and h5py alone: dolfin and mpi4py made unimportable, they import
 without loading cppimport or the compiled modules, and a quadratic grid is written and
 read back."""
 import os
@@ -19,6 +19,7 @@ import femtools.boundaries
 import femtools.dolfin_layout, femtools.abort, femtools.memory, femtools.swap, femtools.ksp
 import femtools.hierarchical_transfer, femtools.dof_reorder
 import femtools.phases, femtools.digest, femtools.layout_reader, femtools.couplings
+import femtools.vertex_field, femtools.recovery, femtools.cell_mean
 assert not any(m in sys.modules for m in ("cppimport", "femtools.probes", "femtools.gradient"))
 from femtools.xdmf import write_quadratic, _scan, _read_grid_geometry, _read_grid_attribute
 coords = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], float)

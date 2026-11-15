@@ -28,6 +28,9 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 - **`layout_reader`**: a Mesh and its Functions in that layout read with numpy and h5py
   alone: the P2 nodes and values in XDMF's order (for `xdmf.write_quadratic`), a P1
   scalar at the vertices, or each cell's volume and nodal values streamed a block at a time.
+- **`vertex_field`**: a P1 field stored as one value per row of its mesh file's
+  coordinates (24x smaller than dolfin's layout), written and read on either backend and
+  any number of ranks.
 - **`digest`**: a SHA-256 of what a stored Mesh or Function is (its arrays, not the
   file's bytes), read in blocks; a Function's spread over the ranks, the same on any count.
 - **`boundaries`**: a boundary facet file (facets, an integer marker each, the points they
@@ -58,6 +61,8 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   one mesh (any degrees and value shapes, a mixed or vector Function's component,
   periodic, parallel) as one sparse product with a transfer matrix built once: 0.3 ms
   where dolfin takes 0.7 s for P2 onto P1 on a 197k-cell 3D mesh.
+- **`fast_interpolation.p1_to_p2`**: the P1 -> P2 interpolation on one mesh from the
+  two dofmaps (the zero-pass nested prolongation), on either backend; no point search.
 - **`fast_assembly`**: `assemble`, `dolfin.assemble` for a form object assembled again and
   again (every time step), compiled into a dolfin Form once instead of on every call;
   `assemble_matrix`, a constant matrix (a mass matrix, say) assembled once per form and
@@ -73,6 +78,10 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   points, located once and evaluated many times; `dump` writes one file a rank, which
   `read_dump` reads back (as fenicstools' one file a probe). From Mikael Mortensen's
   fenicstools, as extended in addictif.
+- **`recovery`**: a continuous gradient recovered by lumped-mass averaging (ZZ) in a
+  periodic P1 space, at the dofs or the vertices, on either backend.
+- **`cell_mean`**: `|cell mean of u|` per cell, exact for a P1 or P2 velocity (the uniform
+  nodal average is not, at P2), on either backend.
 - **`gradient`**: the weighted gradient matrix, a P1 field's derivative at the nodes as one
   matrix-vector product. From Mikael Mortensen's fenicstools, unchanged in what it computes.
 

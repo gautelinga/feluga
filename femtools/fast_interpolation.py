@@ -11,6 +11,10 @@ matrix (PETScDMCollection.create_transfer_matrix), every call is then one sparse
 matrix-vector product, where dolfin.interpolate evaluates the source element cell by
 cell and builds a Function every call.
 
+A scalar P1 -> P2 pair is built from the two dofmaps instead (`p1_to_p2`, on either
+backend): each P2 vertex dof takes its vertex's P1 dof, each edge dof half of each end's,
+with no point search and from local cells alone.
+
 Any degrees, scalar, vector or tensor; on a periodic space; in parallel. The source may be a
 component of a mixed Function (from Function.split()), whose vector is the mixed
 one: its values are first gathered into the collapsed component space, ghosts
@@ -33,7 +37,9 @@ def transfer(V, W):
     T = _TRANSFERS.get(key)
     if T is None:
         _check(V, W)
-        if len(V.component()):                   # a component of a mixed space
+        if _scalar_p1_p2(V, W):
+            T = p1_to_p2(V, W)
+        elif len(V.component()):                 # a component of a mixed space
             source = V.collapse()
             D = df.PETScDMCollection.create_transfer_matrix(source, W).mat()
             P = _selection(V, source)
@@ -47,6 +53,38 @@ def transfer(V, W):
             T = df.PETScDMCollection.create_transfer_matrix(V, W).mat()
         _TRANSFERS[key] = T
     return T
+
+
+def p1_to_p2(S1, S2):
+    """The P1 -> P2 interpolation on one mesh as a petsc4py Mat (rows S2's vector,
+    columns S1's), from the two dofmaps alone: each P2 vertex dof takes its vertex's P1 dof
+    with weight 1, each edge dof its two ends' with 1/2 -- the P1 basis at the P2 nodes,
+    the zero-pass case of a nested prolongation (femtools.nested_transfer). The
+    restriction PCMG wants is its transpose. Legacy dolfin, or femtools.backend.dolfinx
+    (over the unique dofs; periodic spaces alike). Collective.
+
+    No point search and no bounding-box tree: every owned P2 dof is evaluated once, in a
+    local cell holding it (stokes-beadpack's `--pmg`, at 384 ranks, replaced
+    `create_transfer_matrix` with this for its transient memory, 2026-10-01)."""
+    from femtools.nested_transfer import Nested
+    from femtools.tables import is_dolfinx
+    if is_dolfinx(S2):
+        mesh = S2.mesh
+        n = mesh.topology.index_map(mesh.topology.dim).size_local
+    else:
+        mesh = S2.mesh()
+        n = mesh.topology().ghost_offset(mesh.topology().dim())     # own cells
+    return Nested(mesh, mesh, np.arange(n, dtype=np.int64), 0).prolongation(S1, S2)
+
+
+def _scalar_p1_p2(V, W):
+    """Whole scalar Lagrange spaces of degrees 1 and 2 (legacy dolfin)."""
+    if len(V.component()):
+        return False
+    a, b = V.ufl_element(), W.ufl_element()
+    return (type(a).__name__ == type(b).__name__ == "FiniteElement"
+            and a.family() == b.family() == "Lagrange" and a.degree() == 1
+            and b.degree() == 2)
 
 
 def forget(V):

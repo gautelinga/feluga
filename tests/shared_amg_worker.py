@@ -26,6 +26,9 @@ A = L.as_backend_type(L.assemble(a, couplings="form")).mat()
 COMPONENTS = ((0,), (1,), (2,))
 sets = component_index_sets(W, comm, COMPONENTS)
 out = dict(rank=comm.rank, sizes=[len(s) for s in sets])
+# the default components: every scalar component but the last (the pressure)
+out["default_components"] = all(np.array_equal(a, b) for a, b in
+                                zip(component_index_sets(W, comm), sets))
 check_blocks(A, sets, comm)
 out["check_passes"] = True
 # component 1's Laplacian doubled: its block is not the first's

@@ -16,10 +16,10 @@ component and divides the pressure by diag(M), what the fieldsplit applies.
 
 The node order comes from the cell dofmaps -- per cell, the same local node in each
 component -- and not from the sorted component dofs, which are not in node order, nor from
-`collapse()`, which of a periodic mixed space is not periodic. A mixed space's dofs are
-owned dof by dof, so a node's components can sit on different ranks: the AMG's vectors are
-laid out as the first component's owned dofs, and the others are scattered to them (across
-ranks where they are owned apart). `check_blocks` confirms the blocks are the one the AMG
+`collapse()`, which of a periodic mixed space is not periodic. The AMG's vectors are laid
+out as the first component's owned dofs, and the others are scattered to them: across ranks
+where a node's components are owned apart (legacy dolfin owns a mixed space's dofs dof by
+dof; DOLFINx 0.11 gives every dof the owner of its mesh entity, so there they never are). `check_blocks` confirms the blocks are the one the AMG
 was built on, by one product with `A`. From stokes-beadpack (2026-10-25), where it is the
 Stokes solve's velocity preconditioner.
 """
@@ -27,15 +27,30 @@ import numpy as np
 from petsc4py import PETSc
 
 PREFIX = "velocity_"
-VELOCITY = ((0, 0), (0, 1), (0, 2))
+VELOCITY = ((0, 0), (0, 1), (0, 2))      # [P2^3, P1]'s velocity, as paths
 
 
-def component_index_sets(W, comm, components=VELOCITY):
-    """The dofs of each of `components` (sub-space paths of `W`: by default a [P2^3, ...]
-    space's velocity) as global index arrays of A's numbering in one node order: entry i of
+def velocity_paths(W):
+    """The paths of W's scalar components but the last: a Stokes space's velocity, whatever
+    its layout -- ((0, 0), (0, 1), (0, 2)) for [P2^3, P1], ((0,), (1,), (2,)) for
+    [P2, P2, P2, P1] (`femtools.couplings.leaves`)."""
+    from femtools.couplings import leaves
+    paths = leaves(W)
+    if len(paths) < 2:
+        raise ValueError("velocity_paths: W has {} scalar component(s); a Stokes space has "
+                         "the velocity's and the pressure's".format(len(paths)))
+    return tuple(paths[:-1])
+
+
+def component_index_sets(W, comm, components=None):
+    """The dofs of each of `components` (sub-space paths of `W`; by default every scalar
+    component but the last, the velocity of a Stokes space of either layout:
+    `velocity_paths`) as global index arrays of A's numbering in one node order: entry i of
     each is the same node, the nodes being those whose first component this rank owns.
     Legacy dolfin (A's numbering is W's) or femtools.backend.dolfinx (the unique dofs').
     Raises if two cells pair a dof differently."""
+    if components is None:
+        components = velocity_paths(W)
     if callable(getattr(W, "dofmap", None)):
         return _dolfin_sets(W, comm, components)
     return _dolfinx_sets(W, comm, components)

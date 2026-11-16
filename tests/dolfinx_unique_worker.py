@@ -299,62 +299,83 @@ res["reordered_dg0"] = bool(comm.allreduce(int(not np.array_equal(
     np.sort(own), np.arange(D0.dofmap.index_map.size_local)))) == 0)
 
 
-# 7. Taylor-Hood's components, [P2, P2, P1]: unlike elements grouped at their nodes (the
-# pressure with the velocity at a vertex, by cell entity), the same operator up to the
+# 7. Taylor-Hood's components, [P2, P2, P1] and [vector P2, P1] (2D), [vector P2, P1] (3D):
+# unlike elements grouped at their nodes (the pressure with the velocity at a vertex, by
+# cell entity; a vector component by its components), the same operator up to the
 # permutation, values through restrict and prolong, and the node graph built from the
-# reference component's pairs alone giving the same order as from every dof's
+# reference component's pairs alone giving the same order as from every dof's; [P3, P2]
+# (P2's edge dof against P3's two) keeps its order
 from femtools.dolfinx import unique as _unique  # noqa: E402
 
+
+def taylor_hood(msh_, W_, name):
+    tdim_ = msh_.topology.dim
+    uT, vT = ufl.TrialFunction(W_), ufl.TestFunction(W_)
+    if W_.sub(0).element.num_sub_elements:          # [vector P2, P1]
+        uu, pp = ufl.split(uT)
+        vv, qq = ufl.split(vT)
+    else:                                            # [P2, ..., P2, P1]
+        uu, pp = ufl.as_vector([uT[i] for i in range(tdim_)]), uT[tdim_]
+        vv, qq = ufl.as_vector([vT[i] for i in range(tdim_)]), vT[tdim_]
+    a_ = fem.form((ufl.inner(ufl.grad(uu), ufl.grad(vv)) + ufl.inner(uu, vv)
+                   - ufl.div(vv) * pp - qq * ufl.div(uu) + pp * qq) * ufl.dx)
+    sl_, ma_ = periodic_box(W_, periodic=(True,) + (False,) * (tdim_ - 1))
+    U_ = UniqueDofs(W_, sl_, ma_, interleave=True, reorder=True)
+    K_ = create_matrix(a_, U_)
+    assemble_matrix(K_, a_)
+    res[name + "_fold_exact"] = exact(K_)
+    res[name + "_fold"] = rel(K_, explicit_P(U_).transposeMatMult(
+        plain_matrix(a_).matMult(explicit_P(U_))))
+    n_ = W_.dofmap.index_map.size_local + W_.dofmap.index_map.num_ghosts
+    X_ = np.zeros((n_, 3))
+    for leaf in _unique._scalar_leaves(W_):
+        Wi, parent = leaf.collapse()
+        X_[flat_collapse_map(parent)] = Wi.tabulate_dof_coordinates()
+    keys_, per_node_, ref_cells_ = _unique._node_keys(W_, n_)
+    node_ = keys_ // per_node_
+    own_ = U_.owned_unique
+    runs_ = np.flatnonzero(np.diff(node_[own_]) != 0) + 1      # a node's dofs are one run
+    same_place = all(np.allclose(X_[r], X_[r[0]]) for r in np.split(own_, runs_))
+    res[name + "_grouped"] = ref_cells_ is not None and per_node_ == tdim_ + 1
+    res[name + "_nodes_together"] = bool(comm.allreduce(int(not (
+        same_place and len(np.unique(node_[own_])) == len(runs_) + (len(own_) > 0)))) == 0)
+    counts = np.unique(node_[own_], return_counts=True)[1]
+    res[name + "_vertex_nodes_whole"] = bool(comm.allreduce(int(np.bincount(
+        counts, minlength=tdim_ + 2)[tdim_ + 1] == 0)) == 0)
+    wT = fem.Function(W_)
+    c_ = U_.restrict(wT, U_.create_vector())
+    c_.setArray(np.sin(np.arange(c_.getLocalSize()) + 0.5))
+    c2_ = U_.restrict(U_.prolong(c_, fem.Function(W_)), U_.create_vector())
+    res[name + "_roundtrip"] = rel(c2_, c_)
+    n_own_ = W_.dofmap.index_map.size_local
+    lo_ = W_.dofmap.index_map.local_range[0]
+    is_slave_ = np.zeros(n_, bool)
+    is_slave_[sl_] = True
+    plain_own = np.flatnonzero(~is_slave_[:n_own_])
+    plain_own = plain_own[np.argsort(keys_[plain_own], kind="stable")]
+    rep_ = np.full(n_, -1, dtype=np.int32)
+    rep_[plain_own] = plain_own
+    here_ = (ma_ >= lo_) & (ma_ < lo_ + n_own_)
+    rep_[sl_[here_]] = ma_[here_] - lo_
+    orders = [_unique._rcm_order(plain_own, rep_, node_, cells)
+              for cells in (ref_cells_, W_.dofmap.list)]
+    res[name + "_reference_graph_same_order"] = bool(comm.allreduce(
+        int(not np.array_equal(*orders))) == 0)
+
+
 P2e = basix.ufl.element("Lagrange", msh.basix_cell(), 2)
-WT = fem.functionspace(msh, basix.ufl.mixed_element([P2e, P2e, P1]))
-uT, vT = ufl.TrialFunction(WT), ufl.TestFunction(WT)
-uu, pp = ufl.as_vector([uT[0], uT[1]]), uT[2]
-vv, qq = ufl.as_vector([vT[0], vT[1]]), vT[2]
-a_T = fem.form((ufl.inner(ufl.grad(uu), ufl.grad(vv)) + ufl.inner(uu, vv)
-                - ufl.div(vv) * pp - qq * ufl.div(uu) + pp * qq) * ufl.dx)
-slT, maT = periodic_box(WT, periodic=(True, False))
-UT = UniqueDofs(WT, slT, maT, interleave=True, reorder=True)
-K = create_matrix(a_T, UT)
-assemble_matrix(K, a_T)
-res["th_fold_exact"] = exact(K)
-res["th_fold"] = rel(K, explicit_P(UT).transposeMatMult(
-    plain_matrix(a_T).matMult(explicit_P(UT))))
-nT = WT.dofmap.index_map.size_local + WT.dofmap.index_map.num_ghosts
-XT = np.zeros((nT, 3))
-for i in range(3):
-    Wi, parent = WT.sub(i).collapse()
-    XT[flat_collapse_map(parent)] = Wi.tabulate_dof_coordinates()
-keys, per_node, ref = _unique._node_keys(WT, nT)
-node = keys // per_node
-own = UT.owned_unique
-runs = np.flatnonzero(np.diff(node[own]) != 0) + 1       # a node's dofs are one run
-same_place = all(np.allclose(XT[r], XT[r[0]]) for r in np.split(own, runs))
-res["th_ref"] = ref
-res["th_nodes_together"] = bool(comm.allreduce(int(not (
-    same_place and len(np.unique(node[own])) == len(runs) + (len(own) > 0)))) == 0)
-res["th_vertex_nodes_of_three"] = bool(comm.allreduce(int(np.bincount(
-    np.unique(node[own], return_counts=True)[1], minlength=4)[3] == 0)) == 0)
-wT = fem.Function(WT)
-for i, f in enumerate((lambda X: np.sin(2 * np.pi * X[0]) + X[1],
-                       lambda X: X[1] ** 2, lambda X: np.cos(2 * np.pi * X[0]))):
-    wT.sub(i).interpolate(f)
-c = UT.restrict(wT, UT.create_vector())
-c2 = UT.restrict(UT.prolong(c, fem.Function(WT)), UT.create_vector())
-res["th_roundtrip"] = rel(c2, c)
-n_own = WT.dofmap.index_map.size_local
-lo = WT.dofmap.index_map.local_range[0]
-is_slave = np.zeros(nT, bool)
-is_slave[slT] = True
-plain_own = np.flatnonzero(~is_slave[:n_own])
-plain_own = plain_own[np.argsort(keys[plain_own], kind="stable")]
-rep = np.full(nT, -1, dtype=np.int32)
-rep[plain_own] = plain_own
-here = (maT >= lo) & (maT < lo + n_own)
-rep[slT[here]] = maT[here] - lo
-orders = [_unique._rcm_order(plain_own, rep, node, cells)
-          for cells in (WT.sub(ref).dofmap.list, WT.dofmap.list)]
-res["th_reference_graph_same_order"] = bool(comm.allreduce(
-    int(not np.array_equal(*orders))) == 0)
+P2v = basix.ufl.element("Lagrange", msh.basix_cell(), 2, shape=(2,))
+taylor_hood(msh, fem.functionspace(msh, basix.ufl.mixed_element([P2e, P2e, P1])), "th")
+taylor_hood(msh, fem.functionspace(msh, basix.ufl.mixed_element([P2v, P1])), "thv")
+cube = mesh.create_unit_cube(comm, 3, 3, 3)
+taylor_hood(cube, fem.functionspace(cube, basix.ufl.mixed_element([
+    basix.ufl.element("Lagrange", "tetrahedron", 2, shape=(3,)),
+    basix.ufl.element("Lagrange", "tetrahedron", 1)])), "thv3")
+W32 = fem.functionspace(msh, basix.ufl.mixed_element([
+    basix.ufl.element("Lagrange", msh.basix_cell(), 3), P2e]))
+n32 = W32.dofmap.index_map.size_local + W32.dofmap.index_map.num_ghosts
+k32, per32, ref32 = _unique._node_keys(W32, n32)
+res["p3p2_kept"] = bool(per32 == 1 and ref32 is None and np.array_equal(k32, np.arange(n32)))
 
 if comm.rank == 0:
     with open(sys.argv[1], "w") as fh:

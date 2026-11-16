@@ -31,6 +31,7 @@ def _run(backend, ranks):
     for r in out:
         assert len(set(r["sizes"])) == 1, r["sizes"]
         assert r["check_passes"] and r["changed_block_refused"]
+        assert r["default_components"]
         assert r["same_input_same_output"] and r["pressure"]
     return out
 

@@ -54,11 +54,13 @@ def _check_unique(r):
     assert r["reordered_interleaved"]
     assert r["reordered_roundtrip"] == 0.0
     assert r["reordered_dg0"]
-    assert r["th_fold"] < 1e-14 and r["th_fold_exact"]
-    assert r["th_ref"] == 0                       # a P2 component, the one with most dofs
-    assert r["th_nodes_together"] and r["th_vertex_nodes_of_three"]
-    assert r["th_roundtrip"] == 0.0
-    assert r["th_reference_graph_same_order"]
+    for th in ("th", "thv", "thv3"):           # [P2, P2, P1]; [vector P2, P1] in 2D, 3D
+        assert r[th + "_fold"] < 1e-14 and r[th + "_fold_exact"], th
+        assert r[th + "_grouped"], th
+        assert r[th + "_nodes_together"] and r[th + "_vertex_nodes_whole"], th
+        assert r[th + "_roundtrip"] == 0.0, th
+        assert r[th + "_reference_graph_same_order"], th
+    assert r["p3p2_kept"]                       # P3's two edge dofs against P2's one
     assert r["band_reordered"] < r["band_own_order"] / 2, (r["band_reordered"],
                                                            r["band_own_order"])
 

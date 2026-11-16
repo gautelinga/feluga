@@ -119,11 +119,16 @@ def fixed_dofs(W, bcs):
 
 
 def sync(f):
-    """f, after its `sync()` if it has one (a Function whose values follow another's);
-    dolfin's Functions themselves have one layout and need none."""
+    """f, its ghost values brought up to date: after its `sync()` if it has one (a Function
+    whose values follow another's), else its vector's ghost update. A vector written
+    through PETSc (a KSP solve into `as_backend_type(f.vector()).vec()`) holds new owned
+    values and stale ghosts, which assembly reads; DOLFINx's backend tracks that itself, so
+    `sync(f)` after such a write is the neutral spelling. Collective."""
     s = getattr(f, "sync", None)
     if s is not None:
         s()
+    elif callable(getattr(f, "vector", None)):
+        as_backend_type(f.vector()).update_ghost_values()
     return f
 
 

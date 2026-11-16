@@ -24,23 +24,33 @@ numbered dof by dof (their dofmap block size is 1), blocked spaces block by bloc
 import numpy as np
 
 
+def _scalar_leaves(V):
+    """V's scalar sub-spaces, depth first (a vector component's own components too); their
+    dofmaps are in V's numbering."""
+    n = V.element.num_sub_elements
+    if n == 0:
+        return [V]
+    return [leaf for i in range(n) for leaf in _scalar_leaves(V.sub(i))]
+
+
 def _node_keys(V, n_local):
-    """Sort keys that put the components of a mixed space at a node next to each other:
-    component i of the node of the reference component's dof d gets n_sub*d + i. The
-    reference is the component with the most dofs a cell; a component's dof is at the
-    node of the reference's dof on the same cell entity (vertex, edge, ...), so
-    Taylor-Hood's pressure joins the velocity at the vertices. Spaces that are not
-    mixed of scalar components, or whose components place dofs on an entity otherwise
-    than none or as many as the reference (P2 against P3 edges), keep their order.
-    Returns the keys, the number of dofs per node (n_sub or 1: key // it is the node)
-    and the reference component (None when the order is kept)."""
-    n_sub = V.element.num_sub_elements
+    """Sort keys that put the scalar components of a mixed space at a node next to each
+    other: component i at the node of the reference component's dof d gets n_sub*d + i.
+    The components are the space's scalar leaves (a vector sub-space's by component, so
+    [P2^3, P1] and [P2, P2, P2, P1] alike); the reference is the one with the most dofs a
+    cell; a component's dof is at the node of the reference's dof on the same cell entity
+    (vertex, edge, ...), so Taylor-Hood's pressure joins the velocity at the vertices.
+    Spaces that are not mixed, or whose components place dofs on an entity otherwise than
+    none or as many as the reference (P2 against P3 edges), keep their order.
+    Returns the keys, the number of dofs per node (n_sub or 1: key // it is the node) and
+    the reference component's cell dofs (None when the order is kept)."""
     keys = np.arange(n_local, dtype=np.int64)
-    if n_sub == 0 or V.dofmap.index_map_bs != 1:
+    if V.element.num_sub_elements == 0 or V.dofmap.index_map_bs != 1:
         return keys, 1, None
-    subs = [V.sub(i) for i in range(n_sub)]
-    if any(s.element.num_sub_elements or s.dofmap.index_map_bs != 1 for s in subs):
+    subs = _scalar_leaves(V)
+    if any(s.dofmap.index_map_bs != 1 or s.dofmap.bs != 1 for s in subs):
         return keys, 1, None
+    n_sub = len(subs)
     layouts = [s.dofmap.dof_layout for s in subs]
     ref = int(np.argmax([lay.num_dofs for lay in layouts]))
     from dolfinx.cpp.mesh import cell_num_entities
@@ -58,13 +68,14 @@ def _node_keys(V, n_local):
         if np.any(pos < 0):
             return keys, 1, None
         positions.append(pos)
-    first = subs[ref].dofmap.list.astype(np.int64)
+    ref_cells = subs[ref].dofmap.list
+    first = ref_cells.astype(np.int64)
     keys = np.full(n_local, -1, dtype=np.int64)
     for i, (sub, pos) in enumerate(zip(subs, positions)):
         keys[sub.dofmap.list] = n_sub * first[:, pos] + i
-    missing = keys < 0  # dofs on no cell (none in a Lagrange space): keep them last
-    keys[missing] = n_sub * n_local + np.flatnonzero(missing)
-    return keys, n_sub, ref
+    missing = np.flatnonzero(keys < 0)  # dofs on no cell (none in a Lagrange space): last,
+    keys[missing] = n_sub * (n_local + np.arange(len(missing)))  # each a node of its own
+    return keys, n_sub, ref_cells
 
 
 def _rcm_order(owned_unique, rep, nodes, cell_dofs):
@@ -84,15 +95,21 @@ def _rcm_order(owned_unique, rep, nodes, cell_dofs):
     r = rep[cell_dofs.reshape(cell_dofs.shape[0], -1)]
     cells = np.where(r >= 0, index[np.maximum(r, 0)], -1)
     del r, index
-    edges = [np.zeros(0, np.int64)]  # each edge once, as lower * n_nodes + higher
-    for i in range(cells.shape[1]):
-        for j in range(i + 1, cells.shape[1]):
+    n_cols = cells.shape[1]
+    edges = np.empty(len(cells) * n_cols * (n_cols - 1) // 2, dtype=np.int64)
+    at = 0                         # each edge as lower * n_nodes + higher, filled in place
+    for i in range(n_cols):
+        for j in range(i + 1, n_cols):
             a, b = cells[:, i], cells[:, j]
             keep = (a >= 0) & (b >= 0) & (a != b)
             a, b = a[keep], b[keep]
-            edges.append(np.minimum(a, b).astype(np.int64) * n_nodes + np.maximum(a, b))
+            n = len(a)
+            edges[at:at + n] = np.minimum(a, b)
+            edges[at:at + n] *= n_nodes
+            edges[at:at + n] += np.maximum(a, b)
+            at += n
     del cells
-    edges = np.concatenate(edges)
+    edges = edges[:at]
     edges.sort()  # by lower node, then higher; in place
     first = np.ones(len(edges), dtype=bool)
     first[1:] = edges[1:] != edges[:-1]
@@ -130,12 +147,12 @@ class UniqueDofs:
     `femtools.dolfinx.periodic.periodic_box`. With neither, the space's own dofs.
 
     The compact numbering keeps the space's order of the unique dofs, except with
-    `interleave` on a mixed space of scalar components: then the components at a node
-    are numbered one after the other, as dolfin numbers a mixed space (DOLFINx numbers
-    each component's dofs of a cell in a run). Components with unlike elements meet at
-    the cell entities they share (`_node_keys`: Taylor-Hood's pressure at the vertices,
-    with the velocity). Incomplete factorizations such as ILU(0), which depend on the
-    order, then work as on dolfin.
+    `interleave` on a mixed space: then its scalar components at a node are numbered one
+    after the other (DOLFINx numbers each component's dofs of a cell in a run; dolfin
+    interleaves a mixed space of equal elements so). Components with unlike elements meet
+    at the cell entities they share (`_node_keys`: Taylor-Hood's pressure at the
+    vertices, with the velocity), a vector component by its own components. Incomplete
+    factorizations such as ILU(0), which depend on the order, work better so.
 
     With `reorder`, each rank numbers its unique dofs in a bandwidth-reducing order of
     the periodic (folded) cell graph, node by node (with `interleave`, a mixed space's
@@ -170,7 +187,8 @@ class UniqueDofs:
         is_slave = np.zeros(n_loc, dtype=bool)
         is_slave[slaves] = True
         owned_unique = np.flatnonzero(~is_slave[:n_own])
-        keys, per_node, ref = _node_keys(V, n_loc) if interleave else (None, 1, None)
+        keys, per_node, ref_cells = (_node_keys(V, n_loc) if interleave
+                                     else (None, 1, None))
         if interleave:
             owned_unique = owned_unique[np.argsort(keys[owned_unique], kind="stable")]
         if reorder:
@@ -180,7 +198,7 @@ class UniqueDofs:
             here = (masters >= lo) & (masters < lo + n_own)
             rep[slaves[here]] = masters[here] - lo
             nodes = np.arange(n_loc) if keys is None else keys // per_node
-            cell_dofs = V.dofmap.list if ref is None else V.sub(ref).dofmap.list
+            cell_dofs = V.dofmap.list if ref_cells is None else ref_cells
             owned_unique = _rcm_order(owned_unique, rep, nodes, cell_dofs)
         n_unique = len(owned_unique)
         start = self.comm.exscan(n_unique) or 0

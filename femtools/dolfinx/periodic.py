@@ -46,15 +46,8 @@ def _pair(comm, x, n_owned, l2g, lower, upper, periodic, tol):
     Collective."""
     from femtools.hdf5_rows import allsum, match_nodes
 
-    axes = np.flatnonzero(periodic)
-    on_hi = np.zeros(len(x), dtype=bool)
-    on_lo = np.zeros(len(x), dtype=bool)
-    image = x.copy()
-    for a in axes:
-        hi_a = np.abs(x[:, a] - upper[a]) < tol
-        on_hi |= hi_a
-        on_lo |= np.abs(x[:, a] - lower[a]) < tol
-        image[hi_a, a] -= upper[a] - lower[a]
+    from femtools.periodic_core import classify
+    on_lo, on_hi, image = classify(x, lower, upper, periodic, tol)
     slaves = np.flatnonzero(on_hi)
     cand = np.flatnonzero(on_lo & ~on_hi)
     cand = cand[cand < n_owned]  # each master contributed once, by its owner

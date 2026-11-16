@@ -28,6 +28,8 @@ import os
 
 import numpy as np
 
+from femtools.backend import is_dolfinx
+
 LAYOUT = "vertex"
 VALUES = "vertex_values"
 
@@ -82,7 +84,7 @@ def write_function(path, f, field="delta"):
     holds the field; it refuses a vertex nobody covered). Written beside and renamed,
     so a reader never meets half a file.
     """
-    if _on_dolfinx(f):
+    if is_dolfinx(f):
         return _write_dolfinx(path, f, field)
     import dolfin as df
     from femtools.hdf5_rows import write_ordered
@@ -140,7 +142,7 @@ def read_values(path, mesh_path, field="delta"):
 def read_function(path, f, field="delta"):
     """Into a P1 Function on a mesh read from the field's mesh file (legacy dolfin, or
     femtools.backend.dolfinx: a vertex-layout file only). Collective."""
-    if _on_dolfinx(f):
+    if is_dolfinx(f):
         return _read_dolfinx(path, f, field)
     import dolfin as df
     mesh = f.function_space().mesh()
@@ -160,12 +162,6 @@ def read_function(path, f, field="delta"):
                                          mesh.num_entities_global(0)))
     gvi = np.asarray(mesh.topology().global_indices(0), dtype=np.int64)
     return scatter_vertex_values(f, fetch_rows(path, field + "/" + VALUES, gvi, comm))
-
-
-def _on_dolfinx(f):
-    """Whether Function `f` is DOLFINx's (its space an attribute, not dolfin's method)."""
-    from femtools.tables import is_dolfinx
-    return is_dolfinx(getattr(f, "function_space", None))
 
 
 def _p1_nodes(V):

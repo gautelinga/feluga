@@ -194,7 +194,7 @@ def cell_mean_norm(u, DG0):
     assumption `femtools.periodic` and `femtools.plaza_periodic` make, and the same
     one addictif's own `CompiledExpression` helpers make one import earlier.
     """
-    from femtools.tables import is_dolfinx
+    from femtools.backend import is_dolfinx
     if is_dolfinx(DG0):
         return _cell_mean_norm_dolfinx(u, DG0)
     import dolfin as df

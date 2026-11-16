@@ -42,7 +42,7 @@ import numpy as np
 
 from femtools import hierarchical_transfer
 from femtools.hierarchical_transfer import compose
-from femtools.tables import is_dolfinx
+from femtools.backend import is_dolfinx
 from femtools.ufc import barycentric_simplex, ufc_basis, ufc_nodes
 
 

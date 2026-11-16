@@ -70,10 +70,12 @@ def space_id(V):
 
 
 def function_space(u):
+    """The space of Function `u`."""
     return u.function_space()
 
 
 def space_mesh(V):
+    """The mesh of space `V`."""
     return V.mesh()
 
 
@@ -83,10 +85,12 @@ def mesh_comm(mesh):
 
 
 def geometric_dimension(mesh):
+    """The dimension of the mesh's coordinates."""
     return mesh.geometry().dim()
 
 
 def element_degree(V):
+    """The polynomial degree of space `V`'s element."""
     return V.ufl_element().degree()
 
 

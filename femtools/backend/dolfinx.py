@@ -118,11 +118,13 @@ class MPI:
 # --- timers ----------------------------------------------------------------------------
 
 class TimingClear(Enum):
+    """dolfin's TimingClear: whether list_timings clears the timings it lists."""
     keep = 0
     clear = 1
 
 
 class TimingType(Enum):
+    """dolfin's TimingType: which clock list_timings reports."""
     wall = 0
     user = 1
     system = 2
@@ -208,6 +210,7 @@ def FiniteElement(family, cell, degree):
 
 
 def MixedElement(elements):
+    """dolfin's MixedElement(elements): the mixed element of a list of elements."""
     return basix.ufl.mixed_element(list(elements))
 
 
@@ -470,10 +473,11 @@ def unique_dofs(V):
         if box is None or not any(box.periodic):
             U = UniqueDofs(V, interleave=True, reorder=True)
         else:
-            mesh = V.mesh
-            gdim = mesh.geometry.dim
-            extent = max(u - lo for u, lo in zip(box.upper[:gdim], box.lower[:gdim]))
-            tol = max(float(getattr(box, "tol", 1e-10)) / extent, 1e-12)
+            from femtools.periodic_core import box_scale
+            gdim = V.mesh.geometry.dim
+            # the box's tol is absolute (BoxSpec), periodic_box's relative to box_scale
+            tol = max(float(getattr(box, "tol", 1e-10)) / box_scale(box.lower, box.upper),
+                      1e-15)
             U = UniqueDofs(V, *periodic_box(V, upper=box.upper[:gdim],
                                             periodic=box.periodic[:gdim],
                                             lower=box.lower[:gdim], tol=tol),
@@ -490,22 +494,27 @@ def mesh_id(mesh):
 
 
 def function_space(u):
+    """The space of Function `u`."""
     return u.function_space
 
 
 def space_mesh(V):
+    """The mesh of space `V`."""
     return V.mesh
 
 
 def mesh_comm(mesh):
+    """The mesh's MPI communicator (mpi4py)."""
     return mesh.comm
 
 
 def geometric_dimension(mesh):
+    """The dimension of the mesh's coordinates."""
     return mesh.geometry.dim
 
 
 def element_degree(V):
+    """The polynomial degree of space `V`'s element."""
     return V.ufl_element().embedded_superdegree
 
 
@@ -732,6 +741,8 @@ class Matrix:
 
 
 def as_backend_type(x):
+    """x itself: this backend's Vectors and Matrices are already PETSc-backed (`vec()`,
+    `mat()`), as dolfin's as_backend_type gives them."""
     return x
 
 

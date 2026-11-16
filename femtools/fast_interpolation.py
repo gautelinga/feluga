@@ -69,7 +69,7 @@ def p1_to_p2(S1, S2, chunk=1 << 20):
     `chunk` cells at a time, and the matrix's own at most two entries a row. Every owned
     P2 dof lies in a local cell, so each rank sets its own rows; a column may be any
     rank's P1 dof. The periodic constraint is in both dofmaps and pairs vertices alike."""
-    from femtools.tables import is_dolfinx
+    from femtools.backend import is_dolfinx
     if is_dolfinx(S2):
         return _p1_to_p2_dolfinx(S1, S2, chunk)
     return _p1_to_p2_dolfin(S1, S2, chunk)

@@ -33,15 +33,7 @@ numpy at import; dolfin or DOLFINx where a mesh or space of theirs is passed.
 import numpy as np
 
 
-def is_dolfinx(obj):
-    """Whether `obj` is a DOLFINx mesh or space (else dolfin's). Never imports DOLFINx: an
-    object of it means it is imported already, and a legacy dolfin process should not pay
-    for loading it (nor mix the two)."""
-    import sys
-    dolfinx = sys.modules.get("dolfinx")
-    if dolfinx is None or not hasattr(dolfinx, "fem"):
-        return False
-    return isinstance(obj, (dolfinx.mesh.Mesh, dolfinx.fem.FunctionSpace))
+from femtools.backend import is_dolfinx  # noqa: E402,F401  (its home; kept importable here)
 
 
 def _n_nodes(d, degree):

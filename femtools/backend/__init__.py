@@ -17,7 +17,10 @@ written for both calls the neutral helpers instead: `space_mesh`, `function_spac
 counts over all ranks `global_dim`, `global_num_cells`, `global_num_vertices`,
 `marker_counts`.
 
-Neither module is imported by `import femtools.backend`.
+Neither module is imported by `import femtools.backend`. Code that takes a mesh, space or
+Function of either finds its backend with `of(obj)` (the module, to write once against
+NAMES) or `is_dolfinx(obj)` (to branch where the mechanism differs); `load(name)` imports
+one by name. None of the three imports DOLFINx to decide.
 """
 
 NAMES = (
@@ -53,3 +56,31 @@ NAMES = (
     "write_functions_h5", "read_function_h5", "read_vector_function_h5", "read_series_step",
     "read_vector_series_step",
 )
+
+
+def is_dolfinx(obj):
+    """Whether `obj` -- a mesh, a function space, or a Function (or a view of one's
+    component) -- is DOLFINx's, else dolfin's. Never imports DOLFINx: an object of it means
+    it is imported already, and a legacy dolfin process should not pay for loading it (nor
+    mix the two)."""
+    import sys
+    dolfinx = sys.modules.get("dolfinx")
+    if dolfinx is None or not hasattr(dolfinx, "fem"):
+        return False
+    space = getattr(obj, "function_space", None)       # a Function: DOLFINx's attribute,
+    if space is not None and not callable(space):      # dolfin's method
+        obj = space
+    return isinstance(obj, (dolfinx.mesh.Mesh, dolfinx.fem.FunctionSpace))
+
+
+def load(name):
+    """The backend module `name`, "dolfin" or "dolfinx" (imported here)."""
+    import importlib
+    if name not in ("dolfin", "dolfinx"):
+        raise ValueError("femtools.backend.load: 'dolfin' or 'dolfinx', not {!r}".format(name))
+    return importlib.import_module("femtools.backend." + name)
+
+
+def of(obj):
+    """The backend module of `obj` (a mesh, space or Function: `is_dolfinx`)."""
+    return load("dolfinx" if is_dolfinx(obj) else "dolfin")

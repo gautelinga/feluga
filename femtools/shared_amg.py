@@ -51,9 +51,10 @@ def component_index_sets(W, comm, components=None):
     Raises if two cells pair a dof differently."""
     if components is None:
         components = velocity_paths(W)
-    if callable(getattr(W, "dofmap", None)):
-        return _dolfin_sets(W, comm, components)
-    return _dolfinx_sets(W, comm, components)
+    from femtools.backend import is_dolfinx
+    if is_dolfinx(W):
+        return _dolfinx_sets(W, comm, components)
+    return _dolfin_sets(W, comm, components)
 
 
 def _sub(W, path, legacy):

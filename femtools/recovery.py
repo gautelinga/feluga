@@ -17,10 +17,7 @@ structure measures take it; the dolfin code is unchanged, so its numbers are.
 """
 import numpy as np
 
-
-def _dolfinx(obj):
-    from femtools.tables import is_dolfinx
-    return is_dolfinx(obj)
+from femtools.backend import is_dolfinx
 
 
 def recovery_space(mesh, L, periodic, exempt=None, vector=True):
@@ -40,7 +37,7 @@ def recovery_space(mesh, L, periodic, exempt=None, vector=True):
 def recovered_gradient(delta_, Vv):
     """The ZZ gradient of `delta_` on the (periodic) vector P1 space `Vv`: each dof the
     lumped average of grad(delta_) over its patch. A Function on Vv."""
-    if _dolfinx(Vv):
+    if is_dolfinx(Vv):
         return _gradient_dolfinx(delta_, Vv)
     import dolfin as df
     v = df.TestFunction(Vv)
@@ -58,7 +55,7 @@ def recovered_vertex_gradient(mesh, delta_, S):
     own in the periodic scalar P1 space `S` -- the same lumped averages, a third of the
     dofs at a time, and no vector space of its own. Legacy dolfin: in the mesh's vertex
     order; DOLFINx: in its geometry's node order (`mesh_coordinates`)."""
-    if _dolfinx(S):
+    if is_dolfinx(S):
         return _vertex_gradient_dolfinx(mesh, delta_, S)
     import dolfin as df
     w = df.TestFunction(S)

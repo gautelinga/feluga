@@ -6,6 +6,9 @@ dolfin modules (`femtools.periodic`, `femtools.plaza_periodic`) and the DOLFINx 
     box_scale(lower, upper)                the length the tolerances are relative to
     lower_corner(extent, axes, lower)      the box's lower corner (`periodic.box_lower`)
     on_planes(x, lower, upper, axes, tol)  which points lie on an identified plane
+    classify(x, lower, upper, periodic, tol)
+                                           the pairing rule: on a lower face, on an upper
+                                           one, and each point's image
     xyz(a)                                 padded to three components
     TooManyCells                           a refinement refused by max_cells
     dorfler_threshold_values(values, theta, comm)
@@ -46,6 +49,27 @@ def box_scale(lower, upper):
     scale = float(max(np.max(np.abs(upper - lower)), np.max(np.abs(lower)),
                       np.max(np.abs(upper))))
     return scale if scale > 0 else 1.0
+
+
+def classify(x, lower, upper, periodic, tol):
+    """The periodic pairing rule, as dolfin's compiled box (`femtools.periodic.periodic_box`)
+    applies it and DOLFINx's dof pairing (`femtools.dolfinx.periodic`) too: for points `x`
+    (rows), whether each is on a lower periodic face, whether on an upper one (within `tol`,
+    an absolute distance, inclusive), and its image -- every coordinate on an upper
+    periodic face taken down by the box, so an edge or corner point maps to the lower
+    corner in one step. A slave is on an upper face; a master on a lower face and on no
+    upper one. Returns (on_lower, on_upper, image)."""
+    x = np.asarray(x, dtype=float)
+    lower, upper = xyz(lower)[:x.shape[1]], xyz(upper)[:x.shape[1]]
+    on_lower = np.zeros(len(x), dtype=bool)
+    on_upper = np.zeros(len(x), dtype=bool)
+    image = x.copy()
+    for a in np.flatnonzero(np.asarray(periodic, dtype=bool)[:x.shape[1]]):
+        hi_a = np.abs(x[:, a] - upper[a]) <= tol
+        on_upper |= hi_a
+        on_lower |= np.abs(x[:, a] - lower[a]) <= tol
+        image[hi_a, a] -= upper[a] - lower[a]
+    return on_lower, on_upper, image
 
 
 def xyz(a):

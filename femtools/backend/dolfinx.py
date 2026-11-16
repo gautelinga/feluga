@@ -241,9 +241,12 @@ class BoxSpec:
         self.tol = float(tol)
 
 
-def PeriodicBox(bounds, tol=1e-10):
+def PeriodicBox(bounds, tol=1e-10, map_tol=None, comm=None):
     """The box periodic along each axis in `bounds`, which maps the axis to its
-    (lower, upper) bounds: {0: (0, Lx)} is periodic in x alone."""
+    (lower, upper) bounds: {0: (0, Lx)} is periodic in x alone; `tol` the absolute
+    distance from a face that counts as on it. `map_tol` and `comm` are dolfin's (its
+    compiled box maps points within map_tol, and compiles on comm); taken here so a call
+    serves both backends, and unused: DOLFINx pairs dofs by position within `tol`."""
     lower, upper = ([bounds[i][k] if i in bounds else 0. for i in range(3)] for k in (0, 1))
     return BoxSpec(lower, upper, [i in bounds for i in range(3)], tol)
 
@@ -1648,8 +1651,9 @@ class XDMFFile:
         self._file = self._series = None
 
     def write(self, obj, t=None):
-        """Facet markers (a BoundaryMarkers) through DOLFINx's XDMFFile; a Function as
-        dolfin's TimeSeriesFile writes one (femtools.dolfinx.xdmf: P2 kept)."""
+        """Facet markers (a BoundaryMarkers) through DOLFINx's XDMFFile; a Function, or a
+        tuple of them on one node set (`write((u, p))`), as femtools.xdmf.XDMFFile2 writes
+        them (femtools.dolfinx.xdmf: P2 kept)."""
         if isinstance(obj, BoundaryMarkers):
             if self._file is None:
                 self._file = dolfinx.io.XDMFFile(self.comm, self.path, "w")
@@ -1659,7 +1663,9 @@ class XDMFFile:
             if self._series is None:
                 from femtools.dolfinx.xdmf import XDMFSeries
                 self._series = XDMFSeries(self.comm, self.path)
-            self._series.write(sync(obj), 0.0 if t is None else float(t))
+            fields = (tuple(sync(f) for f in obj) if isinstance(obj, (tuple, list))
+                      else sync(obj))
+            self._series.write(fields, 0.0 if t is None else float(t))
 
 
 class TimeSeriesFile:

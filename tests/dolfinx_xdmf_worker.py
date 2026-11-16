@@ -6,8 +6,10 @@ dolfin (XDMFFile2), read back on dolfin.
     python3 tests/dolfinx_xdmf_worker.py read-dolfin DIR out.json
 
 Fields (two steps, the second scaled by 2): a periodic P2 scalar, a P1 scalar, a periodic
-P2 vector. The reader compares each step with the field's interpolant, and the files'
-structure (grids(): topology, attribute names and widths, times) with dolfin's.
+P2 vector, and PAIR, the vector and the P1 scalar written together on one node set (as
+solve-stokes writes u and p). The reader compares each step with the field's interpolant,
+and the files' structure (grids(): topology, attribute names and widths, times) with
+dolfin's.
 """
 import json
 import os
@@ -19,6 +21,7 @@ LX, LY, NX, NY = 1.0, 2.0, 6, 10
 TIMES = (0.0, 0.5)
 # name: (degree, vector, periodic)
 FIELDS = {"s2": (2, False, True), "s1": (1, False, False), "v2": (2, True, True)}
+PAIR = ("v2", "s1")         # written together, x_pair.xdmf and d_pair.xdmf
 
 
 def f(x, y):
@@ -67,6 +70,18 @@ def write_dolfinx(folder):
                 else:
                     u.interpolate(lambda X, k=k: (1 + k) * f(X[0], X[1]))
                 out.write(u, t)
+    pair = []
+    for name in PAIR:
+        degree, vector, _ = FIELDS[name]
+        V = fem.functionspace(msh, ("Lagrange", degree, (2,)) if vector
+                              else ("Lagrange", degree))
+        pair.append(fem.Function(V, name=name))
+    with XDMFSeries(MPI.COMM_WORLD, os.path.join(folder, "x_pair.xdmf")) as out:
+        for k, t in enumerate(TIMES):
+            pair[0].interpolate(lambda X, k=k: np.vstack([(1 + k) * f(X[0], X[1]),
+                                                          (1 + k) * g(X[0], X[1])]))
+            pair[1].interpolate(lambda X, k=k: (1 + k) * f(X[0], X[1]))
+            out.write(tuple(pair), t)
 
 
 def write_dolfin(folder):
@@ -83,6 +98,20 @@ def write_dolfin(folder):
             w.vector()[:] = (1 + k) * u.vector()
             f2.write(w, t)
         f2.close()
+    fields = dolfin_fields()
+    pair = []
+    for name in PAIR:
+        w = fields[name].copy(deepcopy=True)
+        w.rename(name, name)
+        pair.append(w)
+    f2 = XDMFFile2(df.MPI.comm_world, os.path.join(folder, "d_pair.xdmf"))
+    f2.parameters["rewrite_function_mesh"] = False
+    f2.parameters["flush_output"] = True
+    for k, t in enumerate(TIMES):
+        for w, name in zip(pair, PAIR):
+            w.vector()[:] = (1 + k) * fields[name].vector()
+        f2.write(tuple(pair), t)
+    f2.close()
 
 
 def read_dolfin(folder, out):
@@ -105,6 +134,23 @@ def read_dolfin(folder, out):
         # the same XML, word for word, but for the HDF5 file's name
         res[name + "_structure"] = xml("x_") == xml("d_")
         res[name + "_steps"] = len(grids(os.path.join(folder, "x_" + name + ".xdmf")))
+    fields = dolfin_fields()
+    errs = []
+    for name in PAIR:
+        u = fields[name]
+        for k in range(len(TIMES)):
+            back = df.Function(u.function_space())
+            with XDMFFile2(df.MPI.comm_world, os.path.join(folder, "x_pair.xdmf")) as r:
+                r.read_checkpoint(back, name, k)
+            errs.append(float(np.max(np.abs(back.vector().get_local()
+                                            - (1 + k) * u.vector().get_local()))))
+    res["pair"] = max(errs)
+
+    def xml(prefix):
+        with open(os.path.join(folder, prefix + "pair.xdmf")) as fh:
+            return fh.read().replace(prefix + "pair.h5", "FILE.h5")
+    res["pair_structure"] = xml("x_") == xml("d_")
+    res["pair_steps"] = len(grids(os.path.join(folder, "x_pair.xdmf")))
     if df.MPI.rank(df.MPI.comm_world) == 0:
         with open(out, "w") as fh:
             json.dump(res, fh)
@@ -151,6 +197,22 @@ def read_dolfinx(folder, out):
         errs.append(comm.allreduce(float(d.max()) if d.size else 0.0, op=MPI.MAX))
     res["s2_into_P1"] = max(errs)
     res["plain_spaces_after"] = len(xdmf_read._PLAIN)
+    # the pair's P1 field off its P2 grid goes through a plain space of the grid's too
+    perrs = []
+    for name in PAIR:
+        degree, vector, periodic = FIELDS[name]
+        V = fem.functionspace(msh, ("Lagrange", degree, (2,)) if vector else ("Lagrange", degree))
+        U = UniqueDofs(V, *periodic_box(V, periodic=(True, False))) if periodic else UniqueDofs(V)
+        X = V.tabulate_dof_coordinates()[U.owned_unique // V.dofmap.index_map_bs]
+        comp = U.owned_unique % V.dofmap.index_map_bs
+        base = np.where(comp == 0, f(X[:, 0], X[:, 1]), g(X[:, 0], X[:, 1]))
+        for prefix in ("x_", "d_"):
+            for k in range(len(TIMES)):
+                u = fem.Function(V)
+                read_nodal(os.path.join(folder, prefix + "pair.xdmf"), name, k, u)
+                d = np.abs(u.x.array[U.owned_unique] - (1 + k) * base)
+                perrs.append(comm.allreduce(float(d.max()) if d.size else 0.0, op=MPI.MAX))
+    res["pair"] = max(perrs)
     if comm.rank == 0:
         with open(out, "w") as fh:
             json.dump(res, fh)

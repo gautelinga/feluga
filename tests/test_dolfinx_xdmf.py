@@ -1,7 +1,8 @@
 """`femtools.dolfinx.xdmf.XDMFSeries`: DOLFINx time series in XDMFFile2's layout.
 
 DOLFINx writes two steps of a periodic P2 scalar, a P1 scalar and a periodic P2 vector,
-on one rank and on three; dolfin's XDMFFile2 reads every step back into its own spaces
+and of the vector and the P1 scalar together on one node set (`write((u, p), t)`, as
+solve-stokes writes its flow), on one rank and on three; dolfin's XDMFFile2 reads every step back into its own spaces
 (the periodic ones included) equal to the fields to round-off, and the XML is the one
 XDMFFile2 writes for the same fields, word for word but for the HDF5 file's name.
 
@@ -39,6 +40,7 @@ def _check(folder, ranks):
         assert res[name] < 1e-13, name
         assert res[name + "_structure"], name + ": not XDMFFile2's XML"
         assert res[name + "_steps"] == 2, name
+    assert res["pair"] < 1e-13 and res["pair_structure"] and res["pair_steps"] == 2, res
 
 
 def test_series_serial(tmp_path):
@@ -61,6 +63,7 @@ def test_read_on_dolfinx(tmp_path, ranks):
     res = _run("read-dolfinx", tmp_path, ranks, tmp_path / "res.json")
     for name in FIELDS:
         assert res[name] < 1e-13, name
+    assert res["pair"] < 1e-13, res
     assert res["plain_spaces"] == 0, res
     assert res["s2_into_P1"] < 1e-13 and res["plain_spaces_after"] == 1, res
 

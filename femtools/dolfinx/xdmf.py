@@ -49,6 +49,26 @@ EDGES_PER_CELL = {2: QUADRATIC["triangle"][1], 3: QUADRATIC["tetrahedron"][1]}
 _MESHES = WeakCache()
 #: a space's node dofs (`_space_dofs`), shared likewise and dropped with the space
 _SPACES = WeakCache()
+#: a mesh's plain Lagrange spaces of a degree and value shape, a lower-degree field is
+#: carried onto when written beside a higher one (`_raised`), dropped with the mesh
+_RAISED = WeakCache()
+
+
+def _raised(u, degree):
+    """u (a field of a lower degree) as a Function of `degree` on the same mesh and value
+    shape, unconstrained: what it is at the higher degree's nodes, exactly (Lagrange
+    interpolation of a polynomial of lower degree), named as u."""
+    from dolfinx import fem
+    V = u.function_space
+    shape = tuple(V.ufl_element().reference_value_shape)
+    spaces = _RAISED.get((V.mesh,), dict)
+    key = (degree, shape)
+    if key not in spaces:
+        spaces[key] = fem.functionspace(V.mesh, ("Lagrange", degree, shape) if shape
+                                        else ("Lagrange", degree))
+    out = fem.Function(spaces[key], name=u.name)
+    out.interpolate(u)
+    return out
 
 
 def _topology(mesh, degree):
@@ -176,18 +196,27 @@ class XDMFSeries:
 
     def write(self, u, t):
         """A step at time t: u (a Function, its values in DOLFINx's array, ghosts
-        included) on a grid of its own in the temporal collection. Collective."""
+        included), or a tuple of Functions on one mesh (`write((u, p), t)`), on a grid of
+        its own in the temporal collection. Several share the grid of the highest degree
+        among them, as XDMFFile2 writes them: a P1 pressure beside a P2 velocity is
+        carried onto the quadratic nodes, exactly (`_raised`). Collective."""
+        fields = list(u) if isinstance(u, (tuple, list)) else [u]
+        if not fields:
+            raise ValueError("XDMFSeries.write: no Function")
+        mesh = fields[0].function_space.mesh
+        if any(f.function_space.mesh is not mesh for f in fields[1:]):
+            raise ValueError("XDMFSeries.write: Functions written together share one mesh")
+        degrees = [_check_space(f.function_space) for f in fields]
+        degree = max(degrees)
         if self._doc is None:
             self._doc = XdmfDocument(self.path, comm=self.comm if self.comm.size > 1 else None)
-        doc, V = self._doc, u.function_space
-        degree = _check_space(V)
-        nodes = _MESHES.get((V.mesh,), dict)
+        doc = self._doc
+        nodes = _MESHES.get((mesh,), dict)
         if degree not in nodes:
-            nodes[degree] = _MeshNodes(V.mesh, degree)
+            nodes[degree] = _MeshNodes(mesh, degree)
         L = nodes[degree]
-        dofs = _SPACES.get((V,), lambda: _space_dofs(V, L))
         grid = doc.grid("mesh", doc.collection())
-        stored = self._stored.setdefault(V.mesh, {})
+        stored = self._stored.setdefault(mesh, {})
         store = stored.get(degree)
         if store is None:
             group = doc.mesh_group(True)
@@ -201,14 +230,20 @@ class XDMFSeries:
                      wide=is_wide(L.n_nodes))
         doc.geometry(grid, None, ref=store[1], shape=(L.n_nodes, L.gdim))
         doc.time(grid, t)
-        bs = V.dofmap.index_map_bs
-        values = np.asarray(u.x.array).reshape(-1, bs)[dofs]
-        values = _pad3(values[:, 0] if bs == 1 else values)
-        if values.ndim == 1:
-            values = values.reshape(-1, 1)
-        ref = doc.rows("VisualisationVector/{}".format(doc._next("VisualisationVector")),
-                       L.rows, values, L.n_nodes, plans=L.plans)
-        doc.attribute(grid, u.name, values, "Node", ref=ref, shape=(L.n_nodes, values.shape[1]))
+        for f, d in zip(fields, degrees):
+            if d < degree:
+                f = _raised(f, degree)
+            V = f.function_space
+            dofs = _SPACES.get((V,), lambda: _space_dofs(V, L))
+            bs = V.dofmap.index_map_bs
+            values = np.asarray(f.x.array).reshape(-1, bs)[dofs]
+            values = _pad3(values[:, 0] if bs == 1 else values)
+            if values.ndim == 1:
+                values = values.reshape(-1, 1)
+            ref = doc.rows("VisualisationVector/{}".format(doc._next("VisualisationVector")),
+                           L.rows, values, L.n_nodes, plans=L.plans)
+            doc.attribute(grid, f.name, values, "Node", ref=ref,
+                          shape=(L.n_nodes, values.shape[1]))
         doc.seal()                 # the step is complete: no rank holds its XML after
         doc.flush()
 

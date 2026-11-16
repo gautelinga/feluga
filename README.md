@@ -1,226 +1,58 @@
 # femtools
 
-Tools for solvers written in legacy dolfin (FEniCS 2019.2), gathered from the solvers that
-needed them (stokes-beadpack, addictif, twoasis) so that each is written once. The parts that
-do not touch dolfin also serve readers without it, such as partrac's tools.
+Shared tools for our FEniCS solvers: stokes-beadpack, twoasis and addictif. Whatever more
+than one of them needed lives here once.
 
-## Features
+femtools began as a toolbox for **legacy dolfin** (FEniCS 2019.2). It now also runs on
+**DOLFINx** (0.11): `femtools.backend` gives both libraries one API, so a solver can be
+written once and run on either.
 
-### Files: XDMF and HDF5
+What it is for:
 
-- **`xdmf.XDMFFile2`**: a drop-in for `dolfin.XDMFFile` that writes dolfin's own layout but
-  keeps the midside nodes of a P2 field (`Tetrahedron_10`, `Triangle_6`); dolfin's
-  interpolates them away silently. It also writes several fields on one grid and compresses
-  every dataset.
-- **`xdmf.grids`, `xdmf.parse_xdmf`**: where every step's HDF5 arrays are, in one reader;
-  `parse_xdmf` keeps the interface of partractools' function of that name.
-- **`xdmf.merge_series`**: the time series of a run and of the restarts that continued
-  it, merged into one, each restart's steps replacing those after its checkpoint.
-- **`xdmfread`**: reads datasets with their gzip chunks inflated on a thread pool, whole or
-  a chunk-row at a time. h5py inflates on one thread, which takes hours at billions of cells.
-- **`compress`, `hdf5_rows`**: compressed datasets, and rows of them read, written and
-  exchanged between MPI ranks without any rank holding a whole one. Under MPI every rank
-  writes its own block, through MPI-IO (rank zero writes them all only with a serial h5py).
-- **`dolfin_layout`**: a Mesh or Function written in the layout `dolfin.HDF5File` gives it,
-  compressed, which dolfin reads on any number of ranks; `write_dofs` writes a space's dof
-  tables once, for Functions that link them (a checkpoint of vectors alone);
-  `write_mesh_arrays` without dolfin.
-- **`layout_reader`**: a Mesh and its Functions in that layout read with numpy and h5py
-  alone: the P2 nodes and values in XDMF's order (for `xdmf.write_quadratic`), a P1
-  scalar at the vertices, or each cell's volume and nodal values streamed a block at a time.
-- **`vertex_field`**: a P1 field stored as one value per row of its mesh file's
-  coordinates (24x smaller than dolfin's layout), written and read on either backend and
-  any number of ranks.
-- **`digest`**: a SHA-256 of what a stored Mesh or Function is (its arrays, not the
-  file's bytes), read in blocks; a Function's spread over the ranks, the same on any count.
-- **`boundaries`**: a boundary facet file (facets, an integer marker each, the points they
-  use), written serially or from blocks on many ranks, and read back; how many facets
-  carry each marker, read a block at a time. It is the layout
-  partrac's `wall_facets` reads. `BoundaryMarkers` is a facet MeshFunction that writes its
-  marked exterior facets as that file and reads them back onto a mesh, on any number of
-  ranks.
-- **`facets`, `femtools-cut-facets`**: a facet file cut to the facets with selected markers,
-  such as a full dolfin facet MeshFunction to its walls.
+- **One API on two backends.** dolfin-style code (`FunctionSpace`, `DirichletBC`,
+  `assemble`, ...) that runs on legacy dolfin or on DOLFINx.
+- **Periodic boxes that hold up in parallel.** Periodic spaces on either backend, a mesh
+  partition that dolfin's parallel periodic dofmap cannot get wrong, and periodic
+  refinement that keeps opposite faces matching.
+- **Files that keep what you computed.** XDMF that keeps P2 fields quadratic, dolfin's HDF5
+  layout written and read by either backend on any number of ranks, and every dataset
+  compressed.
+- **Doing the same work faster.** Forms, boundary conditions, interpolations and transfers
+  set up once and reused, and matrices that store only the blocks a form couples.
+- **Very large meshes.** Nothing gathered on one rank, readers that stream, and errors that
+  stop every rank instead of hanging the job.
 
-### Periodic meshes and refinement
+## Quick start
 
-- **`periodic`**: `PeriodicBox` and the compiled `periodic_box`, the `constrained_domain` of
-  a 2D or 3D periodic box with any lower corner (`periodic_box_from_bounds` from each
-  periodic axis's bounds); `faces_congruent` checks identified faces.
-- **`box`**: `Faces`, the boundary on given planes of a box, and `mark_walls`, every
-  boundary facet off the box's faces (the walls of the obstacles inside it), compiled.
-- **`periodic_partition`**: reads a mesh in blocks and partitions it with ParMETIS so that
-  dolfin's parallel periodic dofmap pairs every face entity, which dolfin's own partition
-  does not guarantee.
-- **`plaza_periodic`, `refine_periodic`**: dolfin's Plaza refinement with identified faces
-  bisected alike, serial or under MPI, with the parent-cell map. Plain refinement breaks the
-  periodic pairing.
-- **`hierarchical_transfer`**: P1 and P2 fields moved to a refined mesh through ancestor
-  cells, with no point search (tetrahedra).
-- **`fast_interpolation`**: `interpolate`, `dolfin.interpolate` between Lagrange spaces on
-  one mesh (any degrees and value shapes, a mixed or vector Function's component,
-  periodic, parallel) as one sparse product with a transfer matrix built once: 0.3 ms
-  where dolfin takes 0.7 s for P2 onto P1 on a 197k-cell 3D mesh.
-- **`fast_interpolation.p1_to_p2`**: the P1 -> P2 interpolation on one mesh from the
-  two dofmaps (the zero-pass nested prolongation), on either backend; no point search.
-- **`fast_assembly`**: `assemble`, `dolfin.assemble` for a form object assembled again and
-  again (every time step), compiled into a dolfin Form once instead of on every call;
-  `assemble_matrix`, a constant matrix (a mass matrix, say) assembled once per form and
-  Dirichlet conditions and shared.
-- **`fast_bc`**: `apply`, `DirichletBC.apply` on a vector with the constrained dofs found
-  once instead of on every call: 0.05 ms where dolfin takes 6.5 ms on 118k P2 dofs. A
-  Constant or a Function value is followed as it changes; an Expression, a condition on
-  a component of a space and a matrix are left to dolfin.
+### A solver written once, run on either backend
 
-### Point evaluation and gradients
+```python
+import femtools.backend
 
-- **`probes`**: `Probes` and `GradProbes`, a Function's values and gradients at fixed
-  points, located once and evaluated many times; `dump` writes one file a rank, which
-  `read_dump` reads back (as fenicstools' one file a probe). From Mikael Mortensen's
-  fenicstools, as extended in addictif.
-- **`recovery`**: a continuous gradient recovered by lumped-mass averaging (ZZ) in a
-  periodic P1 space, at the dofs or the vertices, on either backend.
-- **`cell_mean`**: `|cell mean of u|` per cell, exact for a P1 or P2 velocity (the uniform
-  nodal average is not, at P2), on either backend.
-- **`gradient`**: the weighted gradient matrix, a P1 field's derivative at the nodes as one
-  matrix-vector product. From Mikael Mortensen's fenicstools, unchanged in what it computes.
+B = femtools.backend.load("dolfinx")                     # or "dolfin"
 
-### Solvers and mixed spaces
+mesh = B.BoxMesh(B.Point(0, 0, 0), B.Point(1, 1, 1), 8, 8, 8)
+box = B.PeriodicBox({0: (0.0, 1.0), 1: (0.0, 1.0)})      # periodic in x and y
+V = B.FunctionSpace(mesh, "CG", 2, constrained_domain=box)
 
-- **`ksp`**: a PETSc Krylov solver set up from options under its own prefix, dolfin's
-  names for methods and preconditioners translated, with a check that PETSc built the
-  method and preconditioner asked for (a name it does not take is otherwise ignored, and
-  the solver runs with its default); `scoped`, options set for one solve and the database
-  restored after it; BoomerAMG settings that make 3D Poisson solves several times faster
-  (`BOOMERAMG_3D`), and hypre's classical ones written out (`BOOMERAMG_CLASSICAL`), whose
-  iterations grow far slower with the mesh; `defaults`, options PETSC_OPTIONS can
-  override; `diagonal_matrix`.
-- **`couplings`**: which components of a mixed space a bilinear form couples
-  (`form_couplings`, read off the UFL form), and matrices that store only those blocks:
-  `assemble(a, couplings="form")` on either backend, the other blocks skipped by component
-  (a nonzero among them an error). The Taylor-Hood Stokes operator keeps 44 % of the mixed
-  pattern.
-- **`shared_amg`**: one BoomerAMG for the velocity components of a block-diagonal Stokes
-  preconditioner (the scalar Laplacian held once, one hierarchy), with the component
-  index sets on either backend and a check that the blocks are one.
-- **`saddle`**: the block-diagonal preconditioner of a Taylor-Hood Stokes system on either
-  backend and either layout ([P2^3, P1] or [P2, P2, P2, P1]): `pressure_mass_diagonal`
-  (diag(M) of P1 on simplices, 2/(d + 2) of the lumped mass), `block_preconditioner`
-  (BoomerAMG on the velocity components, shared or one each through fieldsplit, and Jacobi
-  on the pressure) and `solve_checked` (the solve, raising unless it converged).
-- **`nullspace`**: `constant_nullspace`, the constants on a space or on one component of
-  a mixed space, attached to a matrix as its null space (set through the component's
-  dofmap: setting `Function(W).sub(1).vector()` sets every component).
-- **`mixed`**: `subfunction` and `set_subfunction`, a component of a mixed Function read
-  and set through its collapsed space, with the space and assigners built once;
-  `AssignedVectorFunction`, a vector Function filled from scalar components.
+walls = B.BoundaryMarkers(mesh, 0)
+B.Faces(2, 0.0, 1.0).mark(walls, 1)                      # the planes z = 0 and z = 1
+bc = B.DirichletBC(V, B.Constant(0.0), walls, 1)
 
-### Running at scale
-
-- **`dof_reorder`, `femtools-build-dof-reorder`**: dolfin's dof reordering with a sparser
-  graph, built as a library to preload over libdolfin's, without the memory peak of
-  dolfin's own at large sizes.
-- **`abort`**: `run(main)`, so an exception on one MPI rank ends the job instead of
-  hanging it.
-- **`swap`**: a folder (a checkpoint, a result) written aside, swapped in by renaming,
-  and put back by `recover` after a kill between the renames: never a mix of two.
-- **`jit`**: compiled extensions (dolfin's JIT, cppimport) built on rank 0 of the caller's
-  communicator and loaded on every rank, an error on rank 0 raised on all; **`lru`**:
-  bounded and weak caches.
-- **`memory`**: hands freed heap back to the operating system, and reports what a process
-  holds; **`phases`**: a line a phase of a run (wall time, peak and current memory over
-  the ranks) and `mpi_print`, on rank zero.
-- **`garbage`**: destroys the PETSc objects Python has dropped. petsc4py keeps an object
-  on a parallel communicator until `PETSc.garbage_cleanup` is called on it, collectively;
-  the backends' `collect_garbage` calls it (once a time step, say), and the DOLFINx
-  backend does before it makes a matrix.
-
-### DOLFINx
-
-- **`dolfinx.periodic`**: `periodic_box`, the slave and master dofs of a periodic box on a
-  DOLFINx space (scalar, vector or mixed), paired by coordinates in parallel: the same
-  pairing rule as `periodic.periodic_box`, without dolfinx_mpc, but its own signature
-  (`periodic_box(V, upper, periodic, lower, tol)`, `tol` relative to the box, where
-  dolfin's is absolute).
-- **`dolfinx.unique`**: `UniqueDofs`, a space's unique dofs (periodic slaves folded onto
-  their masters) numbered compactly, as dolfin's `constrained_domain` numbers them,
-  each rank's in a bandwidth-reducing order of the periodic cell graph (for ILU and
-  AMG); one PETSc scatter moves a Function to a compact vector and folds an assembled
-  right-hand side. A solver then sees vectors without slave entries, on either backend.
-- **`dolfinx.assembly`**: matrices over unique dofs, folded during assembly through the
-  dof map and preallocated exactly from the dofmaps (no slave rows, no product);
-  right-hand sides folded by one scatter; the constants' null space. A reassembly adds
-  each element matrix straight into PETSc's arrays through DOLFINx's assembler (a C++
-  extension built with CMake on first use, as `dolfinx.refine`'s; without it,
-  `MatSetValuesLocal`): 1.5-2x faster than `MatSetValuesLocal`, and a value outside the
-  pattern is an error. Matrices and vectors are assembled a block of cells at a time,
-  with the coefficients of that block alone packed (DOLFINx packs every cell's at once).
-- **`dolfinx.mixed`**: `subfunction`, `set_subfunction`, `subspace` and
-  `AssignedVectorFunction`, as in `mixed`, for DOLFINx Functions (index copies through
-  the collapse dof maps, built once).
-- **`dolfinx.checkpoint`**: `write_dofs`, `write_function`, `write_functions` (several in
-  one file, in one open; the backends' `write_functions_h5`), `read_function`: DOLFINx
-  Functions in dolfin's HDF5 layout (`dolfin_layout`), cell by cell through the original
-  cell and vertex indices and dolfin's local dof order, so a checkpoint written by
-  either backend, on any number of ranks, reads on the other. Values are a space's
-  unique dofs (`UniqueDofs`); Lagrange P1/P2, scalar or mixed.
-- **`dolfinx.mesh`**: `read_mesh` and `write_mesh`, DOLFINx meshes in dolfin's HDF5
-  layout, every rank reading or writing its block; a cell's original index is its
-  global id in the file, a vertex's its row, so checkpoints name the same cells on both
-  backends. `write_boundary_facets` writes marked boundary facets as
-  `BoundaryMarkers.write` does (the file partrac reads).
-- **`dolfinx.refine`**: `refine_periodic`, `plaza_periodic`'s port to DOLFINx: DOLFINx's own
-  Plaza refinement (its rule propagation, `compute_refinement`, `create_mesh`), with ties
-  between longest edges broken by position and the marking propagated with the periodic
-  partner edges to a joint fixed point, so identified faces are bisected alike; frozen
-  edges, `max_cells`, and a parent map aligned with the new mesh's cells. Partners are
-  paired by a spatial hash over the ranks (nothing gathered). A C++ extension, built with
-  CMake against the installed DOLFINx and nanobind on first use. As fast as
-  `dolfinx.mesh.refine` (1.3 M tetrahedra with a refined band: 4.9 s against 6.1 s).
-- **`dolfinx.expression`**: `CompiledExpression`, dolfin's `Expression` for DOLFINx: the
-  C++ code (in `x[i]` and named parameters, with `<cmath>`, `near`, `DOLFIN_EPS`, `pi`)
-  compiled once into a cached library and called where `Function.interpolate` takes a
-  callable; parameters changed as attributes; a tuple of strings is a vector.
-- **`dolfinx.xdmf`**: `XDMFSeries`, time series of DOLFINx Functions in `XDMFFile2`'s
-  layout -- the same XML word for word, quadratic cells for P2, the mesh stored once,
-  every rank writing its own rows -- so `grids`, `merge_series` and
-  `XDMFFile2.read_checkpoint` treat both backends' series alike.
-- **`dolfinx.xdmf_read`**: `read_nodal`, a step of such a series, written by either backend,
-  into a DOLFINx Function of any degree and periodicity (a Lagrange space of the file's
-  degree reads its owned dofs at their nodes; another degree through a plain space of the
-  file's degree, interpolated): `read_checkpoint`'s counterpart.
-
-## Requirements
-
-`import femtools` needs numpy and h5py only. dolfin, mpi4py and scipy are imported where
-they are used. `gradient` compiles its C++ with cppimport (pybind11, a compiler and
-`libdolfin-dev`) on import, `probes` at the first use of Probe(s) or GradProbe(s);
-`periodic`, `periodic_partition`, `plaza_periodic`, `couplings` (and the dolfin backend's
-`fixed_dofs` and `assemble(couplings=, bcs=)`), `cell_mean`, `shared_amg` (and so `saddle`) and
-`fast_interpolation.p1_to_p2` use dolfin's JIT on first use. `dolfinx.refine` and `dolfinx.assembly`
-build their C++ with CMake, a compiler and nanobind against the installed DOLFINx on
-first use, cached in FEMTOOLS_JIT_DIR (else ~/.cache/femtools); `python3 -m
-femtools.dolfinx.compiled` builds them ahead of a job (with FEMTOOLS_REQUIRE_EXTENSIONS set
-a run refuses the slower assembly without them). Each JIT builds on one rank and loads on
-all, so its cache must be on a file system every rank sees. `periodic_partition` needs a
-ParMETIS with 64-bit `idx_t` past 2^31 cells, and more than 2^31 dofs a PETSc (and hypre)
-with 64-bit indices.
-
-Parallel HDF5 I/O needs h5py built with MPI (Debian/Ubuntu: `python3-h5py-mpi`, which
-Debian's h5py loads under `mpirun`; on a cluster, an h5py built against the cluster's MPI
-and a parallel HDF5). Without it every file is written and read through rank 0, which is
-correct but does not scale to large meshes; femtools says so once, on rank 0's stderr.
-
-## Install
-
-Into the interpreter that has dolfin, without dependencies (a pip mpi4py would be built
-against another MPI than dolfin's):
-
-```bash
-python3 -m pip install --user --break-system-packages --no-deps --no-build-isolation -e .
+u, v = B.TrialFunction(V), B.TestFunction(V)
+w = B.Function(V)
+B.solve(B.inner(B.grad(u), B.grad(v)) * B.dx == B.Constant(1.0) * v * B.dx, w, bcs=[bc])
+print(B.assemble(w * B.dx))                              # 1/12, on either backend
 ```
 
-## Use
+Both backends export the same names (`femtools.backend.NAMES`). Code that is handed a mesh
+or Function finds its backend with `femtools.backend.of(obj)`.
+`tests/backend_stokes_worker.py` is a complete periodic Stokes solve written this way.
+
+### Quadratic fields in XDMF (dolfin)
+
+`dolfin.XDMFFile` silently interpolates a P2 field down to its vertices. `XDMFFile2` is a
+drop-in replacement that keeps the midside nodes, and can put several fields on one grid:
 
 ```python
 import dolfin as df
@@ -230,50 +62,197 @@ mesh = df.UnitCubeMesh(8, 8, 8)
 u = df.Function(df.VectorFunctionSpace(mesh, "CG", 2), name="u")
 p = df.Function(df.FunctionSpace(mesh, "CG", 1), name="p")
 
-with XDMFFile2(mesh.mpi_comm(), "up.xdmf") as f:   # where dolfin.XDMFFile was
+with XDMFFile2(mesh.mpi_comm(), "up.xdmf") as f:
     f.write(u, 0.0)
-    f.write((u, p), 1.0)                            # two fields on one grid
+    f.write((u, p), 1.0)                                 # two fields on one grid
 ```
 
-In ParaView, raise "Nonlinear Subdivision Level" to see the quadratic field.
+In ParaView, raise "Nonlinear Subdivision Level" to see the quadratic field. On DOLFINx,
+`femtools.dolfinx.xdmf.XDMFSeries` writes the same file, word for word.
+
+### A periodic box and probes (dolfin)
 
 ```python
 from femtools.periodic import periodic_box
+from femtools.probes import Probes
+
 V = df.FunctionSpace(mesh, "CG", 2, constrained_domain=periodic_box(
     upper=(Lx, Ly), periodic=(True, False), lower=(0, 0)))
 
-from femtools.probes import Probes
-probes = Probes(points.flatten(), V)
-probes(u)
+probes = Probes(points.flatten(), V)                     # located once
+probes(u)                                                # evaluated each time step
 values = probes.array()
 ```
 
+### Boundary markers that are written and read back (dolfin)
+
 ```python
 from femtools.boundaries import BoundaryMarkers
-markers = BoundaryMarkers(mesh)                     # where a facet MeshFunction was
+
+markers = BoundaryMarkers(mesh)                          # where a facet MeshFunction was
 markers.mark(df.CompiledSubDomain("on_boundary && near(x[2], 0)"), 5)
 bc = df.DirichletBC(V, g, markers, 5)
-markers.write("boundaries.xdmf")                    # the exterior facets marked nonzero
+markers.write("boundaries.xdmf")                         # the marked exterior facets
 markers = BoundaryMarkers.read("boundaries.xdmf", mesh)
 ```
 
+### Command-line tools
+
 ```bash
-femtools-cut-facets boundaries.xdmf walls.xdmf --markers 3,5,7:106
-femtools-cut-facets full.xdmf boundaries.xdmf --markers 1:    # every marker from 1
-femtools-build-dof-reorder --out libdof_reorder_star.so
+femtools-cut-facets boundaries.xdmf walls.xdmf --markers 3,5,7:106   # keep some markers
+femtools-build-dof-reorder --out libdof_reorder_star.so              # see "Large meshes"
 LD_PRELOAD=$PWD/libdof_reorder_star.so python3 solve.py
+```
+
+## What is in it
+
+Each module's docstring has the details, the trade-offs and the measurements.
+
+### Backends
+
+| module | what it is for |
+|---|---|
+| `backend` | `load(name)`, `of(obj)`, `is_dolfinx(obj)` and `NAMES`: the one API |
+| `backend.dolfin` | that API on legacy dolfin (mostly dolfin itself, plus femtools' tools) |
+| `backend.dolfinx` | that API on DOLFINx, built on the `dolfinx.*` modules below |
+| `tables`, `ufc` | a mesh's cells and a space's dofs as arrays, in dolfin's order, on either backend |
+
+### Files
+
+| module | what it is for |
+|---|---|
+| `xdmf` | `XDMFFile2` (P2 kept, several fields on one grid); `grids` and `parse_xdmf` to find a series' arrays; `merge_series` to join a run and its restarts |
+| `xdmfread` | read compressed datasets fast, inflating chunks on a thread pool |
+| `compress` | compressed datasets, the default everywhere |
+| `hdf5_rows` | rows of datasets read, written and exchanged between ranks, no rank holding the whole |
+| `dolfin_layout` | a Mesh or Function in the layout `dolfin.HDF5File` uses, compressed |
+| `layout_reader` | that layout read with numpy and h5py alone, streamed |
+| `vertex_field` | a P1 field stored as one value per mesh vertex: much smaller, either backend |
+| `digest` | a SHA-256 of what a stored Mesh or Function holds, the same on any number of ranks |
+| `boundaries`, `boundary_markers` | boundary facet files (the layout partrac reads) and `BoundaryMarkers`, a facet MeshFunction that writes and reads them |
+| `facets` | `femtools-cut-facets`: a facet file cut down to some markers |
+
+### Periodic meshes and refinement
+
+| module | what it is for |
+|---|---|
+| `periodic` | `periodic_box`, the compiled `constrained_domain` of a periodic box (any lower corner); `faces_congruent` |
+| `periodic_core` | the backend-free part: the pairing rule (`classify`), tolerances, congruence checks |
+| `box` | `Faces` (planes of a box) and `mark_walls` (every boundary facet off the box's faces) |
+| `periodic_partition` | a parallel mesh read and partition (ParMETIS) that dolfin's periodic dofmap cannot get wrong, and the check that it did not |
+| `plaza_periodic`, `refine_periodic` | periodic Plaza refinement: opposite faces bisected alike, with the parent-cell map |
+| `hierarchical_transfer` | P1 and P2 fields moved to a refined mesh through ancestor cells, no point search |
+| `nested_transfer` | transfers between a mesh and its uniform refinement, as matrices built once, either backend |
+
+### Repeated work, faster
+
+| module | what it is for |
+|---|---|
+| `fast_assembly` | a form assembled every time step compiled once; constant matrices assembled once and shared |
+| `fast_bc` | `DirichletBC.apply` with the constrained dofs found once |
+| `fast_interpolation` | interpolation between Lagrange spaces as one sparse product built once; `p1_to_p2`, either backend |
+| `couplings` | matrices that store only the blocks a form couples (a Stokes operator keeps under half of the mixed pattern) |
+
+### Solvers
+
+| module | what it is for |
+|---|---|
+| `ksp` | PETSc Krylov solvers from options under their own prefix, checked; `scoped` options; tuned BoomerAMG settings |
+| `saddle` | the block preconditioner of a Taylor-Hood Stokes system and its checked solve, either backend and layout |
+| `shared_amg` | one BoomerAMG for all velocity components of that preconditioner |
+| `nullspace` | the constants on a space, or on one component of a mixed space, as a null space |
+| `mixed` | a mixed Function's components through their collapsed spaces; vector Functions from scalars |
+
+### Point values and gradients
+
+| module | what it is for |
+|---|---|
+| `probes` | a Function's values and gradients at fixed points, located once (from fenicstools) |
+| `gradient` | the weighted gradient matrix: a P1 field's nodal derivative as one product (from fenicstools) |
+| `recovery` | a continuous gradient recovered by averaging in a periodic P1 space, either backend |
+| `cell_mean` | the size of each cell's mean of a P1 or P2 velocity, exactly, either backend |
+
+### Large meshes and long jobs
+
+| module | what it is for |
+|---|---|
+| `abort` | `run(main)`: an exception on one MPI rank ends the job instead of hanging it |
+| `jit`, `lru` | compiled extensions built on one rank and loaded on all; bounded and weak caches |
+| `dof_reorder` | `femtools-build-dof-reorder`: dolfin's dof reordering without its memory peak at large sizes |
+| `swap` | a folder written aside and swapped in, never left half-written by a kill |
+| `memory`, `phases` | freed heap handed back, and a line per phase of a run with its time and memory |
+| `garbage` | PETSc objects Python dropped, destroyed collectively |
+
+### DOLFINx internals
+
+What `backend.dolfinx` is built on; useful directly when writing plain DOLFINx code.
+
+| module | what it is for |
+|---|---|
+| `dolfinx.periodic` | the slave and master dofs of a periodic box, paired by position in parallel (no dolfinx_mpc) |
+| `dolfinx.unique` | `UniqueDofs`: periodic slaves folded onto their masters, numbered compactly as dolfin's `constrained_domain` numbers them |
+| `dolfinx.assembly` | matrices and vectors over unique dofs, folded during assembly |
+| `dolfinx.mixed` | a mixed Function's components through their collapsed spaces |
+| `dolfinx.checkpoint`, `dolfinx.mesh` | Functions and meshes in dolfin's HDF5 layout, each backend reading the other's |
+| `dolfinx.xdmf`, `dolfinx.xdmf_read` | XDMF series in `XDMFFile2`'s layout, written and read |
+| `dolfinx.refine` | periodic Plaza refinement on DOLFINx |
+| `dolfinx.expression` | dolfin's C++ `Expression` for DOLFINx |
+| `dolfinx.boundary_markers`, `dolfinx.cells` | facet markers as on dolfin; a space's cells and dofs in dolfin's order |
+| `dolfinx.compiled` | the C++ extensions above, built on first use (`python3 -m femtools.dolfinx.compiled` builds them ahead) |
+
+## How the two backends differ
+
+The API is the same; underneath, a few things are not, and you may see them:
+
+- **Periodicity.** dolfin builds periodic spaces into its dofmap (`constrained_domain`). Its
+  parallel version can lose the pairing on some partitions, so a parallel periodic dolfin
+  mesh should be read through `read_mesh_file(..., periodic=...)`, which partitions it
+  safely (`periodic_partition`). DOLFINx spaces are made periodic by femtools
+  (`dolfinx.unique`), and pair correctly on any partition.
+- **Dof order.** The two number dofs differently, so iteration counts of AMG or ILU solves
+  differ a little between backends. Answers agree to the solver tolerance.
+- **Stored vectors.** In dolfin's HDF5 layout, a component split off a periodic mixed space
+  is stored on all its nodes by dolfin and on its unique (periodic) dofs by DOLFINx. Both
+  files name each cell's dofs, and every reader here goes through those.
+- **Methods and properties.** dolfin's `V.mesh()` is DOLFINx's `V.mesh`. Code meant for both
+  uses the neutral helpers (`space_mesh`, `function_space`, `mesh_comm`, `owned_dofs`,
+  `global_dim`, ...) and `as_backend_type(x).vec()` for a PETSc vector.
+
+## Requirements
+
+- **Always:** numpy and h5py. `import femtools` needs nothing else; dolfin, DOLFINx,
+  mpi4py and scipy are imported only where used.
+- **For the dolfin side:** legacy dolfin 2019.2, with a compiler and `libdolfin-dev`, since
+  several modules compile C++ on first use (dolfin's JIT, or cppimport for `probes` and
+  `gradient`).
+- **For the DOLFINx side:** DOLFINx 0.11 with its headers, CMake and nanobind: the
+  extensions in `dolfinx.compiled` build on first use and are cached in `FEMTOOLS_JIT_DIR`
+  (default `~/.cache/femtools`). That cache must be on a file system every rank sees.
+- **Parallel HDF5:** h5py built with MPI (Debian/Ubuntu: `python3-h5py-mpi`). Without it
+  every file goes through rank 0, which is correct but slow on large meshes; femtools says
+  so once.
+- **Very large meshes:** past 2^31 cells, ParMETIS with a 64-bit `idx_t`; past 2^31 dofs,
+  PETSc and hypre with 64-bit indices.
+
+## Install
+
+Into the interpreter that has dolfin or DOLFINx, without dependencies (a pip-built mpi4py
+would be built against another MPI than theirs):
+
+```bash
+python3 -m pip install --user --break-system-packages --no-deps --no-build-isolation -e .
 ```
 
 ## Tests
 
 ```bash
-python3 -m pytest              # the quick tier, seconds
+python3 -m pytest              # the quick tests, seconds
 python3 -m pytest -m slow      # the mpirun and compile tests, minutes
 python3 -m pytest -m ""        # everything
 python3 -m pytest -m "" -n 4   # everything, in parallel (pytest-xdist)
 ```
 
-The dolfin tests skip where dolfin is missing.
+Tests for a backend that is not installed skip themselves.
 
 ## Credits and licence
 

@@ -223,8 +223,11 @@ def VectorElement(family, cell, degree, dim=None):
     return basix.ufl.blocked_element(base, shape=(n,))
 
 
-def MixedElement(elements):
-    """dolfin's MixedElement(elements): the mixed element of a list of elements."""
+def MixedElement(*elements):
+    """dolfin's MixedElement: the mixed element of elements given one by one,
+    MixedElement(P2, P1), or as a list, MixedElement([P2, P1])."""
+    if len(elements) == 1 and isinstance(elements[0], (list, tuple)):
+        elements = elements[0]
     return basix.ufl.mixed_element(list(elements))
 
 
@@ -368,10 +371,11 @@ def hmin(mesh):
     return MPI.min(mesh.comm, float(h.min()) if n else float("inf"))
 
 
-def write_mesh_h5(path, mesh):
-    """The mesh in dolfin's HDF5 layout (femtools.dolfinx.mesh.write_mesh). Collective."""
+def write_mesh_h5(path, mesh, name="mesh", mode="w"):
+    """The mesh in dolfin's HDF5 layout, as the group `name`, the file started over
+    ("w") or added to ("a") (femtools.dolfinx.mesh.write_mesh). Collective."""
     from femtools.dolfinx.mesh import write_mesh
-    write_mesh(path, mesh)
+    write_mesh(path, mesh, name, mode)
 
 
 def extent(mesh):
@@ -902,8 +906,14 @@ class Function(_WritesBack):
         self.sync()
         return _ComponentView(self, i)
 
-    def split(self):
-        return tuple(self.sub(i) for i in range(self.function_space.num_sub_spaces))
+    def split(self, deepcopy=False):
+        """The components, as dolfin's split: views onto this Function, or with `deepcopy`
+        Functions of their own on the components' collapsed spaces (copies)."""
+        n = self.function_space.num_sub_spaces
+        if not deepcopy:
+            return tuple(self.sub(i) for i in range(n))
+        return tuple(subfunction(self, i, Function(subspace(self.function_space, i)))
+                     for i in range(n))
 
     def rename(self, name, label=None):
         self.name = name
@@ -1527,9 +1537,11 @@ def constant_nullspace(A, V):
     return null
 
 
-def norm(x, norm_type="L2"):
+def norm(x, norm_type="L2", mesh=None):
     """dolfin's norm: of a Vector, "l1", "l2" or "linf"; of a Function, the integral norm
-    "L2", "H1" or "H10" (the name in either case). Collective."""
+    "L2", "H1" or "H10" (the name in either case). `mesh` is dolfin's, for a norm of an
+    Expression; this backend's Expressions are Functions on a mesh of their own, so it is
+    taken and not needed. Collective."""
     t = norm_type.lower()
     if isinstance(x, fem.Function):
         sync(x)
@@ -1558,7 +1570,8 @@ def normalize(x, normalization_type="average"):
 
 class PETScKrylovSolver:
     """dolfin's PETScKrylovSolver on a petsc4py KSP: `ksp()`, `parameters` (applied at
-    every solve, as dolfin does), set_reuse_preconditioner, solve(A, x, b)."""
+    every solve, as dolfin does), set_reuse_preconditioner, set_operator(A),
+    set_operators(A, P), and solve(A, x, b) or solve(x, b) on the operators set."""
 
     _COUNT = [0]
 
@@ -1566,6 +1579,7 @@ class PETScKrylovSolver:
         self._ksp = PETSc.KSP().create(MPI.comm_world)
         self.parameters = {}
         self._reuse = False
+        self._operators = None        # (A, P), Matrices, from set_operator(s)
         if method is not None:
             # dolfin's PETScKrylovSolver(method, preconditioner), by femtools.ksp's names
             self._COUNT[0] += 1
@@ -1578,9 +1592,29 @@ class PETScKrylovSolver:
     def set_reuse_preconditioner(self, reuse):
         self._reuse = bool(reuse)
 
-    def solve(self, A, x, b):
+    def set_operator(self, A):
+        """A the operator and the preconditioner's matrix, for solve(x, b)."""
+        self._operators = (A, A)
+
+    def set_operators(self, A, P):
+        """A the operator, P the matrix the preconditioner is built from."""
+        self._operators = (A, P)
+
+    def solve(self, *args):
+        """solve(A, x, b), or solve(x, b) with the operators set; returns the iterations.
+        Raises unless it converged (parameters["error_on_nonconvergence"])."""
+        if len(args) == 3:
+            A, x, b = args
+            P = A
+        elif len(args) == 2:
+            if self._operators is None:
+                raise RuntimeError("PETScKrylovSolver.solve(x, b): no operator set "
+                                   "(set_operator or set_operators)")
+            (A, P), (x, b) = self._operators, args
+        else:
+            raise TypeError("PETScKrylovSolver.solve(A, x, b) or solve(x, b)")
         k = self._ksp
-        k.setOperators(A._m)
+        k.setOperators(A._m, P._m)
         k.getPC().setReusePreconditioner(self._reuse)  # what KSPSetReusePreconditioner does
         ksp.apply_parameters(k, self.parameters)
         k.solve(b._v, x._v)

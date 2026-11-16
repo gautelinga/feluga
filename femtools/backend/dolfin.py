@@ -12,7 +12,7 @@ from dolfin import (  # noqa: F401
     Matrix, Mesh, MixedElement, MPI, nabla_grad, norm, normalize, parameters,
     PETScKrylovSolver, Point, RectangleMesh, rhs, sin, solve, SpatialCoordinate, split,
     sqrt, SubDomain, TestFunction, TestFunctions, Timer, TimingClear, TimingType,
-    TrialFunction, TrialFunctions, UnitSquareMesh, Vector, XDMFFile)
+    TrialFunction, TrialFunctions, UnitSquareMesh, Vector)
 
 from femtools import ksp  # noqa: F401
 from femtools.boundaries import BoundaryMarkers  # noqa: F401
@@ -29,6 +29,10 @@ from femtools.fast_assembly import assemble_matrix  # noqa: F401
 from femtools.fast_bc import apply as apply_bc  # noqa: F401
 from femtools.fast_interpolation import interpolate as _fast_interpolate
 from femtools.fast_interpolation import values as nodal_values  # noqa: F401
+# XDMFFile: femtools' drop-in for dolfin's, which keeps a P2 field's midside nodes (dolfin's
+# interpolates them away silently) and writes several fields on one grid, as the DOLFINx
+# backend's XDMFFile does
+from femtools.xdmf import XDMFFile2 as XDMFFile  # noqa: F401
 from femtools.mixed import (  # noqa: F401
     AssignedVectorFunction, set_subfunction, subfunction, subspace)
 from femtools.nullspace import constant_nullspace  # noqa: F401

@@ -1289,7 +1289,7 @@ def _mvc_dtype(mvc):
     collection's values and wrap a -1 'unmarked' int to 2**64-1 -- and so does this.
     dolfin's classes are MeshValueCollection_sizet, _double, _int and _bool.
     """
-    name = type(mvc).__name__
+    name = _dolfin_class(mvc, 'MeshValueCollection') or type(mvc).__name__
     if name.endswith('_double'):
         return np.float64
     if name.endswith('_int'):
@@ -1299,12 +1299,18 @@ def _mvc_dtype(mvc):
     return np.uint64
 
 
+def _dolfin_class(obj, prefix):
+    """The name of the first class in `obj`'s hierarchy that starts with `prefix` (dolfin's
+    MeshFunctionSizet, say, for femtools' BoundaryMarkers, a subclass), else None."""
+    return next((c.__name__ for c in type(obj).__mro__ if c.__name__.startswith(prefix)), None)
+
+
 def _is_mesh_function(obj):
-    return type(obj).__name__.startswith('MeshFunction')
+    return _dolfin_class(obj, 'MeshFunction') is not None
 
 
 def _is_mesh_value_collection(obj):
-    return type(obj).__name__.startswith('MeshValueCollection')
+    return _dolfin_class(obj, 'MeshValueCollection') is not None
 
 
 def _pad_coords(coords):

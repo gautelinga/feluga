@@ -7,7 +7,8 @@ A write to the compact vector on one rank only does not hang the next assembly (
 decision to prolong is every rank's); a partial write through DOLFINx's array after the
 compact vector changed starts from the vector's values; interpolating one component keeps
 the other's values, ghosts included; on a periodic space a no-op write does not change
-what assembly sees (slaves are their masters', never their own positions' values).
+what assembly sees (slaves are their masters', never their own positions' values); a
+subclass's own sync (a copy following another Function) runs before each assembly.
 """
 import json
 import os
@@ -35,6 +36,7 @@ def _run(ranks):
         assert r["component_kept"] == pytest.approx(5.0, rel=1e-12)
         assert r["component_set"] == pytest.approx(4.0, rel=1e-12)
         assert r["periodic_same"]
+        assert r["follower"] == pytest.approx(7.0, rel=1e-12)
 
 
 def test_one_rank():

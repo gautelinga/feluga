@@ -1118,8 +1118,11 @@ def compiled(form):
     owners = list({id(o): o for o in (_function_of(c) for c in entry.coefficients)
                    if o is not None}.values())
     for o in owners:
-        if isinstance(o, Expression):
-            o.sync()                  # its code evaluated into its arrays (local), first
+        # A Function whose class has its own sync first runs it, as assembly always did:
+        # an Expression's code evaluated into its arrays, or a copy that follows another
+        # Function brought up to date. Called on every rank, as compiled() is.
+        if type(o).sync is not Function.sync:
+            o.sync()
     if owners:
         stale = np.array([o._stale() for o in owners], dtype=np.int64)
         if entry.comm.size > 1:

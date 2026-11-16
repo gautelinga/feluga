@@ -43,4 +43,25 @@ p.interpolate(lambda x: x[0])
 first = assemble(p * dx)
 p.vector()[:] = p.vector()[:]
 out["periodic_same"] = first == assemble(p * dx)
+
+
+# a subclass's own sync runs before each assembly: here a copy that follows another
+# Function, as a solver's copy of a field on another mesh may
+class Follower(Function):
+    def __init__(self, V, source):
+        Function.__init__(self, V)
+        object.__setattr__(self, "source", source)
+
+    def sync(self):
+        self.vector().zero()
+        self.vector().axpy(1.0, self.source.vector())
+        return Function.sync(self)
+
+
+source = Function(V)
+follower = Follower(V, source)
+source.vector()[:] = 2.0
+assemble(follower * dx)
+source.vector()[:] = 7.0
+out["follower"] = assemble(follower * dx)
 print("RESULT " + json.dumps(out), flush=True)

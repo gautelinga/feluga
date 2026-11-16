@@ -298,6 +298,64 @@ own = UniqueDofs(D0, reorder=True).owned_unique
 res["reordered_dg0"] = bool(comm.allreduce(int(not np.array_equal(
     np.sort(own), np.arange(D0.dofmap.index_map.size_local)))) == 0)
 
+
+# 7. Taylor-Hood's components, [P2, P2, P1]: unlike elements grouped at their nodes (the
+# pressure with the velocity at a vertex, by cell entity), the same operator up to the
+# permutation, values through restrict and prolong, and the node graph built from the
+# reference component's pairs alone giving the same order as from every dof's
+from femtools.dolfinx import unique as _unique  # noqa: E402
+
+P2e = basix.ufl.element("Lagrange", msh.basix_cell(), 2)
+WT = fem.functionspace(msh, basix.ufl.mixed_element([P2e, P2e, P1]))
+uT, vT = ufl.TrialFunction(WT), ufl.TestFunction(WT)
+uu, pp = ufl.as_vector([uT[0], uT[1]]), uT[2]
+vv, qq = ufl.as_vector([vT[0], vT[1]]), vT[2]
+a_T = fem.form((ufl.inner(ufl.grad(uu), ufl.grad(vv)) + ufl.inner(uu, vv)
+                - ufl.div(vv) * pp - qq * ufl.div(uu) + pp * qq) * ufl.dx)
+slT, maT = periodic_box(WT, periodic=(True, False))
+UT = UniqueDofs(WT, slT, maT, interleave=True, reorder=True)
+K = create_matrix(a_T, UT)
+assemble_matrix(K, a_T)
+res["th_fold_exact"] = exact(K)
+res["th_fold"] = rel(K, explicit_P(UT).transposeMatMult(
+    plain_matrix(a_T).matMult(explicit_P(UT))))
+nT = WT.dofmap.index_map.size_local + WT.dofmap.index_map.num_ghosts
+XT = np.zeros((nT, 3))
+for i in range(3):
+    Wi, parent = WT.sub(i).collapse()
+    XT[flat_collapse_map(parent)] = Wi.tabulate_dof_coordinates()
+keys, per_node, ref = _unique._node_keys(WT, nT)
+node = keys // per_node
+own = UT.owned_unique
+runs = np.flatnonzero(np.diff(node[own]) != 0) + 1       # a node's dofs are one run
+same_place = all(np.allclose(XT[r], XT[r[0]]) for r in np.split(own, runs))
+res["th_ref"] = ref
+res["th_nodes_together"] = bool(comm.allreduce(int(not (
+    same_place and len(np.unique(node[own])) == len(runs) + (len(own) > 0)))) == 0)
+res["th_vertex_nodes_of_three"] = bool(comm.allreduce(int(np.bincount(
+    np.unique(node[own], return_counts=True)[1], minlength=4)[3] == 0)) == 0)
+wT = fem.Function(WT)
+for i, f in enumerate((lambda X: np.sin(2 * np.pi * X[0]) + X[1],
+                       lambda X: X[1] ** 2, lambda X: np.cos(2 * np.pi * X[0]))):
+    wT.sub(i).interpolate(f)
+c = UT.restrict(wT, UT.create_vector())
+c2 = UT.restrict(UT.prolong(c, fem.Function(WT)), UT.create_vector())
+res["th_roundtrip"] = rel(c2, c)
+n_own = WT.dofmap.index_map.size_local
+lo = WT.dofmap.index_map.local_range[0]
+is_slave = np.zeros(nT, bool)
+is_slave[slT] = True
+plain_own = np.flatnonzero(~is_slave[:n_own])
+plain_own = plain_own[np.argsort(keys[plain_own], kind="stable")]
+rep = np.full(nT, -1, dtype=np.int32)
+rep[plain_own] = plain_own
+here = (maT >= lo) & (maT < lo + n_own)
+rep[slT[here]] = maT[here] - lo
+orders = [_unique._rcm_order(plain_own, rep, node, cells)
+          for cells in (WT.sub(ref).dofmap.list, WT.dofmap.list)]
+res["th_reference_graph_same_order"] = bool(comm.allreduce(
+    int(not np.array_equal(*orders))) == 0)
+
 if comm.rank == 0:
     with open(sys.argv[1], "w") as fh:
         json.dump(res, fh)

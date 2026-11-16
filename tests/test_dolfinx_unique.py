@@ -54,6 +54,11 @@ def _check_unique(r):
     assert r["reordered_interleaved"]
     assert r["reordered_roundtrip"] == 0.0
     assert r["reordered_dg0"]
+    assert r["th_fold"] < 1e-14 and r["th_fold_exact"]
+    assert r["th_ref"] == 0                       # a P2 component, the one with most dofs
+    assert r["th_nodes_together"] and r["th_vertex_nodes_of_three"]
+    assert r["th_roundtrip"] == 0.0
+    assert r["th_reference_graph_same_order"]
     assert r["band_reordered"] < r["band_own_order"] / 2, (r["band_reordered"],
                                                            r["band_own_order"])
 

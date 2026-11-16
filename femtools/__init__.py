@@ -48,4 +48,4 @@ recovery, cell_mean and hierarchical_transfer import with numpy and h5py alone (
 DOLFINx and mpi4py where used); abort, memory, swap and dof_reorder need the standard
 library, ksp petsc4py.
 """
-__version__ = "2026.2.3"
+__version__ = "2026.2.4"

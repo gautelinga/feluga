@@ -13,7 +13,9 @@ tools; `femtools.backend.dolfinx` implements the same API on DOLFINx (see its do
 
 Where dolfin's methods are DOLFINx properties (`V.mesh()` against `V.mesh`), code
 written for both calls the neutral helpers instead: `space_mesh`, `function_space`,
-`mesh_comm`, `geometric_dimension`, `element_degree`, `owned_dofs`, `fixed_dofs`.
+`mesh_comm`, `geometric_dimension`, `element_degree`, `owned_dofs`, `fixed_dofs`; and for
+counts over all ranks `global_dim`, `global_num_cells`, `global_num_vertices`,
+`marker_counts`.
 
 Neither module is imported by `import femtools.backend`.
 """
@@ -29,10 +31,11 @@ NAMES = (
     # meshes and boxes
     "Mesh", "RectangleMesh", "UnitSquareMesh", "BoxMesh", "Point", "read_mesh_file",
     "write_mesh_h5", "mesh_coordinates", "hmax", "hmin", "extent", "Faces", "mark_walls",
+    "global_num_cells", "global_num_vertices", "marker_counts",
     "SubDomain", "PeriodicBox", "repair_partition", "check_periodic_pairing",
     # spaces, functions, conditions
     "FunctionSpace", "Function", "Constant", "Expression", "DirichletBC", "BoundaryMarkers",
-    "AssignedVectorFunction", "set_subfunction", "subfunction", "subspace",
+    "AssignedVectorFunction", "set_subfunction", "subfunction", "subspace", "global_dim",
     # linear algebra and solvers
     "Vector", "Matrix", "as_backend_type", "assemble", "assemble_matrix", "apply_bc",
     "form_couplings",

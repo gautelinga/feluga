@@ -21,28 +21,41 @@ def _block(n, comm):
 
 
 def read_mesh(path, comm, name="mesh"):
-    """The mesh `name` in the HDF5 file `path`, distributed over `comm`. Collective."""
+    """The mesh `name` in the HDF5 file `path` (dolfin's layout), or the mesh of an XDMF
+    file `path` (`*.xdmf`: the meshers', through meshio; a cell's id is its row, as dolfin
+    numbers it), distributed over `comm`. Collective."""
     import h5py
     import basix.ufl
     import dolfinx.mesh
-    from femtools.hdf5_rows import fetch_rows, rows_of_labels
+    from femtools.hdf5_rows import _mesh_datasets, _xdmf_celltype, fetch_rows, rows_of_labels
 
-    with h5py.File(path, "r") as h5:
-        group = h5[name]
-        n_cells = int(group["topology"].shape[0])
-        n_x, gdim = (int(v) for v in group["coordinates"].shape)
-        celltype = group["topology"].attrs["celltype"]
-        celltype = celltype.decode() if isinstance(celltype, bytes) else str(celltype)
-        has_ids = "cell_indices" in group
+    if path.endswith(".xdmf"):
+        h5path, topo_name, coords_name, ids_name = _mesh_datasets(path)
+        celltype = _xdmf_celltype(path)
+    else:
+        h5path = path
+        topo_name, coords_name, ids_name = (name + "/topology", name + "/coordinates",
+                                            name + "/cell_indices")
+        celltype = None
+    with h5py.File(h5path, "r") as h5:
+        n_cells = int(h5[topo_name].shape[0])
+        n_x, gdim = (int(v) for v in h5[coords_name].shape)
+        if celltype is None:
+            celltype = h5[topo_name].attrs["celltype"]
+            celltype = celltype.decode() if isinstance(celltype, bytes) else str(celltype)
+        has_ids = ids_name is not None and ids_name in h5
         lo, hi = _block(n_x, comm)
-        x = np.asarray(group["coordinates"][lo:hi], dtype=np.float64)
+        x = np.asarray(h5[coords_name][lo:hi], dtype=np.float64)
+        if not has_ids:            # a cell's id is its row: this rank's block, read here
+            lo, hi = _block(n_cells, comm)
+            cells = np.asarray(h5[topo_name][lo:hi], dtype=np.int64)
     if celltype not in ("triangle", "tetrahedron"):
         raise NotImplementedError("read_mesh: triangles and tetrahedra, not " + celltype)
-    lo, hi = _block(n_cells, comm)
-    ids = np.arange(lo, hi, dtype=np.int64)
-    rows = (rows_of_labels(path, name + "/cell_indices", ids, comm if comm.size > 1 else None)
-            if has_ids else ids)
-    cells = fetch_rows(path, name + "/topology", rows, comm if comm.size > 1 else None)
+    if has_ids:
+        lo, hi = _block(n_cells, comm)
+        ids = np.arange(lo, hi, dtype=np.int64)
+        rows = rows_of_labels(h5path, ids_name, ids, comm if comm.size > 1 else None)
+        cells = fetch_rows(h5path, topo_name, rows, comm if comm.size > 1 else None)
     element = basix.ufl.element("Lagrange", celltype, 1, shape=(gdim,))
     return dolfinx.mesh.create_mesh(comm, np.asarray(cells, dtype=np.int64), element, x)
 

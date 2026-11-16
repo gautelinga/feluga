@@ -39,6 +39,7 @@ def test_the_crafted_partition_breaks_the_pairing_and_the_check_says_so(results)
     periodic pairing is broken -- which `check_pairing` refuses."""
     assert results['endangered_crafted'] == '1'
     assert results['crafted_space_ok'] == 'False'
+    assert results['crafted_scalars_ok'] == 'False'      # [P2, P2, P2, P1] as well
 
 
 @pytest.mark.mpi
@@ -46,6 +47,7 @@ def test_the_repair_moves_the_cell_and_the_pairing_holds(results):
     assert results['moved'] == '1'
     assert results['endangered_repaired'] == '0'
     assert results['repaired_space_ok'] == 'True'
+    assert results['repaired_scalars_ok'] == 'True'
 
 
 @pytest.mark.mpi

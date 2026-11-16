@@ -267,10 +267,48 @@ def check_periodic_pairing(box, spaces):
     """Nothing to check: DOLFINx pairs periodic dofs by their coordinates."""
 
 
-def read_mesh_file(fname, periodic=None):
-    """The mesh stored as "mesh" in the HDF5 file fname (dolfin's layout), numbered as
-    dolfin numbers it (femtools.dolfinx.mesh.read_mesh). `periodic` is dolfin's concern
-    (its partition); DOLFINx pairs periodic dofs on any."""
+def global_dim(V):
+    """The space's unique dofs over all ranks (periodic slaves folded); a component
+    W.sub(i)'s alone. Collective for a component."""
+    parent = getattr(V, "_parent", None)
+    if parent is None:
+        return unique_dofs(V).n_global
+    component = list(V.component())
+    if len(component) != 1:
+        raise NotImplementedError("global_dim: a component of a mixed space, not of one of "
+                                  "its components")
+    return parent.mesh.comm.allreduce(len(owned_dofs(parent, component[0])))
+
+
+def global_num_cells(mesh):
+    """The mesh's cells over all ranks."""
+    return mesh.topology.index_map(mesh.topology.dim).size_global
+
+
+def global_num_vertices(mesh):
+    """The mesh's vertices over all ranks."""
+    return mesh.topology.index_map(0).size_global
+
+
+def marker_counts(markers):
+    """The exterior facets of each marker over all ranks, as an array (`np.bincount`
+    of their markers, as femtools.boundaries.written_marker_counts gives a file's): of
+    `markers`, a BoundaryMarkers; each exterior facet counted by the rank owning it.
+    Collective."""
+    mesh = markers.mesh
+    comm = mesh.comm
+    n_own = mesh.topology.index_map(mesh.topology.dim - 1).size_local
+    ext = np.asarray(markers.boundary)
+    values = markers.values[ext[ext < n_own]].astype(np.int64)
+    n = comm.allreduce(int(values.max(initial=-1)) + 1, op=_MPI.MAX)
+    return comm.allreduce(np.bincount(values, minlength=n))
+
+
+def read_mesh_file(fname, periodic=None, tol=None):
+    """The mesh in the file fname: "mesh" in an HDF5 file (dolfin's layout), or the mesh
+    of an XDMF file (`*.xdmf`, the meshers'), numbered as dolfin numbers it
+    (femtools.dolfinx.mesh.read_mesh). `periodic` and `tol` are dolfin's concern (its
+    partition must be repaired); DOLFINx pairs periodic dofs on any partition."""
     from femtools.dolfinx.mesh import read_mesh
     return _first(read_mesh(fname, MPI.comm_world))
 

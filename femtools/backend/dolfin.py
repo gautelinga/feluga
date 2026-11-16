@@ -237,23 +237,67 @@ def hmin(mesh):
                                      op=MPI.MIN)
 
 
-def read_mesh_file(fname, periodic=None):
-    """The mesh stored as "mesh" in the HDF5 file fname.
+def global_dim(V):
+    """The space's dofs over all ranks (V.dim(); a component W.sub(i)'s alone)."""
+    return V.dim()
+
+
+def global_num_cells(mesh):
+    """The mesh's cells over all ranks."""
+    return mesh.num_entities_global(mesh.topology().dim())
+
+
+def global_num_vertices(mesh):
+    """The mesh's vertices over all ranks."""
+    return mesh.num_entities_global(0)
+
+
+def marker_counts(markers):
+    """The exterior facets of each marker over all ranks, as an array (`np.bincount`
+    of their markers, as femtools.boundaries.written_marker_counts gives a file's): of
+    `markers`, a facet MeshFunction (BoundaryMarkers). dolfin's own "on boundary" decides
+    which facets are exterior; on a mesh without ghost cells each is on one rank.
+    Collective."""
+    import numpy as np
+    from dolfin import CompiledSubDomain, MeshFunction
+    from mpi4py import MPI as _MPI
+    mesh = markers.mesh()
+    tdim = mesh.topology().dim()
+    comm = mesh.mpi_comm()
+    if comm.allreduce(int(mesh.topology().ghost_offset(tdim) < mesh.num_cells())):
+        raise RuntimeError("marker_counts: a mesh with ghost cells")
+    exterior = MeshFunction("size_t", mesh, tdim - 1, 0)
+    CompiledSubDomain("on_boundary").mark(exterior, 1)
+    values = markers.array()[exterior.array() == 1].astype(np.int64)
+    n = comm.allreduce(int(values.max(initial=-1)) + 1, op=_MPI.MAX)
+    return comm.allreduce(np.bincount(values, minlength=n))
+
+
+def read_mesh_file(fname, periodic=None, tol=None):
+    """The mesh in the file fname: "mesh" in an HDF5 file (dolfin's layout), or the mesh
+    of an XDMF file (`*.xdmf`, the meshers').
 
     `periodic` gives the axes the problem identifies. Under MPI the mesh is then read
     in blocks and partitioned by femtools.periodic_partition, so that no process holds
     a vertex of a periodic face without knowing that it is periodic (dolfin's periodic
-    dofmap would give that vertex a wrong dof). Without it, dolfin reads the mesh and
-    `repair_partition` can fix the partition afterwards.
+    dofmap would give that vertex a wrong dof); `tol`, how near a face a vertex is on it
+    (absolute; default femtools.box.FACE_TOL), as the PeriodicBox's. Without `periodic`,
+    dolfin reads the mesh and `repair_partition` can fix the partition afterwards.
     """
     comm = MPI.comm_world
     if periodic is not None and comm.size > 1:
         from femtools.box import FACE_TOL
         from femtools.periodic_partition import read_mesh
         # L=None: the upper faces are at the largest coordinates, all the partition needs.
-        return read_mesh(fname, None, periodic, comm, log=_root_print(comm), tol=FACE_TOL)
-    from dolfin import HDF5File
+        return read_mesh(fname, None, periodic, comm, log=_root_print(comm),
+                         tol=FACE_TOL if tol is None else tol)
     mesh = Mesh()
+    if fname.endswith(".xdmf"):
+        from dolfin import XDMFFile
+        with XDMFFile(mesh.mpi_comm(), fname) as f:
+            f.read(mesh)
+        return mesh
+    from dolfin import HDF5File
     with HDF5File(mesh.mpi_comm(), fname, "r") as h5f:
         h5f.read(mesh, "mesh", False)
     return mesh

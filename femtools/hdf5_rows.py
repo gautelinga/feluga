@@ -1197,3 +1197,34 @@ def _place(rows, values, lo, hi):
     if not bad:
         block[r[first]] = v[first]
     return block, bad
+
+
+def _mesh_datasets(mesh_file):
+    """`(h5 path, topology, coordinates, cell ids or None)` of a mesh file: dolfin's HDF5
+    layout (`mesh/...`, cell ids `mesh/cell_indices`), or an XDMF mesh's two DataItems
+    (the meshers', through meshio: the HDF5 beside it; a cell's id is its row). Both
+    backends' mesh readers take either (`femtools.periodic_partition.read_partitioned`,
+    `femtools.dolfinx.mesh.read_mesh`)."""
+    if not mesh_file.endswith('.xdmf'):
+        return mesh_file, 'mesh/topology', 'mesh/coordinates', 'mesh/cell_indices'
+    import xml.etree.ElementTree as ET
+    root = ET.parse(mesh_file).getroot()
+    where = {}
+    for kind in ('Geometry', 'Topology'):
+        item = root.find('.//{}/DataItem'.format(kind))
+        if item is None or item.get('Format') != 'HDF':
+            raise ValueError('{}: no HDF {} DataItem'.format(mesh_file, kind))
+        where[kind] = item.text.strip().split(':', 1)
+    (h5a, topo), (h5b, coords) = where['Topology'], where['Geometry']
+    if h5a != h5b:
+        raise ValueError('{}: topology and geometry in different files'.format(mesh_file))
+    return os.path.join(os.path.dirname(mesh_file), h5a), topo, coords, None
+
+
+def _xdmf_celltype(mesh_file):
+    """The cell type of an XDMF mesh's Topology ('tetrahedron', 'triangle', ...)."""
+    import xml.etree.ElementTree as ET
+    topo = ET.parse(mesh_file).getroot().find('.//Topology')
+    if topo is None or not topo.get('TopologyType'):
+        raise ValueError('{}: no TopologyType'.format(mesh_file))
+    return topo.get('TopologyType').lower()

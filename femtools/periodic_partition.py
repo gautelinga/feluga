@@ -36,7 +36,7 @@ import os
 
 import numpy as np
 
-from femtools.hdf5_rows import extent, find_rows, unique_rows
+from femtools.hdf5_rows import _mesh_datasets, extent, find_rows, unique_rows  # noqa: F401
 from femtools.ufc import UFC_EDGES
 
 EDGES = UFC_EDGES[3]                               # dolfin's local edge order
@@ -920,26 +920,6 @@ def repaired(mesh, L, periodic, comm, log=print, tol=None):
     return rebuild(mesh, part) if moved else mesh
 
 
-def _mesh_datasets(mesh_file):
-    """`(h5 path, topology, coordinates, cell ids or None)` of a mesh file: dolfin's HDF5
-    layout (`mesh/...`, cell ids `mesh/cell_indices`), or an XDMF mesh's two DataItems
-    (the meshers', through meshio: the HDF5 beside it; a cell's id is its row)."""
-    if not mesh_file.endswith('.xdmf'):
-        return mesh_file, 'mesh/topology', 'mesh/coordinates', 'mesh/cell_indices'
-    import xml.etree.ElementTree as ET
-    root = ET.parse(mesh_file).getroot()
-    where = {}
-    for kind in ('Geometry', 'Topology'):
-        item = root.find('.//{}/DataItem'.format(kind))
-        if item is None or item.get('Format') != 'HDF':
-            raise ValueError('{}: no HDF {} DataItem'.format(mesh_file, kind))
-        where[kind] = item.text.strip().split(':', 1)
-    (h5a, topo), (h5b, coords) = where['Topology'], where['Geometry']
-    if h5a != h5b:
-        raise ValueError('{}: topology and geometry in different files'.format(mesh_file))
-    return os.path.join(os.path.dirname(mesh_file), h5a), topo, coords, None
-
-
 def read_partitioned(mesh_file, L, periodic, comm, log=print, tol=None, families=None):
     """A mesh file read in blocks and distributed by ParMETIS, dolfin's partitioner never
     run: each rank reads a contiguous block of the cells and of the vertex rows (h5py),
@@ -1104,19 +1084,31 @@ def check_pairing(W, L, periodic, comm, tol=None, lower=None):
 def check_space_pairing(V, L, periodic, comm, what='the space', exempt=None, lower=None,
                         tol=None):
     """`check_pairing` for a Lagrange space of degree 1 or 2, scalar or vector (its first
-    component stands for the rest: the components share one dofmap layout).
+    component stands for the rest: the components share one dofmap layout), or a mixed
+    space of such, each of its components checked (Taylor-Hood as [P2, P2, P2, P1] or
+    [P2^3, P1]: the velocity's first component and the pressure).
 
     `exempt`, an (m, 3) array of this rank's node positions, is the cut exception: a class of identified face nodes may hold more than one dof when
     every node in it is exempt -- on a cut mesh's inlet or outlet, where the node the
     constraint maps them to is not in the mesh (a corner line's (L, L) and (L, 0) both
     map to (0, 0)), so dolfin leaves each its own dof."""
-    degree = V.ufl_element().degree()
+    tdim = V.mesh().topology().dim()
+    dofmaps = [(dm, _nodes_a_cell(tdim, degree)) for dm, degree in _component_dofmaps(V)]
+    _check(V.mesh(), dofmaps, L, periodic, comm, what, exempt, tol=tol, lower=lower)
+
+
+def _component_dofmaps(V):
+    """(dofmap, degree) of each Lagrange component V's pairing is checked on: a scalar
+    space's own, a vector space's first component's, a mixed space's components' (each by
+    the same rule). Raises for a degree other than 1 or 2."""
+    element = V.ufl_element()
+    if element.family() == 'Mixed':
+        return [d for i in range(V.num_sub_spaces()) for d in _component_dofmaps(V.sub(i))]
+    degree = element.degree()
     if degree not in (1, 2):
         raise ValueError('check_space_pairing handles Lagrange degree 1 or 2, not {}'
                          .format(degree))
-    dm = V.sub(0).dofmap() if V.num_sub_spaces() else V.dofmap()
-    _check(V.mesh(), [(dm, _nodes_a_cell(V.mesh().topology().dim(), degree))], L, periodic,
-           comm, what, exempt, tol=tol, lower=lower)
+    return [(V.sub(0).dofmap() if V.num_sub_spaces() else V.dofmap(), degree)]
 
 
 def _pad3(x):

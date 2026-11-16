@@ -41,16 +41,22 @@ def write(path, x, topo, owner):
         h['mesh/cell_indices'] = perm.astype(np.int64)
 
 
-def space_ok(path):
+def space_ok(path, scalars=False):
+    """Whether Taylor-Hood on the mesh at `path` pairs: [P2^3, P1] through check_pairing,
+    or (`scalars`) [P2, P2, P2, P1] through check_space_pairing, component by component."""
     mesh = df.Mesh()
     with df.HDF5File(comm, path, 'r') as h:
         h.read(mesh, 'mesh', True)
-    W = df.FunctionSpace(mesh, df.MixedElement([
-        df.VectorElement('Lagrange', mesh.ufl_cell(), 2),
-        df.FiniteElement('Lagrange', mesh.ufl_cell(), 1)]),
-        constrained_domain=periodic_box(L, tol, periodic))
+    cell = mesh.ufl_cell()
+    elements = ([df.FiniteElement('Lagrange', cell, 2)] * 3 if scalars
+                else [df.VectorElement('Lagrange', cell, 2)])
+    W = df.FunctionSpace(mesh, df.MixedElement(elements + [
+        df.FiniteElement('Lagrange', cell, 1)]), constrained_domain=periodic_box(L, tol, periodic))
     try:
-        pp.check_pairing(W, L, periodic, comm)
+        if scalars:
+            pp.check_space_pairing(W, L, periodic, comm)
+        else:
+            pp.check_pairing(W, L, periodic, comm)
         return True
     except RuntimeError:
         return False
@@ -74,6 +80,7 @@ if comm.rank == 0:
     write(path, x, topo, owner)
 comm.Barrier()
 result('crafted_space_ok', space_ok(path))
+result('crafted_scalars_ok', space_ok(path, scalars=True))
 
 fixed, moved = pp.repair(x, topo, owner, L, periodic, tol)
 bad, _ = pp.endangered(x, topo, fixed, L, periodic, tol)
@@ -84,6 +91,7 @@ if comm.rank == 0:
     write(path, x, topo, fixed)
 comm.Barrier()
 result('repaired_space_ok', space_ok(path))
+result('repaired_scalars_ok', space_ok(path, scalars=True))
 
 # `repaired` on a distributed mesh that needs a move: the crafted partition, read as
 # written, goes through the layer gather and the in-memory rebuild with the move

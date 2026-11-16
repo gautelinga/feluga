@@ -87,7 +87,6 @@ def write_function(path, f, field="delta"):
     if is_dolfinx(f):
         return _write_dolfinx(path, f, field)
     import dolfin as df
-    from femtools.hdf5_rows import write_ordered
     V = f.function_space()
     mesh = V.mesh()
     comm = mesh.mpi_comm()
@@ -112,21 +111,7 @@ def write_function(path, f, field="delta"):
                 path, int(np.isnan(full).sum())))
         write_values(path, full, n_cells, field)
         return
-    tmp = path + ".writing"
-    write_ordered(tmp, field + "/" + VALUES, rows, np.asarray(values, np.float64),
-                  n_vertices, comm, mode="w")
-    err = None
-    if df.MPI.rank(comm) == 0:
-        try:
-            import h5py
-            with h5py.File(tmp, "a") as h5:
-                mark_layout(h5[field], n_vertices, n_cells)
-            os.replace(tmp, path)
-        except Exception as e:                             # noqa: BLE001 -- shared below
-            err = "{}: {}".format(type(e).__name__, e)
-    err = comm.bcast(err, root=0)
-    if err:
-        raise RuntimeError("writing {}: {}".format(path, err))
+    _write_rows(path, field, rows, values, n_vertices, n_cells, comm)
 
 
 def read_values(path, mesh_path, field="delta"):
@@ -183,20 +168,15 @@ def _counts_dolfinx(mesh):
             int(mesh.geometry.index_map().size_global))
 
 
-def _write_dolfinx(path, f, field):
+def _write_rows(path, field, rows, values, n_vertices, n_cells, comm):
+    """Both backends' write: each value to the file row `rows` gives it
+    (`hdf5_rows.write_ordered`, which refuses a vertex nobody covered), written beside
+    `path` and renamed by rank 0 once the layout is marked; an error there raised on
+    every rank. Collective."""
     from femtools.hdf5_rows import write_ordered
-    V = f.function_space
-    f.sync()
-    dofs, nodes, rows = _p1_nodes(V)
-    # each node once (it is in ~20 cells), and from the rank that owns it
-    nodes, first = np.unique(nodes, return_index=True)
-    own = nodes < V.mesh.geometry.index_map().size_local
-    n_cells, n_vertices = _counts_dolfinx(V.mesh)
-    comm = V.mesh.comm
-    vals = np.asarray(f.x.array, dtype=np.float64)[dofs[first[own]]]
     tmp = path + ".writing"
-    write_ordered(tmp, field + "/" + VALUES, rows[nodes[own]], vals, n_vertices,
-                  comm if comm.size > 1 else None, mode="w")
+    write_ordered(tmp, field + "/" + VALUES, rows, np.asarray(values, np.float64),
+                  n_vertices, comm if comm.size > 1 else None, mode="w")
     err = None
     if comm.rank == 0:
         try:
@@ -209,6 +189,19 @@ def _write_dolfinx(path, f, field):
     err = comm.bcast(err, root=0)
     if err:
         raise RuntimeError("writing {}: {}".format(path, err))
+
+
+def _write_dolfinx(path, f, field):
+    V = f.function_space
+    f.sync()
+    dofs, nodes, rows = _p1_nodes(V)
+    # each node once (it is in ~20 cells), and from the rank that owns it
+    nodes, first = np.unique(nodes, return_index=True)
+    own = nodes < V.mesh.geometry.index_map().size_local
+    n_cells, n_vertices = _counts_dolfinx(V.mesh)
+    comm = V.mesh.comm
+    vals = np.asarray(f.x.array, dtype=np.float64)[dofs[first[own]]]
+    _write_rows(path, field, rows[nodes[own]], vals, n_vertices, n_cells, comm)
 
 
 def _read_dolfinx(path, f, field):

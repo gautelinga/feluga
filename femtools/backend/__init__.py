@@ -29,7 +29,8 @@ NAMES = (
     # UFL
     "ufl", "Coefficient", "as_vector", "split", "dot", "inner", "grad", "nabla_grad", "div",
     "lhs", "rhs", "dx", "Measure", "FacetNormal", "SpatialCoordinate", "TrialFunction",
-    "TrialFunctions", "TestFunction", "TestFunctions", "FiniteElement", "MixedElement",
+    "TrialFunctions", "TestFunction", "TestFunctions", "FiniteElement", "VectorElement",
+    "MixedElement",
     "conditional", "cos", "exp", "ge", "gt", "le", "lt", "sin", "sqrt",
     # meshes and boxes
     "Mesh", "RectangleMesh", "UnitSquareMesh", "BoxMesh", "Point", "read_mesh_file",

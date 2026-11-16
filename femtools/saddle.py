@@ -59,20 +59,6 @@ def pressure_mass_diagonal(W, mu=1.0):
     return 2.0 / (d + 2) * lumped.get_local()[pressure_dofs(W) - start]
 
 
-def _leaf_dofs(L, W, path):
-    """The owned dofs of W's scalar component at `path`, global indices of A's numbering."""
-    from femtools.backend import is_dolfinx
-    from petsc4py import PETSc
-    if is_dolfinx(W):
-        if len(path) != 1:
-            raise NotImplementedError("a component of a component on DOLFINx")
-        return L.owned_dofs(W, path[0])
-    sub = W
-    for i in path:
-        sub = sub.sub(i)
-    return np.asarray(sub.dofmap().dofs(), dtype=PETSc.IntType)
-
-
 class BlockPreconditioner:
     """What `block_preconditioner` set up and must free: `destroy()` once the solves are
     done (before the next phases' buffers; the KSP is the caller's)."""
@@ -116,7 +102,7 @@ def block_preconditioner(ksp, A, W, diag_M, amg_options, kind="shared", velocity
         raise ValueError("block_preconditioner: kind 'shared' or 'fieldsplit', not "
                          "{!r}".format(kind))
     pc.setType("fieldsplit")
-    splits = [("u{}".format(c), PETSc.IS().createGeneral(_leaf_dofs(L, W, path), comm=comm))
+    splits = [("u{}".format(c), PETSc.IS().createGeneral(L.owned_dofs(W, path), comm=comm))
               for c, path in enumerate(velocity)]
     splits.append(("p", PETSc.IS().createGeneral(p_dofs, comm=comm)))
     pc.setFieldSplitIS(*splits)

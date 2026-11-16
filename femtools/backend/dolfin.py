@@ -7,6 +7,7 @@ import numpy as np
 from dolfin import (  # noqa: F401
     as_backend_type, as_vector, BoxMesh, conditional, Constant, cos, DirichletBC, div,
     DOLFIN_EPS, DOLFIN_EPS_LARGE, dot, exp, Expression, FacetNormal, FiniteElement,
+    VectorElement,
     Function, FunctionSpace, ge, grad, gt, IndexMap, inner, le, lhs, list_timings, lt,
     Matrix, Mesh, MixedElement, MPI, nabla_grad, norm, normalize, parameters,
     PETScKrylovSolver, Point, RectangleMesh, rhs, sin, solve, SpatialCoordinate, split,
@@ -101,10 +102,13 @@ def is_lagrange(V):
 
 
 def owned_dofs(W, i):
-    """The owned dofs of component i of the mixed space W, as global indices of its
-    vectors."""
+    """The owned dofs of component i of the mixed space W (an index, or a path: (0, 1)
+    is W.sub(0).sub(1)), as global indices of its vectors."""
     from petsc4py import PETSc
-    return np.asarray(W.sub(i).dofmap().dofs(), dtype=PETSc.IntType)
+    sub = W
+    for k in (tuple(i) if isinstance(i, (tuple, list)) else (i,)):
+        sub = sub.sub(k)
+    return np.asarray(sub.dofmap().dofs(), dtype=PETSc.IntType)
 
 
 def fixed_dofs(W, bcs):

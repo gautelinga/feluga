@@ -31,10 +31,13 @@ Where dolfin's method names clash with DOLFINx's properties (`V.mesh()` against
 against `mesh.geometry.dim`), code calls the neutral helpers: `space_mesh`,
 `function_space`, `geometric_dimension`, `element_degree`, `owned_dofs`, `fixed_dofs`.
 
-Supported: scalar and mixed Lagrange spaces (and DG), periodic boxes given as a box
-spec (`lower`, `upper`, `periodic`), Dirichlet conditions on facets marked in a
-`BoundaryMarkers` or by C++ code (or pointwise), with a number, a `Constant` or a
-Function on the space as value.
+Supported: scalar and mixed Lagrange spaces (and DG), a mixed space's components
+vector ones too (`VectorElement`: Taylor-Hood as [P2^3, P1] or [P2, P2, P2, P1]),
+periodic boxes given as a box spec (`lower`, `upper`, `periodic`), Dirichlet conditions
+on facets marked in a `BoundaryMarkers` or by C++ code (or pointwise), on a scalar space
+or component or a vector component, with a number, a `Constant` (a vector one on a vector
+component) or a Function on the (scalar) space as value; `owned_dofs` of a component by
+index or by path ((0, 1): the velocity's y component).
 """
 import time
 import weakref
@@ -207,6 +210,17 @@ def FiniteElement(family, cell, degree):
     if family == "DG":
         return basix.ufl.element("Lagrange", cellname, degree, discontinuous=True)
     return basix.ufl.element(family, cellname, degree)
+
+
+def VectorElement(family, cell, degree, dim=None):
+    """dolfin's VectorElement: `dim` (default the cell's dimension) components of the
+    scalar element FiniteElement(family, cell, degree)."""
+    base = FiniteElement(family, cell, degree)
+    if dim is None:
+        dim = base.cell.topological_dimension      # a property in UFL 2026
+        dim = dim() if callable(dim) else dim
+    n = int(dim)
+    return basix.ufl.blocked_element(base, shape=(n,))
 
 
 def MixedElement(elements):
@@ -526,8 +540,8 @@ def is_lagrange(V):
 
 
 def owned_dofs(W, i):
-    """The owned dofs of component i of the mixed space W, as global indices of its
-    vectors."""
+    """The owned dofs of component i of the mixed space W (an index, or a path: (0, 1)
+    is W.sub(0).sub(1)), as global indices of its vectors."""
     U = unique_dofs(W)
     lo, hi = U.owned_range
     c = np.unique(U.compact[_mixed.component_map(W, i)])
@@ -1232,9 +1246,11 @@ Measure = ufl.Measure
 
 
 class DirichletBC:
-    """dolfin's DirichletBC(V, value, markers, marker) on a scalar space or a scalar
-    component W.sub(i) of a mixed one, `value` a number, a Constant or (on a whole
-    space) a Function on V; DirichletBC(bc) copies one. It acts on the
+    """dolfin's DirichletBC(V, value, markers, marker) on a scalar space, a scalar
+    component W.sub(i) of a mixed one, or a vector component (Taylor-Hood's velocity
+    W.sub(0), each of its components in turn); `value` a number, a Constant (a vector one
+    on a vector component, or a tuple), or (on a whole scalar space) a Function on V;
+    DirichletBC(bc) copies one. It acts on the
     compact vectors and matrices: `apply(A)` sets the constrained rows to the
     identity's (keeping the pattern, as dolfin does), `apply(b)` sets the values,
     `apply(A, b)` both. A periodic slave on the boundary is its master (on the
@@ -1246,7 +1262,7 @@ class DirichletBC:
         if len(args) == 1 and isinstance(args[0], DirichletBC):
             other = args[0]
             self.V, self.value, self._local = other.V, other.value, other._local
-            self._unique, self._rows = other._unique, other._rows
+            self._unique, self._rows, self._comp = other._unique, other._rows, other._comp
             return
         if len(args) in (3, 4) and isinstance(args[2], str):
             # dolfin's DirichletBC(V, value, "C++ code"[, method]): the facets where the
@@ -1268,21 +1284,35 @@ class DirichletBC:
         else:
             raise NotImplementedError("DirichletBC(V, value, markers, marker[, method]) or "
                                       "DirichletBC(V, value, \"C++ code\"[, method]) only")
-        if V.num_sub_spaces or V.dofmap.index_map_bs != 1:
-            raise NotImplementedError("DirichletBC on a scalar space or component only, so far")
+        # a vector component (num_sub_spaces > 0, numbered as its mixed space) acts
+        # through its scalar components, one after the other
+        comps = [V.sub(j) for j in range(V.num_sub_spaces)] if V.num_sub_spaces else [V]
+        if V.dofmap.index_map_bs != 1 or any(
+                c.num_sub_spaces or c.dofmap.index_map_bs != 1 for c in comps):
+            raise NotImplementedError("DirichletBC on a scalar space or component, or a "
+                                      "vector component of a mixed space")
         self.V = V
         self.value = value
-        # a component's dofs are numbered as its mixed space's (its parent's)
-        self._unique = U = unique_dofs(getattr(V, "_parent", V))
+        # a component's dofs are numbered as its mixed space's (its root's)
+        root = V
+        while hasattr(root, "_parent"):
+            root = root._parent
+        self._unique = U = unique_dofs(root)
         # For Lagrange elements dolfin's "geometric" and "topological" agree: the dofs on
         # the marked facets' closures.
-        if method == "pointwise":
-            dofs = compiled_dofs(V, code)
-        else:
+        if method != "pointwise":
             facets = (compiled_facets(V.mesh, code) if isinstance(args[2], str)
                       else markers.where(marker))
-            dofs = fem.locate_dofs_topological(V, V.mesh.topology.dim - 1, facets)
-        self._local = _owned_rows(U, dofs)
+        rows = []
+        for c in comps:
+            dofs = (compiled_dofs(c, code) if method == "pointwise" else
+                    fem.locate_dofs_topological(c, V.mesh.topology.dim - 1, facets))
+            rows.append(_owned_rows(U, dofs))
+        self._local = np.concatenate(rows)
+        # each row's component, for a vector value (None on a scalar space)
+        self._comp = (np.concatenate([np.full(len(r), j, dtype=np.int64)
+                                      for j, r in enumerate(rows)])
+                      if V.num_sub_spaces else None)
         self._rows = None
 
     def function_space(self):
@@ -1300,15 +1330,19 @@ class DirichletBC:
 
     def _value(self):
         """The values at the constrained owned dofs: an array in the order of `_local`
-        for a Function, else one number."""
+        for a Function or a vector value, else one number."""
         g = self.value
         if isinstance(g, Function):
-            if g.function_space is not self.V:
+            if g.function_space is not self.V or self._comp is not None:
                 raise NotImplementedError("DirichletBC: a Function value on another space")
             return g.vector()._v.getArray(readonly=True)[self._local]
-        if isinstance(g, fem.Constant):
-            return float(np.asarray(g.value))
-        return float(g)
+        v = np.asarray(g.value if isinstance(g, fem.Constant) else g, dtype=float).ravel()
+        if v.size == 1:
+            return float(v[0])
+        if self._comp is None or v.size != self.V.num_sub_spaces:
+            raise ValueError("DirichletBC: a value of {} components on a space of {}".format(
+                v.size, self.V.num_sub_spaces or 1))
+        return v[self._comp]
 
     def values(self):
         """The values at the constrained owned dofs (in the order of `_local`)."""

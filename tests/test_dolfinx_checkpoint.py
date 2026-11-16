@@ -5,7 +5,8 @@ dolfin writes on one rank, DOLFINx reads on three; DOLFINx writes on three, dolf
 on one and DOLFINx on two. dolfin also reads through the reader DOLFINx uses
 (femtools.tables.read_values, femtools.dolfin_layout.read_function): both backends' files,
 on one rank and on two. Scalar P1 and P2, mixed P2xP2 and P2xP1, a P2 vector, periodic in
-x, and P2 and Taylor-Hood (a vector P2 and a P1) without periodicity; every value read
+x, P2 without periodicity, and Taylor-Hood (a vector P2 and a P1) periodic in x too
+(2026-11-16; it was run without before); every value read
 equals the field at the reader's own dof.
 
     python3 -m pytest tests/test_dolfinx_checkpoint.py -m "dolfinx and dolfin"

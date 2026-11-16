@@ -16,11 +16,15 @@ from femtools.dolfinx.periodic import flat_collapse_map
 
 
 class _Component:
-    """Component i of mixed space W, collapsed, and its dof map into W (collapsed local
-    dof -> W local dof)."""
+    """Component i of mixed space W (an index, or a path of them: (0, 1) is W.sub(0).sub(1),
+    a vector component's own component), collapsed, and its dof map into W (collapsed
+    local dof -> W local dof)."""
 
     def __init__(self, W, i):
-        self.space, dofs = W.sub(i).collapse()
+        sub = W
+        for k in (tuple(i) if isinstance(i, (tuple, list)) else (i,)):
+            sub = sub.sub(k)
+        self.space, dofs = sub.collapse()
         self.map = flat_collapse_map(dofs)
 
 
@@ -28,9 +32,10 @@ def _component(W, i):
     """Kept in W's own dict: W, its components and its mesh form a cycle the collector
     frees with W, where a module-level cache would keep every mesh it saw."""
     held = W.__dict__.setdefault("_femtools_components", {})
-    c = held.get(i)
+    key = tuple(i) if isinstance(i, (tuple, list)) else i
+    c = held.get(key)
     if c is None:
-        c = held[i] = _Component(W, i)
+        c = held[key] = _Component(W, key)
     return c
 
 

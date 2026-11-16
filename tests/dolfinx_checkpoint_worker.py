@@ -20,7 +20,7 @@ LX, LY, NX, NY = 1.0, 2.0, 6, 10
 # name: (component degrees, periodic in x)
 SPACES = {"P2": ((2,), True), "P1": ((1,), True), "W22": ((2, 2), True),
           "W21": ((2, 1), True), "P2_walls": ((2,), False), "V2": ("vector", True),
-          "TH": ("taylor-hood", False)}   # periodic: periodic_box pairs blocked sub-spaces wrongly
+          "TH": ("taylor-hood", True)}
 
 
 def f(x, y):

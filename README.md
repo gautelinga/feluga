@@ -103,6 +103,11 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 - **`shared_amg`**: one BoomerAMG for the velocity components of a block-diagonal Stokes
   preconditioner (the scalar Laplacian held once, one hierarchy), with the component
   index sets on either backend and a check that the blocks are one.
+- **`saddle`**: the block-diagonal preconditioner of a Taylor-Hood Stokes system on either
+  backend and either layout ([P2^3, P1] or [P2, P2, P2, P1]): `pressure_mass_diagonal`
+  (diag(M) of P1 on simplices, 2/(d + 2) of the lumped mass), `block_preconditioner`
+  (BoomerAMG on the velocity components, shared or one each through fieldsplit, and Jacobi
+  on the pressure) and `solve_checked` (the solve, raising unless it converged).
 - **`nullspace`**: `constant_nullspace`, the constants on a space or on one component of
   a mixed space, attached to a matrix as its null space (set through the component's
   dofmap: setting `Function(W).sub(1).vector()` sets every component).
@@ -191,7 +196,7 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 they are used. `gradient` compiles its C++ with cppimport (pybind11, a compiler and
 `libdolfin-dev`) on import, `probes` at the first use of Probe(s) or GradProbe(s);
 `periodic`, `periodic_partition`, `plaza_periodic`, `couplings` (and the dolfin backend's
-`fixed_dofs` and `assemble(couplings=, bcs=)`), `cell_mean`, `shared_amg` and
+`fixed_dofs` and `assemble(couplings=, bcs=)`), `cell_mean`, `shared_amg` (and so `saddle`) and
 `fast_interpolation.p1_to_p2` use dolfin's JIT on first use. `dolfinx.refine` and `dolfinx.assembly`
 build their C++ with CMake, a compiler and nanobind against the installed DOLFINx on
 first use, cached in FEMTOOLS_JIT_DIR (else ~/.cache/femtools); `python3 -m

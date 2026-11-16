@@ -1,7 +1,8 @@
 """tests/test_backend_stokes.py's worker: one periodic Taylor-Hood Stokes solve written once
 against femtools.backend, on backend argv[1]. Plane Poiseuille: the unit cube, periodic in x
 and z, no-slip on y = 0 and y = 1, driven along x by a unit body force; P2 holds the parabola
-exactly, so k = mean(u_x) / f = 1/12 to the solver's tolerance. Also the global counts
+exactly, so k = mean(u_x) / f = 1/12 to the solver's tolerance. MINRES with
+femtools.saddle's block preconditioner, kind argv[2] ("fieldsplit" or "shared"). Also the global counts
 (global_dim, global_num_cells, global_num_vertices, marker_counts, fixed_dofs). Prints one
 JSON line on rank 0."""
 import importlib
@@ -13,7 +14,6 @@ import numpy as np  # noqa: E402
 from mpi4py import MPI  # noqa: E402
 from petsc4py import PETSc  # noqa: E402
 
-from femtools.ksp import diagonal_matrix  # noqa: E402
 
 N = 4
 comm = MPI.COMM_WORLD
@@ -37,38 +37,21 @@ b = L.assemble(1.0 * v[0] * L.dx)
 for bc in bcs:
     bc.apply(b)
 null.orthogonalize(b)
-lumped = L.assemble(q * L.dx)
-p_dofs = L.owned_dofs(W, 3)
-diag = 0.4 * lumped.get_local()[p_dofs - lumped.local_range()[0]]
+from femtools.saddle import block_preconditioner, pressure_mass_diagonal, solve_checked  # noqa: E402,E501
+KIND = sys.argv[2] if len(sys.argv) > 2 else "fieldsplit"
 ksp = PETSc.KSP().create(comm)
 ksp.setOperators(A, A)
 ksp.setType("minres")
 ksp.setTolerances(rtol=1e-12, max_it=5000)
-pc = ksp.getPC()
-pc.setType("fieldsplit")
-pc.setFieldSplitIS(*[(n, PETSc.IS().createGeneral(L.owned_dofs(W, c), comm=comm))
-                     for c, n in enumerate(("u0", "u1", "u2", "p"))])
-opts = PETSc.Options()
-opts["pc_fieldsplit_type"] = "additive"
-for c in range(3):
-    opts["fieldsplit_u{}_ksp_type".format(c)] = "preonly"
-    opts["fieldsplit_u{}_pc_type".format(c)] = "hypre"
-opts["fieldsplit_p_ksp_type"] = "preonly"
-opts["fieldsplit_p_pc_type"] = "none"
-ksp.setFromOptions()
-ksp.setUp()
-Dm = diagonal_matrix(diag, comm)
-pk = pc.getFieldSplitSubKSP()[3]
-pk.setOperators(Dm, Dm)
-pk.getPC().setType("jacobi")
-pk.setUp()
+pre = block_preconditioner(ksp, A, W, pressure_mass_diagonal(W), {"pc_hypre_type": "boomeramg"},
+                           kind=KIND)
 w = L.Function(W)
-ksp.solve(L.as_backend_type(b).vec(), L.as_backend_type(w.vector()).vec())
+iterations = solve_checked(ksp, L.as_backend_type(b).vec(), L.as_backend_type(w.vector()).vec())
 L.sync(w)
 uw = L.as_vector([w[i] for i in range(3)])
 mean = [L.assemble(w[i] * L.dx) for i in range(3)]          # the box's volume is 1
 out = dict(
-    reason=ksp.getConvergedReason(), iterations=ksp.getIterationNumber(), k=mean[0],
+    reason=ksp.getConvergedReason(), iterations=iterations, k=mean[0],
     cross=max(abs(mean[1]), abs(mean[2])),
     divergence=float(np.sqrt(L.assemble(L.div(uw) ** 2 * L.dx))),
     dim=int(L.global_dim(W)), pressure_dim=int(L.global_dim(W.sub(3))),
@@ -77,6 +60,6 @@ out = dict(
     fixed=int(comm.allreduce(len(L.fixed_dofs(W, bcs)))))
 if comm.rank == 0:
     print("RESULT " + json.dumps(out), flush=True)
-for o in (ksp, Dm):
-    o.destroy()
+pre.destroy()
+ksp.destroy()
 L.collect_garbage()

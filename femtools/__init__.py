@@ -26,6 +26,7 @@
     femtools.ksp         PETSc Krylov solvers set up from options under a prefix, and checked
     femtools.couplings   matrices storing only the blocks a form couples (and Dirichlet dofs)
     femtools.shared_amg  one BoomerAMG for a Stokes operator's velocity components
+    femtools.saddle      a Stokes system's block preconditioner, either backend, and its solve
     femtools.recovery    the ZZ gradient recovered in a periodic P1 space
     femtools.cell_mean   |cell mean of u| for a P1 or P2 velocity
     femtools.nullspace   the constants on a space, or on a mixed space's component, as a null space

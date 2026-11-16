@@ -48,3 +48,33 @@ def test_the_fast_path_reads_what_h5py_reads(tmp_path, layout, shape, dtype):
                 blocks = list(xdmfread.row_blocks(d, pool, ahead))
                 assert np.array_equal(np.vstack([b for _, b in blocks]), a)
                 assert [s for s, _ in blocks] == list(range(0, len(a), d.chunks[0]))
+
+
+def test_merge_series_keeps_a_grid_before_the_series(tmp_path):
+    """`xdmf.merge_series`: the first file's mesh grid, written before its series, stays;
+    its steps from the second file's first time on are the second file's; the second
+    .xdmf is gone and the merged file keeps its DOCTYPE."""
+    import numpy as np
+    from femtools.xdmf import DOCTYPE, XdmfDocument, grids, merge_series
+
+    def series(path, times, static):
+        doc = XdmfDocument(str(path))
+        if static:
+            g = doc.grid('mesh')
+            doc.topology(g, None, 'Triangle', ref=doc.dataset(
+                'Mesh/mesh/topology', np.zeros((1, 3), np.int32)), shape=(1, 3))
+            doc.geometry(g, None, ref=doc.dataset('Mesh/mesh/geometry', np.zeros((3, 2))),
+                         shape=(3, 2))
+        for t in times:
+            g = doc.grid('mesh', doc.collection())
+            doc.topology(g, None, 'Triangle', ref='x.h5:/t', shape=(1, 3))
+            doc.geometry(g, None, ref='x.h5:/g', shape=(3, 2))
+            doc.time(g, t)
+            doc.attribute(g, 'u', np.zeros((3, 1)), ref='x.h5:/u%g' % t, shape=(3, 1))
+        doc.close()
+    a, b = tmp_path / 'a.xdmf', tmp_path / 'b.xdmf'
+    series(a, [0, 1, 2], True)
+    series(b, [1.5, 2.5], False)
+    merge_series([str(a), str(b)])
+    assert [g['time'] for g in grids(str(a))] == [None, 0.0, 1.0, 1.5, 2.5]
+    assert not b.exists() and DOCTYPE in a.read_text()

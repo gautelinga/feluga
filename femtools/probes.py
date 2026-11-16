@@ -117,6 +117,11 @@ class _Collection(object):
         filename.probes, which read_dump reads (so files left by an earlier dump on
         more ranks are not). Collective."""
         filename = args[-1]
+        if len(args) == 2 and not 0 <= args[0] < self.value_size():
+            # checked here, on every rank: the C++ checks on ranks holding probes alone,
+            # and the others would wait in the gather below
+            raise IndexError("dump: no component {}, there are {}".format(
+                args[0], self.value_size()))
         super().dump(*args)
         mine = ("{}_rank{}.probe".format(os.path.basename(filename), self._comm.Get_rank())
                 if self.local_size() else None)

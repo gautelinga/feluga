@@ -132,11 +132,16 @@ class UniqueDofs:
         n_own, n_loc = imap.size_local, imap.size_local + imap.num_ghosts
         slaves = np.zeros(0, np.int32) if slaves is None else np.asarray(slaves)
         masters = np.zeros(0, np.int64) if masters is None else np.asarray(masters)
+        from femtools.hdf5_rows import agreed
         if bs > 1:  # whole blocks are slaves; work with blocks
-            if len(slaves) % bs or np.any(slaves[::bs] % bs) or np.any(masters[::bs] % bs):
+            if agreed(self.comm, len(slaves) % bs or np.any(slaves[::bs] % bs)
+                      or np.any(masters[::bs] % bs)):      # every rank raises, or none
                 raise ValueError("a blocked space's slaves must be whole blocks")
             slaves, masters = slaves[::bs] // bs, masters[::bs] // bs
 
+        # whether any rank has a periodic slave: a Function's array written directly is
+        # then not the compact vector's prolongation until it is prolonged again
+        self.any_slave = bool(agreed(self.comm, len(slaves) > 0))
         is_slave = np.zeros(n_loc, dtype=bool)
         is_slave[slaves] = True
         owned_unique = np.flatnonzero(~is_slave[:n_own])
@@ -178,7 +183,7 @@ class UniqueDofs:
             o.destroy()
         compact = vals[:n_loc]
         compact[slaves] = vals[n_loc:]
-        if np.any(compact < 0):
+        if agreed(self.comm, np.any(compact < 0)):
             raise ValueError("a slave's master is itself a slave")
         # Owned slaves too, so compact_of_global resolves any global block.
         ids.setArray(compact[:n_own].astype(float))
@@ -267,7 +272,9 @@ class UniqueDofs:
 
     def restrict(self, u, c):
         """The unique values of Function `u` into compact vector `c` (local copy)."""
-        np.take(u.x.array, self.owned_unique, out=c.getArray())
+        # DOLFINx's own array, as it stands (a backend Function's `x.array` would first
+        # bring its owned entries up to the compact vector: the write being read lost)
+        np.take(u._cpp_object.x.array, self.owned_unique, out=c.getArray())
         return c
 
     def prolong(self, c, u):

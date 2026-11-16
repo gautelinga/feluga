@@ -105,15 +105,17 @@ def owned_dofs(W, i):
 
 def fixed_dofs(W, bcs):
     """The owned dofs of space W that the Dirichlet conditions `bcs` constrain, as
-    global indices of its vectors: every one, also those whose boundary facets another
-    rank holds (gathered, as dolfin's `DirichletBC.apply` gathers them; until 2026-11-15
-    a rank's own facets' alone). Collective."""
+    global indices of its vectors, sorted, each once, PETSc's integer type (as on
+    DOLFINx): every one, also those whose boundary facets another rank holds (gathered,
+    as dolfin's `DirichletBC.apply` gathers them; until 2026-11-15 a rank's own facets'
+    alone, condition after condition). Collective."""
+    from petsc4py import PETSc
     from femtools.couplings import dolfin_fixed_owned
     start = W.dofmap().ownership_range()[0]
     found = [np.zeros(0, np.int64)]
     for bc in bcs:
         found.append(start + dolfin_fixed_owned(W, bc))
-    return np.concatenate(found)
+    return np.unique(np.concatenate(found)).astype(PETSc.IntType)
 
 
 def sync(f):
@@ -140,8 +142,8 @@ def assemble(form, tensor=None, couplings=None, bcs=()):
     blocks of the coupled components; a nonzero outside them is PETSc's error. With
     Dirichlet conditions `bcs` (a bilinear form, square) the matrix holds only the
     diagonal in their dofs' rows and columns, and is assembled with them applied
-    symmetrically (dolfin's assemble_system, a zero right-hand side: the diagonal the
-    number of cells holding the dof)."""
+    symmetrically (dolfin's SystemAssembler, a zero right-hand side: the diagonal the
+    number of cells holding the dof), its forms compiled once."""
     for c in form.coefficients():
         sync(c)
     if tensor is None and (couplings is not None or bcs):
@@ -156,13 +158,35 @@ def assemble(form, tensor=None, couplings=None, bcs=()):
         # their rows would take the element entries, which its pattern refuses
         bcs = _matrix_bcs(tensor)
     if bcs:
-        import dolfin as df
-        v = sorted(form.arguments(), key=lambda x: x.number())[0]
-        zero = df.Constant(np.zeros(v.ufl_shape)) if v.ufl_shape else df.Constant(0.0)
-        df.assemble_system(form, df.inner(zero, v) * df.dx(domain=v.ufl_domain()), list(bcs),
-                           A_tensor=tensor, b_tensor=df.PETScVector(tensor.mpi_comm()))
+        _system(form, tensor, bcs).assemble(tensor, _SYSTEMS[id(tensor)][4])
         return tensor
     return _fast_assemble(form, tensor)
+
+
+# dolfin's SystemAssembler of a matrix with conditions, made once per (matrix, form): the
+# form and a zero right-hand side compiled once (femtools.fast_assembly), as the rest of
+# assemble is -- assemble_system would build and look them up again at every call
+_SYSTEMS = None
+
+
+def _system(form, tensor, bcs):
+    """The SystemAssembler filling `tensor` with `form` under `bcs` (kept, with its
+    right-hand side's vector, while among the most recently used)."""
+    global _SYSTEMS
+    import dolfin as df
+    from femtools.fast_assembly import compiled
+    from femtools.lru import LRU
+    if _SYSTEMS is None:
+        _SYSTEMS = LRU(64)
+    held = _SYSTEMS.get(id(tensor))
+    if held is None or held[0] is not tensor or held[1] is not form:
+        v = sorted(form.arguments(), key=lambda x: x.number())[0]
+        zero = df.Constant(np.zeros(v.ufl_shape)) if v.ufl_shape else df.Constant(0.0)
+        L = df.inner(zero, v) * df.dx(domain=v.ufl_domain())
+        assembler = df.cpp.fem.SystemAssembler(compiled(form), compiled(L), list(bcs))
+        held = (tensor, form, L, assembler, df.PETScVector(tensor.mpi_comm()))
+        _SYSTEMS[id(tensor)] = held
+    return held[3]
 
 
 def _matrix_bcs(tensor):

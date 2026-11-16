@@ -13,7 +13,8 @@ def clean_env():
 
 
 def run(argv, ranks=1, env=None, timeout=900, check=True, cwd=None, text=True):
-    """`argv` in a child, under `mpirun -n ranks` when `ranks` > 1 (skipped where there
+    """`argv` in a child (the tree's femtools first on its PYTHONPATH), under `mpirun -n
+    ranks` when `ranks` > 1 (skipped where there
     is no mpirun, failed instead with FEMTOOLS_REQUIRE_MPI set, as CI sets it), one
     OpenMP thread a rank; raises with the output's tails on failure."""
     if ranks > 1 and shutil.which("mpirun") is None:
@@ -24,6 +25,10 @@ def run(argv, ranks=1, env=None, timeout=900, check=True, cwd=None, text=True):
     full = clean_env()
     full["OMP_NUM_THREADS"] = "1"
     full.update(env or {})
+    # the tree's femtools first, never an installed copy: a child's own folder is tests/
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    paths = [p for p in full.get("PYTHONPATH", "").split(os.pathsep) if p and p != root]
+    full["PYTHONPATH"] = os.pathsep.join([root] + paths)
     cmd = (["mpirun", "-n", str(ranks)] if ranks > 1 else []) + list(argv)
     proc = subprocess.run(cmd, capture_output=True, text=text, timeout=timeout, env=full,
                           cwd=cwd)

@@ -1,3 +1,6 @@
+// From fenicstools (https://github.com/mikaem/fenicstools), Copyright (C) 2011-2013
+// Mikael Mortensen; modified in femtools (NOTICE).
+// SPDX-License-Identifier: LGPL-3.0-or-later
 #ifndef __GRADPROBE_H
 #define __GRADPROBE_H
 

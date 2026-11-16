@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "femtools"
 version = "2026.2.3"
-description = "Tools for legacy-dolfin solvers: XDMF and HDF5 output, probes, gradients"
+description = "Tools for legacy-dolfin and DOLFINx solvers: one backend API, periodic spaces and refinement, assembly, transfers, XDMF and HDF5 I/O"
 requires-python = ">=3.10"
 license = {text = "LGPL-3.0-or-later"}
 classifiers = ["License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)"]
@@ -16,7 +16,9 @@ dependencies = ["numpy", "h5py"]
 [project.optional-dependencies]
 # under MPI, reading a quadratic grid back, and femtools.probes and femtools.gradient
 dolfin = ["mpi4py", "scipy", "cppimport", "pybind11", "petsc4py"]
-test = ["pytest"]
+# femtools.dolfinx's C++ (refinement, assembly) is built with CMake and nanobind
+dolfinx = ["mpi4py", "scipy", "petsc4py", "nanobind", "cmake"]
+test = ["pytest", "pytest-xdist"]
 
 [project.scripts]
 femtools-cut-facets = "femtools.facets:main"

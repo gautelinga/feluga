@@ -56,7 +56,7 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   bisected alike, serial or under MPI, with the parent-cell map. Plain refinement breaks the
   periodic pairing.
 - **`hierarchical_transfer`**: P1 and P2 fields moved to a refined mesh through ancestor
-  cells, with no point search.
+  cells, with no point search (tetrahedra).
 - **`fast_interpolation`**: `interpolate`, `dolfin.interpolate` between Lagrange spaces on
   one mesh (any degrees and value shapes, a mixed or vector Function's component,
   periodic, parallel) as one sparse product with a transfer matrix built once: 0.3 ms
@@ -100,6 +100,9 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   `assemble(a, couplings="form")` on either backend, the other blocks skipped by component
   (a nonzero among them an error). The Taylor-Hood Stokes operator keeps 44 % of the mixed
   pattern.
+- **`shared_amg`**: one BoomerAMG for the velocity components of a block-diagonal Stokes
+  preconditioner (the scalar Laplacian held once, one hierarchy), with the component
+  index sets on either backend and a check that the blocks are one.
 - **`nullspace`**: `constant_nullspace`, the constants on a space or on one component of
   a mixed space, attached to a matrix as its null space (set through the component's
   dofmap: setting `Function(W).sub(1).vector()` sets every component).
@@ -116,6 +119,9 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
   hanging it.
 - **`swap`**: a folder (a checkpoint, a result) written aside, swapped in by renaming,
   and put back by `recover` after a kill between the renames: never a mix of two.
+- **`jit`**: compiled extensions (dolfin's JIT, cppimport) built on rank 0 of the caller's
+  communicator and loaded on every rank, an error on rank 0 raised on all; **`lru`**:
+  bounded and weak caches.
 - **`memory`**: hands freed heap back to the operating system, and reports what a process
   holds; **`phases`**: a line a phase of a run (wall time, peak and current memory over
   the ranks) and `mpi_print`, on rank zero.
@@ -128,7 +134,9 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 
 - **`dolfinx.periodic`**: `periodic_box`, the slave and master dofs of a periodic box on a
   DOLFINx space (scalar, vector or mixed), paired by coordinates in parallel: the same
-  rule as `periodic.periodic_box`, without dolfinx_mpc.
+  pairing rule as `periodic.periodic_box`, without dolfinx_mpc, but its own signature
+  (`periodic_box(V, upper, periodic, lower, tol)`, `tol` relative to the box, where
+  dolfin's is absolute).
 - **`dolfinx.unique`**: `UniqueDofs`, a space's unique dofs (periodic slaves folded onto
   their masters) numbered compactly, as dolfin's `constrained_domain` numbers them,
   each rank's in a bandwidth-reducing order of the periodic cell graph (for ILU and
@@ -180,9 +188,11 @@ do not touch dolfin also serve readers without it, such as partrac's tools.
 ## Requirements
 
 `import femtools` needs numpy and h5py only. dolfin, mpi4py and scipy are imported where
-they are used. `probes` and `gradient` compile their C++ with cppimport (pybind11, a
-compiler and `libdolfin-dev`) on first import; `periodic`, `periodic_partition` and
-`plaza_periodic` use dolfin's JIT on first use. `dolfinx.refine` and `dolfinx.assembly`
+they are used. `gradient` compiles its C++ with cppimport (pybind11, a compiler and
+`libdolfin-dev`) on import, `probes` at the first use of Probe(s) or GradProbe(s);
+`periodic`, `periodic_partition`, `plaza_periodic`, `couplings` (and the dolfin backend's
+`fixed_dofs` and `assemble(couplings=, bcs=)`), `cell_mean`, `shared_amg` and
+`fast_interpolation.p1_to_p2` use dolfin's JIT on first use. `dolfinx.refine` and `dolfinx.assembly`
 build their C++ with CMake, a compiler and nanobind against the installed DOLFINx on
 first use, cached in FEMTOOLS_JIT_DIR (else ~/.cache/femtools); `python3 -m
 femtools.dolfinx.compiled` builds them ahead of a job (with FEMTOOLS_REQUIRE_EXTENSIONS set

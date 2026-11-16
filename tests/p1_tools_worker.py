@@ -2,7 +2,7 @@
 fast_interpolation.p1_to_p2, cell_mean.cell_mean_norm, recovery.recovered_vertex_gradient
 and vertex_field on a box periodic in x and y read from a mesh file. Writes
 <backend>-<ranks>.json (rank 0) and, in stage "write", the vertex field; in stage "read",
-reads the other backend's."""
+reads the other backend's (stage "write" reads its own file back)."""
 import importlib
 import json
 import os
@@ -89,6 +89,14 @@ if comm.rank == 0:
     order = first[np.lexsort(np.round(X[first], 9).T[::-1])]
     np.savez(os.path.join(folder, "grad-{}-{}.npz".format(backend, comm.size)),
              x=X[order], g=G[order])
+
+# a linear field's recovered gradient is its gradient, to round-off (lumped averages of a
+# constant), on a space with no periodic constraint (a linear field is not periodic)
+A = np.array([0.7, -1.3, 2.1])
+lin = L.interpolate(L.Expression("{}*x[0] + {}*x[1] + {}*x[2] + 0.4".format(*A), degree=1),
+                    L.FunctionSpace(mesh, "CG", 1))
+glin = recovery.recovered_vertex_gradient(mesh, lin, L.FunctionSpace(mesh, "CG", 1))
+out["recovery_linear"] = gmax(glin - A) / np.abs(A).max()
 
 # the vertex field: a P1 Function whose value at each vertex is the vertex's row in the
 # mesh file, written by vertex and read back by either backend

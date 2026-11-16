@@ -356,7 +356,8 @@ def rewrite(path, comm=None, share=None):
         return _rewrite(path, comm, share)
     if comm is None or comm.Get_size() == 1:
         return _rewrite(path, None, share)
-    return comm.bcast(_rewrite(path, None, share) if comm.Get_rank() == 0 else None, root=0)
+    from femtools.jit import on_rank0           # rank 0's error raised on every rank
+    return on_rank0(comm, lambda: _rewrite(path, None, share), "rewrite " + path)
 
 
 def _survey_for(path, share):
@@ -365,7 +366,10 @@ def _survey_for(path, share):
     import os
     if os.path.islink(path):
         return SKIPPED, "a symlink"
-    st = os.stat(path)
+    try:
+        st = os.stat(path)
+    except OSError as e:                    # answered, not raised: rank 0 alone is here
+        return 1, "NOT REPLACED: {}: {}".format(type(e).__name__, e)
     if st.st_nlink > 1:
         return SKIPPED, "{} hard links".format(st.st_nlink)
     try:
@@ -395,7 +399,8 @@ def _rewrite(path, comm, share=WORTH_SHARE):
         return first
     names, vlen, (atime, mtime, mode, size) = first
     if comm is not None and vlen:
-        return comm.bcast(_rewrite(path, None, share) if rank0 else None, root=0)
+        from femtools.jit import on_rank0
+        return on_rank0(comm, lambda: _rewrite(path, None, share), "rewrite " + path)
 
     def replace():
         os.utime(tmp, ns=(atime, mtime))

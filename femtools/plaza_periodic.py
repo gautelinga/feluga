@@ -477,14 +477,15 @@ def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
     """
     import numpy as np
     require_cells_on_every_rank(mesh, "refine_periodic")
-    new_mesh = df.Mesh()
+    new_mesh = df.Mesh(mesh.mpi_comm())        # on the mesh's communicator, not the world's
     cap, rank_cap = int(max_cells or 0), int(max_rank_cells or 0)
     if cap < 0 or rank_cap < 0:
         raise ValueError("max_cells and max_rank_cells must be positive, got {} and {}"
                          .format(max_cells, max_rank_cells))
     from femtools.hdf5_rows import agreed
     from femtools.periodic import box_lower, xyz
-    from femtools.periodic_core import box_scale
+    from femtools.periodic_core import box_scale, check_box
+    check_box(box, mesh.geometry().dim(), lower)
     lower = box_lower(mesh, axes, lower)
     frozen = np.zeros(0, np.int64) if frozen is None else \
         np.asarray(frozen).ravel().astype(np.int64)

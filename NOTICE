@@ -20,22 +20,26 @@ Code derived from fenicstools
 =============================
 
 The following files come from fenicstools (https://github.com/mikaem/fenicstools),
-Copyright (C) 2011-2013 Mikael Mortensen <mikaem@math.uio.no>, and keep their headers:
+Copyright (C) 2011-2013 Mikael Mortensen <mikaem@math.uio.no>; each carries a copyright
+line and `SPDX-License-Identifier: LGPL-3.0-or-later`:
 
 - femtools/probes.py and femtools/cpp/Probe.{h,cpp}, Probes.{h,cpp}, GradProbe.{h,cpp},
-  GradProbes.{h,cpp}, probe11.cpp: moved from addictif (addictif/common/fenicstools),
-  whose copy is a modified fork of fenicstools' Probes. Relative to upstream it adds
-  GradProbe and GradProbes and constructors that reuse already-located probes, and drops
-  StatisticsProbe(s). femtools changes how the module is compiled: cppimport builds
-  cpp/probe11.cpp from the file's own path when femtools.probes is imported.
-- femtools/gradient.py and femtools/cpp/gradient_weight.cpp: copied from upstream
-  fenicstools commit 03657ff (fenicstools/WeightedGradient.py and
-  fenicstools/fem/gradient_weight.cpp). femtools changes: the module is compiled from
-  the file's own path, `compute_weighted_gradient_matrix` and
-  `compute_DG0_to_CG_weight_matrix` are exposed at module level, and
-  `weighted_gradient_matrix` with a scalar index passes G where upstream passed an
-  undefined name A, and `dof_owner` throws for a dof in no process's range where
-  upstream fell off the end of the function without a return value.
+  GradProbes.{h,cpp}, ProbeCollection.h, probe11.cpp: moved from addictif
+  (addictif/common/fenicstools), whose copy is a modified fork of fenicstools' Probes.
+  Relative to upstream it adds GradProbe and GradProbes and constructors that reuse
+  already-located probes, and drops StatisticsProbe(s). femtools changes: the
+  collection code Probes and GradProbes share is in ProbeCollection.h; cppimport builds
+  cpp/probe11.cpp from the file's own path at the first use of Probe(s) or
+  GradProbe(s); a dump's files are listed (filename.probes) and read back by read_dump.
+- femtools/gradient.py and femtools/cpp/gradient_weight.cpp: from upstream fenicstools
+  commit 03657ff (fenicstools/WeightedGradient.py and fenicstools/fem/gradient_weight.cpp).
+  femtools changes: the module is compiled from the file's own path, on rank 0 of the
+  caller's communicator; `compute_weighted_gradient_matrix` and
+  `compute_DG0_to_CG_weight_matrix` are exposed at module level;
+  `weighted_gradient_matrix` takes a direction or a tuple of them, building the
+  averaging matrix once; the cell weights are summed on owned cells only, a ghost cell
+  being its owner's, and exchanged between the ranks by all-to-all where upstream looked
+  each dof's owner up.
 
 Upstream's licence statements differ. The file headers say
 `__license__ = "GNU Lesser GPL version 3 or any later version"` (Probe.py,

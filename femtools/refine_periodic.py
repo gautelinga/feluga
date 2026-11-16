@@ -15,8 +15,9 @@ bisects identified faces alike, and checks the faces are congruent after it. The
 fallback: marking every cell on the identified faces also keeps them congruent, but
 refines that layer uniformly on every pass, and the cost compounds.
 
-Runs under `mpirun`: `congruent` gathers the face nodes across ranks and deduplicates them
-by position before comparing (a rank-boundary vertex is ghosted onto more than one rank).
+Runs under `mpirun`: `congruent` hashes the face nodes to ranks by position and compares
+them there, no rank holding a face (a rank-boundary vertex, ghosted onto more than one
+rank, is deduplicated on the way).
 """
 
 import dolfin as df
@@ -55,9 +56,10 @@ def compute_box(mesh):
 def dorfler_threshold(indicator_, theta, comm=None, iterations=60):
     """The bulk-chasing threshold of a DG0 indicator Function
     (`periodic_core.dorfler_threshold_values` of its local values; `comm` default the
-    world)."""
-    return dorfler_threshold_values(indicator_.vector().get_local(), theta,
-                                    comm or df.MPI.comm_world, iterations)
+    indicator's mesh's)."""
+    if comm is None:
+        comm = indicator_.function_space().mesh().mpi_comm()
+    return dorfler_threshold_values(indicator_.vector().get_local(), theta, comm, iterations)
 
 
 def refine_congruent(mesh, cell_markers, box, axes, redistribute=False, max_cells=None,

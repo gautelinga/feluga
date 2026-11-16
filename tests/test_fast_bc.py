@@ -141,13 +141,15 @@ def fixed_reference(V, bcs):
 
 @pytest.mark.parametrize("periodic", [False, True])
 def test_fixed_dofs(periodic):
-    """The dolfin backend's `fixed_dofs`: the owned global dofs of every condition, in
-    order, as int64; none for no conditions."""
+    """The dolfin backend's `fixed_dofs`: the owned global dofs of the conditions, sorted
+    and each once, as PETSc's integers (as on DOLFINx); none for no conditions."""
     from femtools.backend.dolfin import fixed_dofs
     V = space(periodic)
     bcs = overlapping(V)
     got = fixed_dofs(V, bcs)
-    assert got.dtype == np.int64 and got.tolist() == fixed_reference(V, bcs)
+    from petsc4py import PETSc
+    assert got.dtype == PETSc.IntType
+    assert got.tolist() == sorted(set(fixed_reference(V, bcs)))
     assert fixed_dofs(V, []).shape == (0,)
 
 

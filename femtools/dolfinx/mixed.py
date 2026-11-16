@@ -6,17 +6,13 @@ counterpart of `femtools.mixed`'s subspace and subfunction.
     set_subfunction(q, 0, value)     # and back, from a Function on S
 
 Each component's collapsed space and dof map are built once per mixed space and component
-and shared by every caller (the CAPACITY most recently used are kept). Values move as
+and shared by every caller; they are kept on the mixed space, and go with it. Values move as
 plain index copies over owned and ghost dofs, so Functions holding periodic slaves (see
 femtools.dolfinx.unique) carry them along.
 """
 import numpy as np
 
 from femtools.dolfinx.periodic import flat_collapse_map
-from femtools.lru import LRU
-
-CAPACITY = 64
-_COMPONENTS = LRU(CAPACITY)
 
 
 class _Component:
@@ -24,16 +20,17 @@ class _Component:
     dof -> W local dof)."""
 
     def __init__(self, W, i):
-        self.W = W  # held, so that id(W) is not reused while it is a key
         self.space, dofs = W.sub(i).collapse()
         self.map = flat_collapse_map(dofs)
 
 
 def _component(W, i):
-    key = (id(W), i)
-    c = _COMPONENTS.get(key)
-    if c is None or c.W is not W:
-        c = _COMPONENTS[key] = _Component(W, i)
+    """Kept in W's own dict: W, its components and its mesh form a cycle the collector
+    frees with W, where a module-level cache would keep every mesh it saw."""
+    held = W.__dict__.setdefault("_femtools_components", {})
+    c = held.get(i)
+    if c is None:
+        c = held[i] = _Component(W, i)
     return c
 
 

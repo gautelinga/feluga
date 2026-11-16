@@ -198,6 +198,7 @@ def cell_mean_norm(u, DG0):
     if is_dolfinx(DG0):
         return _cell_mean_norm_dolfinx(u, DG0)
     import dolfin as df
+    _check_legacy(u)                         # before compiling, the same on every rank
     if _MODULE[0] is None:
         from femtools.jit import dolfin_module
         _MODULE[0] = dolfin_module(_CODE, DG0.mesh().mpi_comm(), "femtools.cell_mean")
@@ -214,6 +215,27 @@ def cell_mean_norm(u, DG0):
             _MODULE[0].CellMeanNormComponents(), ux=ux, uy=uy, uz=uz, degree=0), DG0)
     return df.interpolate(
         df.CompiledExpression(_MODULE[0].CellMeanNorm(), u=u, degree=0), DG0)
+
+
+def _check_legacy(u):
+    """Refuse, on every rank alike, anything but a P1 or P2 Lagrange velocity of three
+    components on tetrahedra: the compiled weights know no other element, and a 2D P2
+    vector (12 dofs) would read as three P1 components (and the C++ throws only on the
+    ranks holding cells)."""
+    comps = scalar_components(u)
+    spaces = [_space(c) for c in comps] if comps is not None else [_space(u)]
+    for V in spaces:
+        el = V.ufl_element()
+        mesh = V.mesh()
+        shape = el.value_shape()
+        base = el.sub_elements()[0] if shape else el
+        ok = (mesh.ufl_cell().cellname() == "tetrahedron"
+              and shape == (() if comps is not None else (3,))
+              and base.family() in ("Lagrange", "Q") and base.degree() in (1, 2))
+        if not ok:
+            raise ValueError("cell_mean_norm: the cell-mean weights are known for a P1 or P2 "
+                             "Lagrange velocity of three components on tetrahedra, not {} "
+                             "on {}".format(el, mesh.ufl_cell().cellname()))
 
 
 def scalar_components(u):

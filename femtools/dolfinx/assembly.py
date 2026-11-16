@@ -40,8 +40,9 @@ _INSERTER = []
 
 def _domains_key(a, comm):
     """What decides the pattern of form `a` besides its spaces: the entities each of its
-    integrals runs over, on every rank (DOLFINx couples all dofs of those entities,
-    whatever the integrand). The same on every rank. Collective."""
+    integrals runs over on this rank (DOLFINx couples all dofs of those entities,
+    whatever the integrand): a local key, `create_matrix` deciding a reuse on every rank
+    together."""
     h = hashlib.blake2b(digest_size=16)
     cpp = a._cpp_object
     for itype in sorted(cpp.integral_types, key=lambda t: t.name):
@@ -49,7 +50,7 @@ def _domains_key(a, comm):
             d = np.ascontiguousarray(cpp.domains(itype, i))
             h.update("{}:{}:{}:{}".format(itype.name, i, d.dtype, d.shape).encode())
             h.update(d.tobytes())
-    return tuple(comm.allgather(h.digest()))
+    return h.digest()
 
 
 def create_matrix(a, rows, cols=None, couplings=None, bcs=()):
@@ -83,7 +84,7 @@ def create_matrix(a, rows, cols=None, couplings=None, bcs=()):
     if couplings is not None or bcs:
         filt = _Couplings(a, couplings, rows is cols, rows, bcs)
     patterns = _PATTERNS.get((rows, cols), dict)
-    key = _domains_key(a, comm) + (None if filt is None else filt.key,)
+    key = (_domains_key(a, comm), None if filt is None else filt.key)
     nnz = patterns.get(key)
     if not comm.allreduce(nnz is not None, op=MPI.LAND):
         nnz = patterns[key] = _preallocation(a, rows, cols, filt)
@@ -117,6 +118,9 @@ class _Couplings:
                              .format(self.mask.shape, n0, n1))
         self.square = bool(square)
         self.has_bcs = len(bcs) > 0
+        if any(getattr(bc, "_unique", U) is not U for bc in bcs):     # the same on every rank
+            raise ValueError("a Dirichlet condition on another space's dofs than the "
+                             "matrix's")
         # the dofs the conditions constrain: owned rows (compact, global) and every local
         # dof (owned and ghost) whose unique dof is one of them
         self.fixed_rows = np.unique(np.concatenate(
@@ -125,8 +129,8 @@ class _Couplings:
         self.fixed = _fixed_local(U, self.fixed_rows) if len(bcs) else \
             np.zeros(0, dtype=np.int8)
         h = hashlib.blake2b(self.fixed_rows.tobytes(), digest_size=16).digest()
-        self.key = (self.mask.shape, self.mask.tobytes(), self.square,
-                    tuple(U.comm.allgather(h)))
+        self.key = (self.mask.shape, self.mask.tobytes(), self.square, h)   # local, as
+        #                                                                      _domains_key
 
     def pairs(self, R_cells, C_cells, diagonal):
         """Which (row, column) entries of each cell's element matrix are kept: (m, r, c);
@@ -335,10 +339,22 @@ def assemble_matrix(K, a):
     if total:
         raise RuntimeError("assemble_matrix: {} nonzero values of the form couple components "
                            "the matrix's couplings leave out".format(total))
-    if comm.allreduce(missed, op=MPI.SUM):
+    missed = comm.allreduce(missed, op=MPI.SUM)
+    if missed:
         raise RuntimeError("assemble_matrix: {} values of the form fall outside the "
-                           "matrix's pattern".format(comm.allreduce(missed, op=MPI.SUM)))
-    K.assemble()
+                           "matrix's pattern".format(missed))
+    # a value sent to another rank's row (PETSc's stash) is refused there, inside the
+    # assembly on that rank alone: the error is shared, so every rank raises
+    from petsc4py import PETSc
+    error = None
+    try:
+        K.assemble()
+    except PETSc.Error as e:
+        error = str(e)
+    from femtools.hdf5_rows import agreed
+    if agreed(comm, error is not None):
+        raise RuntimeError("assemble_matrix: PETSc refused a value sent to another rank's "
+                           "row{}".format(": " + error if error else " (on another rank)"))
     return K
 
 

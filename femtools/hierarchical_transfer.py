@@ -44,17 +44,26 @@ def compose(ancestors, parent):
     return ancestors[parent]
 
 
-def first_incident_cell(cells, n_vertices):
+def _comm_of(mesh):
+    """A mesh's communicator, or None for a stand-in without one (the slicer's): one rank."""
+    f = getattr(mesh, "mpi_comm", None)
+    return f() if callable(f) else None
+
+
+def first_incident_cell(cells, n_vertices, comm=None):
     """One incident cell per vertex -- any one; the fields evaluated are continuous.
 
-    Deterministic (the lowest-indexed incident cell) so reruns are bit-identical.
+    Deterministic (the lowest-indexed incident cell) so reruns are bit-identical. A vertex
+    without a cell raises, on every rank of `comm` together (its callers go on to
+    collectives).
     """
     owner = np.full(n_vertices, -1, dtype=np.int64)
     flat_v = cells.ravel()
     flat_c = np.repeat(np.arange(len(cells), dtype=np.int64), cells.shape[1])
     # reversed assignment: the FIRST occurrence wins after the dust settles
     owner[flat_v[::-1]] = flat_c[::-1]
-    if (owner < 0).any():
+    from femtools.hdf5_rows import agreed
+    if agreed(comm, (owner < 0).any()):
         raise ValueError("{} vertices have no incident cell; a non-ghosted dolfin "
                          "mesh should not produce that".format(int((owner < 0).sum())))
     return owner
@@ -371,7 +380,7 @@ def eval_through_chain(source, mesh, global_cells, z_offset=None):
     `z_offset`, one per local cell, is subtracted from z first (None, the default: no
     shift).
     """
-    fc = first_incident_cell(mesh.cells(), len(mesh.coordinates()))
+    fc = first_incident_cell(mesh.cells(), len(mesh.coordinates()), _comm_of(mesh))
     return source.eval_at(_lowered(mesh.coordinates(), fc, z_offset),
                           np.asarray(global_cells)[fc])
 
@@ -410,9 +419,10 @@ def p2_entity_nodes(mesh):
     cells = mesh.cells()
     edge_v = connectivity(mesh, 1, 0)
     cell_e = connectivity(mesh, 3, 1)
-    return [(x, first_incident_cell(cells, len(x))),
+    comm = _comm_of(mesh)
+    return [(x, first_incident_cell(cells, len(x), comm)),
             (0.5 * (x[edge_v[:, 0]] + x[edge_v[:, 1]]),
-             first_incident_cell(cell_e, len(edge_v)))]
+             first_incident_cell(cell_e, len(edge_v), comm))]
 
 
 def eval_p2_through_chain(source, mesh, global_cells, z_offset=None):
@@ -455,8 +465,9 @@ def as_p2_function(mesh, values_by_dim, width=3, name="u"):
     values = f.vector().get_local()
     for dim, vals in enumerate(values_by_dim):
         block = entity_dofs(space, dim).reshape(-1, width)
-        if width > 1 and len(block) and not np.array_equal(
-                block[:, 1:], block[:, :1] + np.arange(1, width)):
+        from femtools.hdf5_rows import agreed
+        if agreed(_comm_of(mesh), width > 1 and len(block) and not np.array_equal(
+                block[:, 1:], block[:, :1] + np.arange(1, width))):
             raise ValueError(
                 "the P2 dofmap is not blocked by node, so a node's components are not "
                 "consecutive and the ownership test on the first one does not cover "
@@ -486,7 +497,7 @@ def entity_dofs(space, dim):
     held = (np.asarray(mesh.cells(), dtype=np.int64) if dim == 0
             else connectivity(mesh, D, 1).astype(np.int64))       # (cells, entities)
     n = mesh.num_entities(dim)
-    cell = first_incident_cell(held, n)
+    cell = first_incident_cell(held, n, _comm_of(mesh))
     local = np.argmax(held[cell] == np.arange(n)[:, None], axis=1)
     table = np.array([dm.tabulate_entity_dofs(dim, j) for j in range(held.shape[1])],
                      dtype=np.int64).reshape(held.shape[1], dm.num_entity_dofs(dim))
@@ -509,6 +520,6 @@ def transfer_p1_field(mesh_old, vertex_values_old, mesh_new, parent):
     """
     cells_new = mesh_new.cells()
     x_new = mesh_new.coordinates()
-    fc = first_incident_cell(cells_new, len(x_new))
+    fc = first_incident_cell(cells_new, len(x_new), _comm_of(mesh_new))
     return p1_eval(mesh_old.coordinates(), mesh_old.cells(), vertex_values_old,
                    parent[fc], x_new)

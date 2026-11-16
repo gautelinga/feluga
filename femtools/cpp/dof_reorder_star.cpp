@@ -170,7 +170,8 @@ void DofMapBuilder::compute_node_reordering(
     node_remap.resize(graph.size());
     for (std::size_t i = 0; i < node_remap.size(); ++i)
       node_remap[i] = i;
-    std::random_shuffle(node_remap.begin(), node_remap.end());
+    std::mt19937 rng;      // std::random_shuffle is gone from C++17; a fixed seed, as rand()'s
+    std::shuffle(node_remap.begin(), node_remap.end(), rng);
   }
   else
   {

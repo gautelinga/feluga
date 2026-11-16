@@ -62,6 +62,7 @@ from femtools.dolfinx.boundary_markers import BoundaryMarkers, compiled_facets  
 from femtools.dolfinx import mixed as _mixed
 from femtools.dolfinx.periodic import flat_collapse_map, periodic_box
 from femtools.dolfinx.unique import UniqueDofs
+from femtools.hdf5_rows import agreed
 from femtools.lru import LRU
 
 name = "dolfinx"
@@ -560,7 +561,7 @@ class Vector:
         self._v.axpy(a, x._v)
 
     def norm(self, norm_type="l2"):
-        return self._v.norm(_VEC_NORMS[norm_type])
+        return self._v.norm(_VEC_NORMS[norm_type.lower()])
 
     def sum(self):
         return self._v.sum()
@@ -650,6 +651,11 @@ class Matrix:
     def __init__(self, A):
         if isinstance(A, Matrix):
             self._m = A._m.duplicate(copy=True)
+            # its couplings and conditions (femtools.dolfinx.assembly), which the PETSc
+            # copy does not carry: assembled into, the copy is filtered as A is
+            filt = A._m.getAttr(_assembly._FILTER)
+            if filt is not None:
+                self._m.setAttr(_assembly._FILTER, filt)
         elif isinstance(A, PETSc.Mat):
             self._m = A
         else:
@@ -676,7 +682,7 @@ class Matrix:
         self._m.axpy(a, B._m, structure)
 
     def norm(self, norm_type="frobenius"):
-        return self._m.norm(_MAT_NORMS[norm_type])
+        return self._m.norm(_MAT_NORMS[norm_type.lower()])
 
     def __mul__(self, x):
         y = self._m.createVecLeft()
@@ -702,11 +708,21 @@ class _Values(dolfinx.la.Vector):
         super().__init__(cpp)
         self._owner = weakref.ref(owner)
 
+    @property
+    def array(self):
+        """DOLFINx's local array, its owned entries first brought up to the compact
+        vector's values (locally, no communication): a write through it then starts
+        from the Function's values, not from what the array held before."""
+        owner = self._owner()
+        if owner is not None:
+            owner._refresh_owned()
+        return self._cpp_object.array
+
     def scatter_forward(self):
         super().scatter_forward()
         owner = self._owner()
         if owner is not None:
-            owner.restrict()
+            owner.restrict(ghosts_fresh=True)
 
 
 def _point_evaluation(V):
@@ -747,8 +763,10 @@ class _WritesBack(fem.Function):
         self._x = _Values(self._cpp_object.x, owner)
 
     def interpolate(self, u0, *args, **kwargs):
+        owner = self._owner()
+        owner._refresh_owned()        # a component's interpolation keeps the others' values
         _interpolate(self, _interpolant(u0), *args, **kwargs)
-        self._owner().restrict()
+        owner.restrict()
         return self
 
 
@@ -761,6 +779,7 @@ class Function(_WritesBack):
         self._unique = unique_dofs(V)
         self._vector = Vector(self._unique.create_vector())
         self._synced = None        # the compact vector's PETSc state DOLFINx's array has
+        self._owned_state = None   # ... the state its owned entries have (`_refresh_owned`)
         self._track(self)
 
     def _owner(self):
@@ -769,21 +788,46 @@ class Function(_WritesBack):
     def vector(self):
         return self._vector
 
+    def _stale(self):
+        """Whether the compact vector changed since DOLFINx's array had it (this rank)."""
+        return self._vector._v.stateGet() != self._synced
+
+    def _prolong(self):
+        v = self._vector._v
+        self._unique.prolong(v, self)
+        self._synced = self._owned_state = v.stateGet()
+
     def sync(self):
         """The compact vector into DOLFINx's array (owned, ghost and slave dofs), when it
-        changed since (PETSc counts every write to a vector: its state)."""
-        v = self._vector._v
-        if v.stateGet() != self._synced:
-            self._unique.prolong(v, self)
-            self._synced = v.stateGet()
+        changed since on any rank (PETSc counts every write to a vector: its state).
+        Collective: the prolongation is a scatter, so every rank takes part when one
+        rank's vector changed (a write on some ranks only)."""
+        if agreed(self._unique.comm, self._stale()):
+            self._prolong()
         return self
 
-    def restrict(self):
-        """DOLFINx's array into the compact vector, after it was written directly."""
+    def _refresh_owned(self):
+        """The owned entries of DOLFINx's array from the compact vector, when it changed
+        since: local, no communication (ghosts and slaves wait for `sync`)."""
+        state = self._vector._v.stateGet()
+        if state != self._synced and state != self._owned_state:
+            self._cpp_object.x.array[self._unique.owned_unique] = \
+                self._vector._v.getArray(readonly=True)
+            self._owned_state = state
+
+    def restrict(self, ghosts_fresh=False):
+        """DOLFINx's array into the compact vector, after it was written directly. The
+        array counts as the vector's prolongation only when its ghosts were just updated
+        (`ghosts_fresh`: a `scatter_forward`) and the space has no periodic slaves (on any
+        rank): else it is prolonged again at the next use -- a component's interpolation
+        leaves the other components' ghosts as they were, and slaves hold what was
+        written at their own positions, not their masters'."""
         v = self._vector._v
         self._unique.restrict(self, v)
         v.stateIncrease()
-        self._synced = v.stateGet()
+        self._owned_state = v.stateGet()
+        self._synced = self._owned_state if ghosts_fresh and not self._unique.any_slave \
+            else None
         return self
 
     def sub(self, i):
@@ -818,9 +862,16 @@ class _ComponentView(_WritesBack):
         return self._parent
 
 
+def _function_of(f):
+    """The backend Function whose arrays f's are: f, or a component view's parent."""
+    if isinstance(f, Function):
+        return f
+    return getattr(f, "_parent", None)
+
+
 def sync(f):
     """Bring DOLFINx's array of f up to date with its compact vector (if f is a
-    backend Function, or a view of one's component); returns f."""
+    backend Function, or a view of one's component); returns f. Collective."""
     if isinstance(f, Function):
         f.sync()
     elif hasattr(f, "_parent"):
@@ -965,8 +1016,35 @@ class Expression(Function):
 # --- assembly --------------------------------------------------------------------------
 
 CAPACITY = 256
-_FORMS = LRU(CAPACITY)         # by form object: (form, its _Compiled)
-_BY_CONTENT = LRU(CAPACITY)    # by equal form (UFL's equality: the same coefficients)
+
+
+def _held(obj, name, capacity):
+    """An LRU kept as attribute `name` of `obj` (a mesh or a space), made on first use.
+    A cache held by what its entries are built on goes with it: entry and holder form a
+    cycle Python's collector frees once nothing else holds them, where a module-level
+    cache would keep every mesh it ever saw (a refinement ladder's every level). `obj`
+    None (a form on no mesh found): one module-level LRU per name."""
+    if obj is None:
+        return _UNHELD.setdefault(name, LRU(capacity))
+    cache = obj.__dict__.get(name)
+    if cache is None:
+        cache = LRU(capacity)
+        setattr(obj, name, cache)
+    return cache
+
+
+_UNHELD = {}
+
+
+def _form_mesh(form):
+    """The mesh of a UFL form's arguments or coefficients (None if it has neither)."""
+    for a in form.arguments():
+        return a.ufl_function_space().mesh
+    for c in form.coefficients():
+        V = getattr(c, "function_space", None)
+        if V is not None and not callable(V):
+            return V.mesh
+    return None
 
 
 def _for_dolfinx(form):
@@ -999,6 +1077,9 @@ class _Compiled:
         self.markers = [(itg.subdomain_data(), itg.subdomain_data().version)
                         for itg in form.integrals()
                         if isinstance(itg.subdomain_data(), BoundaryMarkers)]
+        # the global quadrature degree it was compiled at: a change compiles it again, as
+        # dolfin's JIT signature includes it
+        self.degree = parameters["form_compiler"]["quadrature_degree"]
         self.cpp = fem.form(_for_dolfinx(form), jit_options=_jit_options())
         self.coefficients = [c for c in form.coefficients()
                              if isinstance(c, Function) or hasattr(c, "_parent")]
@@ -1013,22 +1094,40 @@ class _Compiled:
 def compiled(form):
     """The compiled form of a UFL form, made once per equal form (while among the
     CAPACITY most recently used): a form made anew each step is compiled once. Looked
-    up by the form object first, then by its content."""
-    held = _FORMS.get(id(form))
+    up by the form object first, then by its content. The caches are the mesh's (`_held`):
+    they go with it."""
+    mesh = _form_mesh(form)
+    by_object = _held(mesh, "_femtools_forms", CAPACITY)       # (form, its _Compiled)
+    by_content = _held(mesh, "_femtools_form_contents", CAPACITY)   # by equal form
+    held = by_object.get(id(form))
     entry = held[1] if held is not None and held[0] is form else None
     if entry is None:
-        entry = _BY_CONTENT.get(form)
-    if entry is None or any(m.version != v for m, v in entry.markers):
-        entry = _BY_CONTENT[form] = _Compiled(form)
-        if _BY_CONTENT.evicted == 1 and entry.comm.rank == 0:
+        entry = by_content.get(form)
+    if entry is None or any(m.version != v for m, v in entry.markers) or \
+            entry.degree != parameters["form_compiler"]["quadrature_degree"]:
+        entry = by_content[form] = _Compiled(form)
+        if by_content.evicted == 1 and entry.comm.rank == 0:
             import sys
             print("femtools: more than {} distinct forms compiled. Each holds DOLFINx's "
                   "integration entities; a form made with other values each time (a "
                   "Python number where a Constant belongs) is compiled again every "
                   "time.".format(CAPACITY), file=sys.stderr)
-    _FORMS[id(form)] = (form, entry)      # the form held: its id is not reused
-    for c in entry.coefficients:
-        sync(c)
+    by_object[id(form)] = (form, entry)   # the form held: its id is not reused
+    # the coefficients brought up to date: decided on every rank together, in one
+    # reduction (a prolongation is a scatter, and a write may have been on some ranks)
+    owners = list({id(o): o for o in (_function_of(c) for c in entry.coefficients)
+                   if o is not None}.values())
+    for o in owners:
+        if isinstance(o, Expression):
+            o.sync()                  # its code evaluated into its arrays (local), first
+    if owners:
+        stale = np.array([o._stale() for o in owners], dtype=np.int64)
+        if entry.comm.size > 1:
+            from femtools.hdf5_rows import _int_reduce
+            stale = _int_reduce(entry.comm, stale, "max")
+        for o, s in zip(owners, stale):
+            if s:
+                o._prolong()
     for c in entry.constants:
         c.value = c._source.value
     return entry
@@ -1068,9 +1167,10 @@ def assemble(form, tensor=None, couplings=None, bcs=()):
 def assemble_matrix(form, bcs=()):
     """The matrix of the bilinear `form` with the Dirichlet conditions `bcs` applied,
     assembled once per equal form and conditions (femtools.fast_assembly.constant_matrix):
-    the same Matrix is returned to every caller."""
+    the same Matrix is returned to every caller (kept by the form's mesh, `_held`)."""
     from femtools.fast_assembly import constant_matrix
-    return constant_matrix(form, bcs, assemble)
+    return constant_matrix(form, bcs, assemble,
+                           cache=_held(_form_mesh(form), "_femtools_matrices", 64))
 
 
 # --- boundaries and Dirichlet conditions -----------------------------------------------
@@ -1250,19 +1350,16 @@ def subspace(W, i):
     return S
 
 
-_SUBFUNCTIONS = LRU(64)
-
-
 def subfunction(q, i, out=None):
     """Component i of the mixed Function q as a Function on its collapsed space: `out`
     if given, else the same Function for every call on the same space and component
     (its values last until the next such call). Returns it."""
     W = q.function_space
     if out is None:
-        held = _SUBFUNCTIONS.get((id(W), i))
-        if held is None or held[0] is not W:
-            held = _SUBFUNCTIONS[(id(W), i)] = (W, Function(subspace(W, i)))
-        out = held[1]
+        held = _held(W, "_femtools_subfunctions", 64)          # W's: it goes with W
+        out = held.get(i)
+        if out is None:
+            out = held[i] = Function(subspace(W, i))
     q.sync()
     _mixed.subfunction(q, i, out=out)
     return out.restrict()
@@ -1281,15 +1378,13 @@ def set_subfunction(q, i, value):
     _mixed.set_subfunction(q, i, value)     # ends in q.x.scatter_forward: q.restrict
 
 
-_VALUES = LRU(16)
-
-
 def nodal_values(f, V):
     """The values of f at V's owned (unique) dofs, as an array: interpolate(f, V)'s
-    get_local(), into a Function kept per space."""
-    out = _VALUES.get(id(V))
-    if out is None or out.function_space is not V:
-        out = _VALUES[id(V)] = Function(V)
+    get_local(), into a Function kept by the space (it goes with V)."""
+    out = V.__dict__.get("_femtools_values")
+    if out is None:
+        out = Function(V)
+        setattr(V, "_femtools_values", out)
     return interpolate(f, V, out=out).vector().get_local()
 
 
@@ -1323,14 +1418,42 @@ class _NullSpace:
 
 
 def constant_nullspace(A, V):
-    """The constants on the scalar space V as a null space, attached to A."""
-    null = _NullSpace(_assembly.constant_nullspace(unique_dofs(V)))
+    """The constants on the scalar space V, or on component V = W.sub(i) of a mixed space
+    W (its dofs alone, the others zero: a Stokes pressure's), as a null space attached to
+    A."""
+    parent = getattr(V, "_parent", None)
+    if parent is None:
+        null = _NullSpace(_assembly.constant_nullspace(unique_dofs(V)))
+    else:
+        component = list(V.component())
+        if len(component) != 1:
+            raise NotImplementedError("constant_nullspace: a component of a mixed space, "
+                                      "not of one of its components")
+        U = unique_dofs(parent)
+        v = U.create_vector()
+        v.getArray()[owned_dofs(parent, component[0]) - U.owned_range[0]] = 1.0
+        v.normalize()
+        null = _NullSpace(PETSc.NullSpace().create(vectors=[v], comm=U.comm))
     A.set_nullspace(null)
     return null
 
 
-def norm(x, norm_type="l2"):
-    return x.norm(norm_type)
+def norm(x, norm_type="L2"):
+    """dolfin's norm: of a Vector, "l1", "l2" or "linf"; of a Function, the integral norm
+    "L2", "H1" or "H10" (the name in either case). Collective."""
+    t = norm_type.lower()
+    if isinstance(x, fem.Function):
+        sync(x)
+        if t == "l2":
+            form = ufl.inner(x, x) * ufl.dx
+        elif t == "h1":
+            form = (ufl.inner(x, x) + ufl.inner(ufl.grad(x), ufl.grad(x))) * ufl.dx
+        elif t == "h10":
+            form = ufl.inner(ufl.grad(x), ufl.grad(x)) * ufl.dx
+        else:
+            raise ValueError("norm of a Function: L2, H1 or H10, not {!r}".format(norm_type))
+        return float(np.sqrt(assemble(form)))
+    return x.norm(t)
 
 
 def normalize(x, normalization_type="average"):
@@ -1385,25 +1508,23 @@ class PETScKrylovSolver:
 
 # --- linear variational problems ----------------------------------------------------
 
-_LINEAR = LRU(8)
-
-
 def solve(equation, u, bcs=None):
     """dolfin's solve(a == L, u, bcs) for a linear problem: the system assembled, each
     condition applied to its rows (bc.apply(A, b), as dolfin's LinearVariationalSolver
     does), and solved by LU (MUMPS), factorized at every call as dolfin does. The
     matrix and the solver are kept per bilinear form (equal forms share them; the 8 most
-    recent)."""
+    recent, by the form's mesh)."""
     a, L = equation.lhs, equation.rhs
     bcs = [] if bcs is None else (list(bcs) if isinstance(bcs, (list, tuple)) else [bcs])
-    entry = _LINEAR.get(a)
+    linear = _held(_form_mesh(a), "_femtools_linear", 8)       # the mesh's: it goes with it
+    entry = linear.get(a)
     if entry is None:
         A = assemble(a)
         solver = PETSc.KSP().create(MPI.comm_world)
         solver.setType("preonly")
         solver.getPC().setType("lu")
         solver.getPC().setFactorSolverType("mumps")
-        entry = _LINEAR[a] = (A, solver)
+        entry = linear[a] = (A, solver)
     else:
         assemble(a, tensor=entry[0])
     A, solver = entry

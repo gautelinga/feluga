@@ -548,6 +548,19 @@ std::vector<int> partition(const Mesh& mesh, Eigen::Ref<const IVec> vtxdist,
   std::vector<idx_t> vw(vwgt.data(), vwgt.data() + vwgt.size());
   if (weighted && vw.size() != n)
     throw std::runtime_error("ParMETIS: a weight a vertex, not " + std::to_string(vw.size()));
+  if (weighted)
+  {
+    // the weights' total is held in idx_t too: a coarse graph weighed by its descendants
+    // (Families) can pass it with few vertices. Summed over every rank, so all throw
+    std::int64_t mine = 0, total = 0;          // from the 64-bit input, before idx_t
+    for (Eigen::Index k = 0; k < vwgt.size(); ++k)
+      mine += vwgt(k);
+    MPI_Allreduce(&mine, &total, 1, MPI_INT64_T, MPI_SUM, comm);
+    if (total > (std::int64_t)std::numeric_limits<idx_t>::max())
+      throw std::runtime_error("ParMETIS: vertex weights summing to " + std::to_string(total)
+                               + ", past this ParMETIS's " + std::to_string(8 * sizeof(idx_t))
+                               + "-bit idx_t: build it (and METIS) with IDXTYPEWIDTH 64");
+  }
   if (vw.empty()) vw.push_back(1);                // likewise, for a rank with no vertices
   idx_t* w = weighted ? vw.data() : nullptr;
   idx_t wgtflag = weighted ? 2 : 0, numflag = 0, ncon = 1, nparts = size, edgecut = 0;
@@ -568,6 +581,8 @@ std::vector<int> partition(const Mesh& mesh, Eigen::Ref<const IVec> vtxdist,
   if (adaptive)
   {
     auto f = (repart_fn)dlsym(lib(), "ParMETIS_V3_AdaptiveRepart");
+    if (!f)
+      throw std::runtime_error("ParMETIS: no ParMETIS_V3_AdaptiveRepart in the library");
     rc = f(vd.data(), xa.data(), ad.data(), w, w, nullptr, &wgtflag, &numflag,
            &ncon, &nparts, tpwgts.data(), &ubvec, &ritr, options, &edgecut, part.data(),
            &comm);
@@ -575,6 +590,8 @@ std::vector<int> partition(const Mesh& mesh, Eigen::Ref<const IVec> vtxdist,
   else
   {
     auto f = (kway_fn)dlsym(lib(), "ParMETIS_V3_PartKway");
+    if (!f)
+      throw std::runtime_error("ParMETIS: no ParMETIS_V3_PartKway in the library");
     rc = f(vd.data(), xa.data(), ad.data(), w, nullptr, &wgtflag, &numflag, &ncon,
            &nparts, tpwgts.data(), &ubvec, options, &edgecut, part.data(), &comm);
   }
@@ -984,7 +1001,7 @@ def read_mesh(mesh_file, L, periodic, comm, log=print, tol=None, families=None):
     periodic = tuple(bool(p) for p in periodic)
     if comm.size > 1:
         return read_partitioned(mesh_file, L, periodic, comm, log, tol, families)
-    mesh = df.Mesh()
+    mesh = df.Mesh(comm)                       # comm's, not the world's
     if mesh_file.endswith('.xdmf'):
         with df.XDMFFile(comm, mesh_file) as f:
             f.read(mesh)
@@ -1176,8 +1193,12 @@ def _split_classes(comm, pos, dofs, L, axes, tol, exempt, lower=None):
         # a node on an upper face, taken down to its image on the lower one
         img[:, a] = np.where(np.abs(img[:, a] - L[a]) < tol, img[:, a] - (L[a] - lo[a]),
                              img[:, a])
-    rows = np.concatenate([_keys(pos, tol).reshape(-1, 3), _keys(img, tol),
-                           as_rows(dofs)], 1)
+    # every class key a node's image may round to (`near_keys`): partners whose images
+    # differ by rounding share one, where a single rounding could part them across a
+    # rounding boundary and hide their split; distinct nodes are far more than tol apart
+    from femtools.hdf5_rows import near_keys
+    cls, idx = near_keys(img / tol, 0.25)
+    rows = np.concatenate([_keys(pos, tol).reshape(-1, 3)[idx], cls, as_rows(dofs)[idx]], 1)
     rows = rows[(rows[:, 6:] >= 0).any(1)] if rows.shape[1] > 6 else rows
     rows = unique_rows(rows)
     if exempt is None:

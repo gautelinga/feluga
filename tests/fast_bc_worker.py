@@ -70,7 +70,8 @@ for bc in several:
     mine = fixed_dofs(V, [bc])
     err = max(err, 0. if sorted(mine.tolist()) == changed.tolist() else 1.)
     got.append(mine)
-err = max(err, 0. if fixed_dofs(V, several).tolist() == np.concatenate(got).tolist() else 1.)
+err = max(err, 0. if fixed_dofs(V, several).tolist() == np.unique(np.concatenate(got)).tolist()
+          else 1.)
 err = MPI.COMM_WORLD.allreduce(err, op=MPI.MAX)
 if MPI.COMM_WORLD.rank == 0:
     open(sys.argv[1], "w").write(repr(err))

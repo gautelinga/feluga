@@ -1,4 +1,8 @@
 /*
+From fenicstools (https://github.com/mikaem/fenicstools), Copyright (C) 2011-2013
+Mikael Mortensen; modified in femtools (NOTICE).
+SPDX-License-Identifier: LGPL-3.0-or-later
+
 From fenicstools by M. Mortensen.
 */
 #include "Probe.h"

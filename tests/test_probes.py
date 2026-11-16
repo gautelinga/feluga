@@ -236,7 +236,7 @@ def test_dump_is_a_file_a_rank_and_reads_back(tmp_path):
     probe.dump(str(tmp_path / "old_7.probe"), 7)
     old = read_dump(str(tmp_path / "old"))
     assert list(old) == [7] and np.allclose(old[7][1], [pts[0] * [1, 2]])
-    with pytest.raises(RuntimeError):
+    with pytest.raises(IndexError):      # on every rank, before the C++ (rank-local)
         q.dump(2, str(tmp_path / "none"))
 
 

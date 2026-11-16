@@ -104,7 +104,8 @@ def refine_periodic(mesh, markers, box, axes, redistribute=True, tol=1e-10,
     `frozen_cells`. Collective."""
     import ufl
     from dolfinx.mesh import Mesh
-    from femtools.periodic_core import box_scale, xyz
+    from femtools.periodic_core import box_scale, check_box, xyz
+    check_box(box, mesh.geometry.dim, lower)
     comm = mesh.comm
     tdim = mesh.topology.dim
     cap, rank_cap = int(max_cells or 0), int(max_rank_cells or 0)

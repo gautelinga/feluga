@@ -156,7 +156,7 @@ def read_function(path, f, field="delta"):
                                  mesh.num_entities_global(0)):
         raise ValueError("{} holds a field on {} cells and {} vertices; the mesh has {} "
                          "and {}".format(path, n_cells, n_vertices,
-                                         mesh.num_entities_global(3),
+                                         mesh.num_entities_global(mesh.topology().dim()),
                                          mesh.num_entities_global(0)))
     gvi = np.asarray(mesh.topology().global_indices(0), dtype=np.int64)
     return scatter_vertex_values(f, fetch_rows(path, field + "/" + VALUES, gvi, comm))

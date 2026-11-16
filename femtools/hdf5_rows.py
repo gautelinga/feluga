@@ -456,15 +456,18 @@ def read_ahead(comm, items, stagger=True):
         want[key] = want.get(key, 0) + 1
     files = list(dict.fromkeys(k[0] for k in want))
     if stagger and files:
-        weights = None
-        if rank == 0:                       # one rank asks the metadata server
+        from femtools.jit import on_rank0
+
+        def weigh():                        # one rank asks the metadata server
             weights = []
             for path in files:
                 with h5py.File(path, "r") as h5:
                     weights.append(sum(h5[d].id.get_storage_size()
                                        * (1.0 if n is None else n / max(h5[d].shape[0], 1))
                                        for p, d, _, n in want if p == path))
-        weights = np.asarray(comm.bcast(weights, root=0), dtype=np.float64)
+            return weights
+        # rank 0's error (a missing file) raised on every rank, not rank 0 alone
+        weights = np.asarray(on_rank0(comm, weigh, "read_ahead"), dtype=np.float64)
         cum = np.cumsum(weights) / max(weights.sum(), 1.0)
         first = min(int(np.searchsorted(cum, (rank + 0.5) / size, side="right")),
                     len(files) - 1)
@@ -972,20 +975,22 @@ class RowPlan:
                                              np.ascontiguousarray(send),
                                              self.rounds.get(width))
         n = self.hi - self.lo
+        differ = False
         if self.order is None:
-            return got, False
-        if self.place is not None:
+            block = got
+        elif self.place is not None:
             block = np.empty((n,) + got.shape[1:], dtype=got.dtype)
             block[self.place] = got
-            return block, False
-        block = np.zeros((n,) + got.shape[1:], dtype=got.dtype)
-        differ = False
-        if len(self.rep_a):
-            flat = as_rows(got).view(np.uint8).reshape(len(got), -1)
-            differ = bool((flat[self.rep_a] != flat[self.rep_b]).any())
+        else:
+            block = np.zeros((n,) + got.shape[1:], dtype=got.dtype)
+            if len(self.rep_a):
+                flat = as_rows(got).view(np.uint8).reshape(len(got), -1)
+                differ = bool((flat[self.rep_a] != flat[self.rep_b]).any())
+        # every rank, whatever its own block held: `repeats` is the ranks' agreed flag, the
+        # copies are some rank's (a rank whose rows all arrive once took no part before)
         if self.repeats:
             differ = agreed(comm, differ)
-        if not differ:
+        if self.order is not None and self.place is None and not differ:
             block[self.at] = got[self.keep]
         return block, differ
 

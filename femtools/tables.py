@@ -205,13 +205,15 @@ def read_values(path, name, t):
     import h5py
     from femtools.hdf5_rows import (
         _AHEAD, _ahead_key, agreed, fetch_rows, read_ahead, rows_of_labels)
+    from femtools.jit import on_rank0
     comm = t.comm
-    found = None
-    if comm.rank == 0:
+
+    def signature():
         with h5py.File(path, "r") as h5:
             a = h5[name].attrs
-            found = bytes(a["signature"]).decode() if "signature" in a else None
-    found = comm.bcast(found, root=0)
+            return bytes(a["signature"]).decode() if "signature" in a else None
+    # read on rank 0 and shared, an error (a missing file or name) raised on every rank
+    found = on_rank0(comm, signature, "{}:{}".format(path, name))
     if found is not None and found != t.signature:
         raise ValueError("{}:{} holds {}, not {}".format(path, name, found, t.signature))
     n, k = t.dofs.shape

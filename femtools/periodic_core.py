@@ -25,7 +25,8 @@ far from the origin, whose coordinates carry their own rounding (one ulp at 1e6 
 1.2e-10), keeps its pairs. The numbers, by what they judge:
 
     1e-10  the refinement's pairing of face edges and its ties (`refine_periodic`'s tol)
-    1e-9   the congruence check (`faces_congruent`, `congruent`; TOL)
+    1e-9   the congruence check (`faces_congruent`, `congruent`; TOL): partners within
+           2 NEAR TOL (2e-11) of each other always match, up to TOL by rounding
     1e-8   DOLFINx's dof pairing (`femtools.dolfinx.periodic.periodic_box`)
 
 dolfin's own SubDomains (`femtools.periodic.PeriodicBox`, `periodic_box`) keep dolfin's
@@ -52,6 +53,17 @@ def xyz(a):
     a = np.asarray(a, dtype=float)
     pad = [(0, 0)] * (a.ndim - 1) + [(0, 3 - a.shape[-1])]
     return np.pad(a, pad) if a.shape[-1] < 3 else a
+
+
+def check_box(box, gdim, lower=None):
+    """Refuse a box (or a lower corner) of fewer components than the mesh's dimension:
+    padded with zeros, a missing axis would read as flat (upper == lower) and pair the
+    nodes of different heights across it. More (a 2D mesh's 3D extent) are flat indeed.
+    The same on every rank (its arguments are)."""
+    for name, corner in (("box", box), ("lower", lower)):
+        if corner is not None and len(np.ravel(corner)) < gdim:
+            raise ValueError("refine_periodic: a {} of {} components on a {}-D mesh".format(
+                name, len(np.ravel(corner)), gdim))
 
 
 def lower_corner(extent, axes, lower=None, tol=1e-9):
@@ -100,7 +112,8 @@ def faces_congruent_arrays(comm, x, e, L, axes, tol=1e-9, exempt=None, lower=Non
         exempt = _at_positions(pts, xyz(exempt) - lower, tol)
     elif exempt is not None:
         exempt = np.asarray(exempt, bool)
-        if len(exempt) != n_nodes:
+        from femtools.hdf5_rows import agreed
+        if agreed(comm, len(exempt) != n_nodes):     # every rank raises, or none
             raise ValueError("faces_congruent: exempt has {} entries for {} nodes".format(
                 len(exempt), n_nodes))
         exempt = exempt[np.concatenate(keep)]
@@ -265,17 +278,16 @@ def refine_congruent(mesh, cell_markers, box, axes, *, comm, refine_periodic,
         if comm.rank == 0:
             print(text, flush=True)
 
+    if deferred and exempt is not None:          # before the refinement, not after it
+        raise ValueError("refine_congruent: a deferred guard takes its exempt nodes at "
+                         "check_congruent")
     say("refining")
     if axes:
         new_mesh, npair, parent_cell = refine_periodic(
             mesh, cell_markers, box, axes, redistribute=redistribute, max_cells=max_cells,
             max_rank_cells=max_rank_cells, frozen=frozen, report=report, lower=lower)
         say("periodic Plaza: {} identified edge pairs".format(npair))
-        if deferred:
-            if exempt is not None:
-                raise ValueError("refine_congruent: a deferred guard takes its exempt "
-                                 "nodes at check_congruent")
-        else:
+        if not deferred:
             check_congruent(new_mesh, box, axes,
                             None if exempt is None else exempt(new_mesh, parent_cell),
                             lower)

@@ -233,24 +233,27 @@ def connectivity(mesh, d0, d1, rows=None):
     return np.asarray(module.connectivity_rows_of(mesh, d0, d1, k, rows))
 
 
-def periodic_box(upper, tol=df.DOLFIN_EPS_LARGE, periodic=None, lower=None, map_tol=None):
+def periodic_box(upper, tol=df.DOLFIN_EPS_LARGE, periodic=None, lower=None, map_tol=None,
+                 comm=None):
     """`PeriodicBox`, compiled: the same pairing without a pybind crossing per call.
     Carries `lower`, `upper`, `periodic` and `tol` as attributes, as `PeriodicBox` does
-    (`tol` for the repair and the pairing check to judge the same nodes on a face)."""
+    (`tol` for the repair and the pairing check to judge the same nodes on a face).
+    Collective on `comm` (None: dolfin's world) the first time, which compiles."""
     lower, upper, periodic = _box(upper, periodic, lower)
-    box = _module().CppPeriodicBox(lower, upper, periodic, float(tol),
+    box = _module(comm).CppPeriodicBox(lower, upper, periodic, float(tol),
                                    float(tol if map_tol is None else map_tol))
     box.lower, box.upper, box.periodic, box.tol = lower, upper, periodic, float(tol)
     return box
 
 
-def periodic_box_from_bounds(bounds, tol=1e-10, map_tol=1e-10):
+def periodic_box_from_bounds(bounds, tol=1e-10, map_tol=1e-10, comm=None):
     """`periodic_box` for the axes in `bounds`, which maps each periodic axis to its
     (lower, upper) bounds: {0: (0, Lx)} is periodic in x alone. The default `tol` is
     above the rounding of mesh generators (gmsh leaves points ~1e-14 off a face),
     `map_tol` dolfin's default for a SubDomain."""
     lower, upper = ([bounds[i][k] if i in bounds else 0. for i in range(3)] for k in (0, 1))
-    return periodic_box(upper, tol, [i in bounds for i in range(3)], lower, map_tol=map_tol)
+    return periodic_box(upper, tol, [i in bounds for i in range(3)], lower, map_tol=map_tol,
+                        comm=comm)
 
 
 def extent(mesh):

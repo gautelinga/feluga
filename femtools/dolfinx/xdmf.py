@@ -162,7 +162,10 @@ class XDMFSeries:
     def __init__(self, comm, path):
         self.comm, self.path = comm, path
         self._doc = None
-        self._stored = {}          # (mesh id, degree) -> (topology ref, geometry ref)
+        # mesh -> {degree: (topology ref, geometry ref)}, held weakly by the mesh: an id()
+        # would come back for a later mesh once this one is freed, and its steps would
+        # point at the freed mesh's datasets
+        self._stored = weakref.WeakKeyDictionary()
 
     def __enter__(self):
         return self
@@ -184,8 +187,8 @@ class XDMFSeries:
         L = nodes[degree]
         dofs = _SPACES.get((V,), lambda: _space_dofs(V, L))
         grid = doc.grid("mesh", doc.collection())
-        key = (id(V.mesh), degree)
-        store = self._stored.get(key)
+        stored = self._stored.setdefault(V.mesh, {})
+        store = stored.get(degree)
         if store is None:
             group = doc.mesh_group(True)
             conn, coords = L.mesh_nodes()
@@ -193,7 +196,7 @@ class XDMFSeries:
                               topology_array(conn, L.n_nodes), L.n_cells),
                      doc.rows(group + "/geometry", L.rows, coords, L.n_nodes))
             conn = coords = None
-            self._stored[key] = store
+            stored[degree] = store
         doc.topology(grid, None, L.topology, ref=store[0], shape=(L.n_cells, L.per_cell),
                      wide=is_wide(L.n_nodes))
         doc.geometry(grid, None, ref=store[1], shape=(L.n_nodes, L.gdim))

@@ -64,20 +64,21 @@ def _dolfin_sets(W, comm, components):
     from femtools.periodic import cell_dofs
     lo, _ = W.dofmap().ownership_range()
     to_global = np.asarray(W.dofmap().tabulate_local_to_global_dofs(), dtype=np.int64)
+    from femtools.hdf5_rows import agreed
     cells = np.arange(W.mesh().num_cells(), dtype=np.int64)
     maps = [_sub(W, p, True).dofmap() for p in components]
-    nodes = len(maps[0].cell_dofs(0)) if len(cells) else 0
-    rows = [cell_dofs(m, cells, nodes).ravel() for m in maps]
+    nodes = _sub(W, components[0], True).element().space_dimension()   # a cell's, every rank
+    rows = [cell_dofs(m, cells, nodes, comm).ravel() for m in maps]
     first = np.asarray(maps[0].dofs(), dtype=np.int64) - lo
     sets = [first + lo]
     for c in range(1, len(components)):
         pair = np.full(len(to_global), -1, dtype=np.int64)
         pair[rows[0]] = rows[c]
-        if not np.array_equal(pair[rows[0]], rows[c]):
+        if agreed(comm, not np.array_equal(pair[rows[0]], rows[c])):   # every rank, or none
             raise RuntimeError('component {} is paired with the first differently by two '
                                'cells'.format(c))
         mine = pair[first]
-        if np.any(mine < 0):
+        if agreed(comm, np.any(mine < 0)):
             raise RuntimeError('an owned first component on rank {} is in no cell of its '
                                'own'.format(comm.rank))
         sets.append(to_global[mine])
@@ -113,25 +114,31 @@ def check_blocks(A, sets, comm, tol=1e-12):
     first = PETSc.IS().createGeneral(np.asarray(sets[0], dtype=PETSc.IntType), comm=comm)
     K0 = A.createSubMatrix(first, first)
     x0, y0 = K0.createVecs()
-    x0.setRandom()
-    K0.mult(x0, y0)
     yc = y0.duplicate()
     w, Aw = A.createVecs()
-    for c in (1, 2):
-        is_c = PETSc.IS().createGeneral(np.asarray(sets[c], dtype=PETSc.IntType), comm=comm)
-        scatter = PETSc.Scatter().create(w, is_c, x0, None)
-        w.set(0.0)
-        scatter.scatter(x0, w, PETSc.InsertMode.INSERT, PETSc.ScatterMode.REVERSE)
-        A.mult(w, Aw)
-        scatter.scatter(Aw, yc, PETSc.InsertMode.INSERT, PETSc.ScatterMode.FORWARD)
-        yc.axpy(-1.0, y0)
-        if yc.norm() > tol * y0.norm():
-            raise RuntimeError('velocity component {} has a block unlike the first: |dK x| / '
-                               '|K x| = {:.3e}'.format(c, yc.norm() / y0.norm()))
-        scatter.destroy()
-        is_c.destroy()
-    for o in (x0, y0, yc, w, Aw, K0, first):
-        o.destroy()
+    try:                                  # a copy of a whole block: destroyed if it raises
+        x0.setRandom()
+        K0.mult(x0, y0)
+        for c in range(1, len(sets)):
+            is_c = PETSc.IS().createGeneral(np.asarray(sets[c], dtype=PETSc.IntType),
+                                            comm=comm)
+            scatter = PETSc.Scatter().create(w, is_c, x0, None)
+            try:
+                w.set(0.0)
+                scatter.scatter(x0, w, PETSc.InsertMode.INSERT, PETSc.ScatterMode.REVERSE)
+                A.mult(w, Aw)
+                scatter.scatter(Aw, yc, PETSc.InsertMode.INSERT, PETSc.ScatterMode.FORWARD)
+                yc.axpy(-1.0, y0)
+                if yc.norm() > tol * y0.norm():       # a global norm: every rank raises
+                    raise RuntimeError('velocity component {} has a block unlike the first: '
+                                       '|dK x| / |K x| = {:.3e}'.format(
+                                           c, yc.norm() / y0.norm()))
+            finally:
+                scatter.destroy()
+                is_c.destroy()
+    finally:
+        for o in (x0, y0, yc, w, Aw, K0, first):
+            o.destroy()
 
 
 class SharedVelocityPC:

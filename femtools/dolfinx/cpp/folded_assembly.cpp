@@ -373,8 +373,9 @@ struct Indices
 /// Add the matrix of form `a` into the PETSc matrix at `handle` through
 /// MatSetValuesLocal (its local-to-global maps), the cells a block at a time: for a
 /// matrix whose pattern is not yet final (its first assembly). The caller zeroes and
-/// finalises it. Returns false, adding nothing, unless the matrix has local-to-global
-/// maps of block size 1 over the local dofs of the form's spaces.
+/// finalises it. Returns -1, adding nothing, unless the matrix has local-to-global maps
+/// of block size 1 over the local dofs of the form's spaces; else the number of values
+/// the couplings skipped that were nonzero (the caller raises on any).
 std::int64_t assemble_local(const Form& a, std::uintptr_t handle, const labels_t& rl,
                             const labels_t& cl, const mask_t& mask, const labels_t& fixed)
 {

@@ -38,6 +38,7 @@ class Phases:
         self.start = self.last = self.clock()
 
     def __call__(self, name):
+        """The line for phase `name`. Collective (reductions over the ranks)."""
         import resource
         from femtools.memory import release, resident_gb
         release()

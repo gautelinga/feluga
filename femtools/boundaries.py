@@ -86,13 +86,17 @@ def write(path, points, facets, markers, comm=None):
                                               ("markers", markers, n_facets, first[rank, 1]))):
             hdf5_rows.write_ordered(out, name, at + np.arange(len(a)), a, n, comm,
                                     mode="w" if k == 0 else "a")
-    if comm is None or comm.Get_rank() == 0:
-        with open(path, "w") as f:
+    from femtools.jit import on_rank0
+
+    def write_xml():                   # beside and renamed: never a half-written file
+        tmp = path + ".writing"
+        with open(tmp, "w") as f:
             f.write(XDMF.format(top=TOPOLOGY[nv], nf=n_facets, nv=nv, ip=8 if wide else 4,
                                 geo=GEOMETRY[gd], np=n_points, gd=gd,
                                 h5=os.path.basename(out)))
-    if size > 1:
-        comm.Barrier()
+        os.replace(tmp, path)
+    # by rank 0, its error raised on every rank (and every rank waits for the file)
+    on_rank0(comm if size > 1 else None, write_xml, "writing " + path)
     return n_facets, n_points
 
 
@@ -203,7 +207,8 @@ def match_exterior(path, x, facet_vertices, owned, comm=None):
     if len(vertices):
         near = min(np.linalg.norm(x[vertices[:, a]] - x[vertices[:, b]], axis=1).min()
                    for a in range(nv) for b in range(a + 1, nv))
-    tol = REL_TOL * near
+    from femtools.hdf5_rows import allreduce
+    tol = REL_TOL * allreduce(comm, float(near), "min")       # one tolerance, every rank's
     local = np.unique(vertices)
     where = datasets(path)
     if where[2] is None:

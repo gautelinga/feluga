@@ -100,12 +100,13 @@ def _p1_to_p2_csr(blocks, nz, nnz, m, n_global2, n1, n_global1, comm):
             for t, k in enumerate(np.flatnonzero(nz[j])):
                 cols[r, t] = c1[own, k]
             count[r] = nnz[j]
-    if (count == 0).any():
+    from femtools.hdf5_rows import agreed               # every rank raises, or none
+    if agreed(comm, (count == 0).any()):
         raise RuntimeError("p1_to_p2: {} of {} owned P2 dofs are in no local cell"
                            .format(int((count == 0).sum()), m))
     cols.sort(axis=1)                                     # -1 first, then ascending
     keep = cols >= 0
-    if (keep.all(axis=1) & (cols[:, 0] == cols[:, 1])).any():
+    if agreed(comm, (keep.all(axis=1) & (cols[:, 0] == cols[:, 1])).any()):
         # an edge whose two ends are one periodic vertex: a mesh one cell across a period
         raise RuntimeError("p1_to_p2: an edge joins a vertex to its own periodic image")
     indptr = np.r_[0, np.cumsum(count)].astype(PETSc.IntType)
@@ -130,12 +131,15 @@ def _p1_to_p2_dolfin(S1, S2, chunk):
     l2g1 = np.asarray(dm1.tabulate_local_to_global_dofs(), dtype=np.int64)
     m = hi2 - lo2                # owned local dofs are 0..m-1 (block size 1)
     ncell = mesh.num_cells()
+    comm = mesh.mpi_comm()
+    cell_dofs(dm2, np.zeros(0, np.int64), nz.shape[0], comm)   # compiled on the mesh's
+    #                                    ranks, every one (a rank may hold no cell)
 
     def blocks():
         for start in range(0, ncell, chunk):
             block = np.arange(start, min(start + chunk, ncell), dtype=np.int64)
-            d2 = cell_dofs(dm2, block, nz.shape[0])
-            yield np.where(d2 < m, d2, -1), l2g1[cell_dofs(dm1, block, nz.shape[1])]
+            d2 = cell_dofs(dm2, block, nz.shape[0], comm)
+            yield np.where(d2 < m, d2, -1), l2g1[cell_dofs(dm1, block, nz.shape[1], comm)]
     return _p1_to_p2_csr(blocks(), nz, nnz, m, dm2.global_dimension(), hi1 - lo1,
                          dm1.global_dimension(), mesh.mpi_comm())
 

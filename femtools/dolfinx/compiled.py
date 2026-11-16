@@ -19,6 +19,8 @@ import os
 import subprocess
 import sys
 
+import numpy as np
+
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp")
 # What each extension's build reads besides CMakeLists.txt and its own source
 _HEADERS = {"plaza_periodic": [os.path.join(HERE, "..", "..", "cpp", "plaza_periodic_rules.h")]}
@@ -41,7 +43,19 @@ def module(comm, name, what):
     for path in sources + _HEADERS.get(name, []):
         with open(path, "rb") as f:
             h.update(f.read())
-    h.update((dolfinx.__version__ + sys.version).encode())
+    # everything the binary depends on: two builds of one version (real or complex,
+    # 32- or 64-bit PetscInt, a container and its host sharing ~/.cache) must not share it
+    from petsc4py import PETSc
+    try:
+        import nanobind
+        nb = nanobind.__version__
+    except ImportError:
+        nb = ""
+    import dolfinx.common
+    h.update("|".join([dolfinx.__version__, getattr(dolfinx.common, "git_commit_hash", ""),
+                       os.path.dirname(dolfinx.__file__), sys.version,
+                       str(np.dtype(PETSc.IntType)), str(np.dtype(PETSc.ScalarType)),
+                       ".".join(map(str, PETSc.Sys.getVersion())), nb]).encode())
     root = os.environ.get("FEMTOOLS_JIT_DIR") or os.path.join(
         os.path.expanduser("~"), ".cache", "femtools")
     target = name + "_x"

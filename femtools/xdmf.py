@@ -657,7 +657,7 @@ def _pad3(values):
 
 
 # The degree of the nodal values a visualisation grid holds, by topology.
-_NODAL_DEGREE = {'PolyLine': 1, 'Triangle': 1, 'Tetrahedron': 1,
+_NODAL_DEGREE = {'Polyline': 1, 'Triangle': 1, 'Tetrahedron': 1,
                  'Edge_3': 2, 'Triangle_6': 2, 'Tetrahedron_10': 2}
 
 
@@ -1143,7 +1143,7 @@ class XDMFFile2(object):
         """Reads dolfin's checkpoint, or a time series of nodal values written here.
 
         dolfin's reader knows only its own checkpoint format. If the file instead
-        holds visualisation grids -- P1 (`Triangle`, `Tetrahedron`, `PolyLine`) or P2
+        holds visualisation grids -- P1 (`Triangle`, `Tetrahedron`, `Polyline`) or P2
         (`Triangle_6`, `Tetrahedron_10`, `Edge_3`), the field at the nodes, which
         dolfin cannot read at all -- the field is read at the nodes of `u`'s space when
         it is Lagrange of the grid's degree, periodic or not (`_read_into`): each owned
@@ -2218,22 +2218,38 @@ def continued(series, time):
     return steps
 
 
+def _temporal(tree, path):
+    """The temporal collection of a parsed XDMF file: the series, past any grid written
+    before it (a mesh written before the first timed write)."""
+    for g in tree.getroot().find('Domain').findall('Grid'):
+        if g.get('GridType') == 'Collection' and g.get('CollectionType') == 'Temporal':
+            return g
+    raise ValueError('{}: no temporal collection to merge'.format(path))
+
+
 def merge_series(files):
     """Merge XDMF time series, given in the order they were written, into the first
     file: each file's steps replace the steps before it from its first time on
-    (`continued`). The other .xdmf files are deleted; the .h5 files they refer to,
-    which the merged series refers to, are kept. The files must refer to their HDF5
-    data by paths that are valid from the first file, as files in one folder do."""
+    (`continued`). Each file's temporal collection is its series; anything else in the
+    first file (a mesh grid written before the series) stays as it is. The first file is
+    written beside and renamed, then the other .xdmf files are deleted; the .h5 files
+    they refer to, which the merged series refers to, are kept. The files must refer to
+    their HDF5 data by paths that are valid from the first file, as files in one folder
+    do."""
     ET.register_namespace('xi', XI)
     trees = [ET.parse(f) for f in files]
-    collections = [tree.getroot().find('Domain').find('Grid') for tree in trees]
+    collections = [_temporal(tree, f) for tree, f in zip(trees, files)]
     steps = [[g for g in c if g.tag == 'Grid'] for c in collections]
     merged = continued(steps, lambda g: float(g.find('Time').get('Value')))
-    for g in list(collections[0]):
+    for g in steps[0]:
         collections[0].remove(g)
     for g in merged:
         collections[0].append(g)
-    trees[0].write(files[0], xml_declaration=True)
+    tmp = files[0] + '.merging'
+    with open(tmp, 'w') as fh:
+        fh.write('<?xml version="1.0"?>\n' + DOCTYPE + '\n')
+        fh.write(ET.tostring(trees[0].getroot(), encoding='unicode'))
+    os.replace(tmp, files[0])
     for f in files[1:]:
         os.remove(f)
 

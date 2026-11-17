@@ -4,6 +4,8 @@ Krylov solvers, boundary markers, periodic boxes, dolfin's HDF5 layout), and the
 helpers that femtools.backend.dolfinx provides under the same names.
 """
 import numpy as np
+
+from femtools.hdf5_rows import sorted_unique
 from dolfin import (  # noqa: F401
     as_backend_type, as_vector, BoxMesh, conditional, Constant, cos, DirichletBC, div,
     DOLFIN_EPS, DOLFIN_EPS_LARGE, dot, exp, Expression, FacetNormal, FiniteElement,
@@ -127,7 +129,7 @@ def fixed_dofs(W, bcs):
     found = [np.zeros(0, np.int64)]
     for bc in bcs:
         found.append(start + dolfin_fixed_owned(W, bc))
-    return np.unique(np.concatenate(found)).astype(PETSc.IntType)
+    return sorted_unique(np.concatenate(found)).astype(PETSc.IntType)
 
 
 def sync(f):

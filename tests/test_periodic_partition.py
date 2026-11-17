@@ -317,6 +317,24 @@ def test_unique_rows_is_numpys():
     assert _unique_rows(np.zeros((0, 4), np.int64)).shape == (0, 4)
 
 
+def test_sorted_unique_is_numpys():
+    """`hdf5_rows.sorted_unique` is a plain `np.unique` of ints: the same values, sorted,
+    of the same type, for few and many distinct values, int32 and int64, a 2-D array
+    (flattened), one value and none."""
+    import numpy as np
+    from femtools.hdf5_rows import sorted_unique
+    rng = np.random.default_rng(3)
+    for top in (3, 1 << 20, 1 << 40):
+        for dtype in (np.int32, np.int64):
+            a = rng.integers(-top // 2, top, 20000).astype(dtype)
+            got = sorted_unique(a)
+            assert got.dtype == a.dtype and np.array_equal(got, np.unique(a))
+    a = rng.integers(0, 50, (40, 7))
+    assert np.array_equal(sorted_unique(a), np.unique(a))
+    for a in (np.array([4]), np.zeros(0, np.int64)):
+        assert np.array_equal(sorted_unique(a), np.unique(a))
+
+
 def test_the_csr_is_the_dual_graph_sorted():
     """`dual_csr` packs each edge into one key: the CSR of the edge list lexsorted by row
     then column, as ParMETIS was given it before, entry for entry."""

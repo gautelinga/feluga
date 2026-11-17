@@ -27,6 +27,7 @@ import re
 
 import numpy as np
 
+from femtools.hdf5_rows import sorted_unique
 from femtools.xdmf import DOLFIN_EDGES, XDMF_ORDER
 
 #: cells `LayoutReader.label_volumes` and `cell_blocks` take at a time
@@ -128,7 +129,7 @@ class LayoutReader(object):
             raise ValueError('the function file names cells the mesh file does not')
         # every mesh row filled exactly once: a label named twice would leave another row
         # as whatever np.empty held, and the integral over it garbage
-        if len(cells) != n_cells or len(np.unique(where[cells])) != n_cells:
+        if len(cells) != n_cells or len(sorted_unique(where[cells])) != n_cells:
             raise ValueError('the function file does not label each mesh cell exactly once')
         rows = np.empty((n_cells, per_cell), dtype=flat.dtype)
         rows[where[cells]] = flat.reshape(n_cells, per_cell)
@@ -153,7 +154,7 @@ class LayoutReader(object):
                 t = np.asarray(topo[k:k + chunk], dtype=np.int64)
                 ids = np.asarray(labels[k:k + len(t)], dtype=np.int64)
                 if (ids.min() < 0 or not np.isnan(volumes[ids]).all()
-                        or len(np.unique(ids)) != len(ids)):
+                        or len(sorted_unique(ids)) != len(ids)):
                     raise ValueError('{} labels a cell twice, or with a negative id'
                                      .format(self.mesh_path))
                 x = vx[t]
@@ -184,7 +185,7 @@ class LayoutReader(object):
                     raise ValueError('cell_dofs is ragged; this route cannot reshape it')
                 if ids.min() < 0 or ids.max() >= len(volumes) or np.isnan(volumes[ids]).any():
                     raise ValueError('the function file names cells the mesh file does not')
-                if seen[ids].any() or len(np.unique(ids)) != len(ids):
+                if seen[ids].any() or len(sorted_unique(ids)) != len(ids):
                     raise ValueError('the function file does not label each mesh cell '
                                      'exactly once')
                 seen[ids] = True

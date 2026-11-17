@@ -23,6 +23,8 @@ import os
 
 import numpy as np
 
+from femtools.hdf5_rows import sorted_unique
+
 XDMF = """<?xml version="1.0"?>
 <Xdmf Version="3.0">
   <Domain>
@@ -209,7 +211,7 @@ def match_exterior(path, x, facet_vertices, owned, comm=None):
                    for a in range(nv) for b in range(a + 1, nv))
     from femtools.hdf5_rows import allreduce
     tol = REL_TOL * allreduce(comm, float(near), "min")       # one tolerance, every rank's
-    local = np.unique(vertices)
+    local = sorted_unique(vertices)
     where = datasets(path)
     if where[2] is None:
         raise ValueError(path + ": no markers")

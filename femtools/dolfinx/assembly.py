@@ -28,6 +28,7 @@ import hashlib
 
 import numpy as np
 
+from femtools.hdf5_rows import sorted_unique
 from femtools.lru import WeakCache
 
 # Preallocations per (rows, cols): {key of the integration domains: (d_nnz, o_nnz)}
@@ -123,7 +124,7 @@ class _Couplings:
                              "matrix's")
         # the dofs the conditions constrain: owned rows (compact, global) and every local
         # dof (owned and ghost) whose unique dof is one of them
-        self.fixed_rows = np.unique(np.concatenate(
+        self.fixed_rows = sorted_unique(np.concatenate(
             [np.asarray(bc.global_rows(), dtype=np.int64) for bc in bcs]
             or [np.zeros(0, np.int64)]))
         self.fixed = _fixed_local(U, self.fixed_rows) if len(bcs) else \
@@ -207,7 +208,7 @@ def _preallocation(a, rows, cols, filt=None):
     held = [[] for _ in range(n_ranges)]
 
     def hold(keys):
-        keys = np.unique(keys)
+        keys = sorted_unique(keys)
         for r, part in enumerate(np.split(keys, np.searchsorted(keys, bounds))):
             if len(part):
                 held[r].append(part)
@@ -255,7 +256,7 @@ def _preallocation(a, rows, cols, filt=None):
     nnz = np.zeros(n, np.int64)
     d_nnz = np.zeros(n, np.int64)
     for r in range(n_ranges):
-        keys = np.unique(np.concatenate(held[r])) if held[r] else np.zeros(0, np.int64)
+        keys = sorted_unique(np.concatenate(held[r])) if held[r] else np.zeros(0, np.int64)
         held[r] = None
         lo, hi = edges[r], edges[r + 1]
         row, col = np.divmod(keys, width)

@@ -518,6 +518,21 @@ def lookup(comm, edges, block, wanted):
     return out.reshape((len(wanted),) + block.shape[1:])
 
 
+def sorted_unique(a):
+    """`np.unique(a)` for an int array: its distinct values, sorted, by a sort and a
+    neighbour comparison. NumPy 2.3 and later take a plain `np.unique` of ints through a
+    hash table and sort what it keeps, 20-100 times slower on many distinct values: in
+    the DOLFINx image's NumPy 2.4 it was 100 of the 123 s of the folded preallocation of
+    an RCP Stokes operator (h0.0175, 128 ranks; Olivia job 3008178, 2026-11-17)."""
+    s = np.sort(np.asarray(a).ravel())
+    if len(s) < 2:
+        return s
+    keep = np.empty(len(s), bool)
+    keep[0] = True
+    np.not_equal(s[1:], s[:-1], out=keep[1:])
+    return s[keep]
+
+
 def unique_rows(rows):
     """`np.unique(rows, axis=0)` for int rows, the same rows in the same order, many times
     faster than numpy's sort of the rows as one structured value each (the periodic
@@ -532,7 +547,7 @@ def unique_rows(rows):
         key = np.zeros(len(rows), np.int64)
         for c, b in enumerate(bits):
             key = (key << b) | (rows[:, c] - lo[c])
-        key = np.unique(key)
+        key = sorted_unique(key)
         out = np.empty((len(key), rows.shape[1]), rows.dtype)
         for c in range(rows.shape[1] - 1, -1, -1):
             out[:, c] = (key & ((1 << bits[c]) - 1)) + lo[c]

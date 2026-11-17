@@ -31,6 +31,7 @@ first use (femtools.dolfinx.compiled).
 """
 import numpy as np
 
+from femtools.hdf5_rows import sorted_unique
 from femtools.periodic_core import TOL, TooManyCells  # noqa: F401  (raised here)
 
 
@@ -199,7 +200,7 @@ def refine_congruent(mesh, cell_markers, box, axes, redistribute=False, max_cell
         import dolfinx.mesh as dm
         cells = _cells(mesh, cell_markers)
         mesh.topology.create_entities(1)
-        edges = np.unique(dm.compute_incident_entities(mesh.topology, cells,
+        edges = sorted_unique(dm.compute_incident_entities(mesh.topology, cells,
                                                        mesh.topology.dim, 1))
         return dm.refine(mesh, edges)[0]
 

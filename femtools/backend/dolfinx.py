@@ -65,7 +65,7 @@ from femtools.dolfinx.boundary_markers import BoundaryMarkers, compiled_facets  
 from femtools.dolfinx import mixed as _mixed
 from femtools.dolfinx.periodic import flat_collapse_map, periodic_box
 from femtools.dolfinx.unique import UniqueDofs
-from femtools.hdf5_rows import agreed
+from femtools.hdf5_rows import agreed, sorted_unique
 from femtools.lru import LRU
 
 name = "dolfinx"
@@ -551,14 +551,14 @@ def owned_dofs(W, i):
     is W.sub(0).sub(1)), as global indices of its vectors."""
     U = unique_dofs(W)
     lo, hi = U.owned_range
-    c = np.unique(U.compact[_mixed.component_map(W, i)])
+    c = sorted_unique(U.compact[_mixed.component_map(W, i)])
     return c[(c >= lo) & (c < hi)].astype(PETSc.IntType)
 
 
 def fixed_dofs(W, bcs):
     """The owned dofs of W that the Dirichlet conditions `bcs` constrain, as global
     indices of its vectors."""
-    return np.unique(np.concatenate(
+    return sorted_unique(np.concatenate(
         [bc.global_rows() for bc in bcs] or [np.zeros(0, PETSc.IntType)])).astype(
             PETSc.IntType)
 
@@ -1802,7 +1802,7 @@ def weighted_gradient_matrix(V, S, i):
     w = assemble(TestFunction(DG) * dx)._v
     w.reciprocal()
     indptr, cols, _ = G.getValuesCSR()
-    need = np.unique(cols).astype(PETSc.IntType)
+    need = sorted_unique(cols).astype(PETSc.IntType)
     local = PETSc.Vec().createSeq(len(need), comm=PETSc.COMM_SELF)
     scatter = PETSc.Scatter().create(w, PETSc.IS().createGeneral(need, comm=PETSc.COMM_SELF),
                                      local, None)

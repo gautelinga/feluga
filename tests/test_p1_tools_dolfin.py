@@ -23,7 +23,6 @@ import pytest
 from tests import support
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 pytest.importorskip("dolfin")
 h5py = pytest.importorskip("h5py")
 
@@ -51,7 +50,7 @@ def _mesh(folder):
 
 def _run(folder, backend, ranks, stage):
     support.run([sys.executable, os.path.join(HERE, "p1_tools_worker.py"), backend, folder,
-                 stage], ranks, env={"PYTHONPATH": ROOT})
+                 stage], ranks)
     with open(os.path.join(folder, "{}-{}-{}.json".format(backend, ranks, stage))) as fh:
         return json.load(fh)
 

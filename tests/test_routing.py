@@ -1,5 +1,6 @@
-"""`hdf5_rows.rank_of`, the one hash that picks the rank a row of integers meets at, and
-`rank_order`, the sort that groups rows by rank.
+"""`hdf5_rows.rank_of`, the one hash that picks the rank a row of integers meets at,
+`rank_order`, the sort that groups rows by rank, and `unique_rows` and `sorted_unique`,
+np.unique by sorts (NumPy 2.3 and later hash a plain np.unique of ints).
 
     python3 -m pytest tests/test_routing.py
 
@@ -37,3 +38,34 @@ def test_rank_order_is_the_stable_argsort():
         dest = rng.integers(0, size, 20000)
         assert np.array_equal(rank_order(dest, size), np.argsort(dest, kind="stable"))
     assert rank_order(np.zeros(0, np.int64), 4).shape == (0,)
+
+
+def test_unique_rows_is_numpys():
+    """`hdf5_rows.unique_rows` is `np.unique(axis=0)`, the same rows in the same order,
+    on rows that pack into one key (vertex numbers, -1 for no second end, ranks) and on
+    rows whose ranges do not."""
+    from femtools.hdf5_rows import unique_rows as _unique_rows
+    rng = np.random.default_rng(2)
+    for top in (5, 1 << 20, 1 << 40):
+        rows = np.stack([rng.integers(0, 2, 5000), rng.integers(0, top, 5000),
+                         rng.integers(-1, top, 5000), rng.integers(0, 300, 5000)], 1)
+        rows = np.concatenate([rows, rows[::3]]).astype(np.int64)
+        assert np.array_equal(_unique_rows(rows), np.unique(rows, axis=0))
+    assert _unique_rows(np.zeros((0, 4), np.int64)).shape == (0, 4)
+
+
+def test_sorted_unique_is_numpys():
+    """`hdf5_rows.sorted_unique` is a plain `np.unique` of ints: the same values, sorted,
+    of the same type, for few and many distinct values, int32 and int64, a 2-D array
+    (flattened), one value and none."""
+    from femtools.hdf5_rows import sorted_unique
+    rng = np.random.default_rng(3)
+    for top in (3, 1 << 20, 1 << 40):
+        for dtype in (np.int32, np.int64):
+            a = rng.integers(-top // 2, top, 20000).astype(dtype)
+            got = sorted_unique(a)
+            assert got.dtype == a.dtype and np.array_equal(got, np.unique(a))
+    a = rng.integers(0, 50, (40, 7))
+    assert np.array_equal(sorted_unique(a), np.unique(a))
+    for a in (np.array([4]), np.zeros(0, np.int64)):
+        assert np.array_equal(sorted_unique(a), np.unique(a))

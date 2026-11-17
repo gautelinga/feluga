@@ -19,6 +19,5 @@ WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nullspace_wor
 @pytest.mark.parametrize("ranks", [1, pytest.param(3, marks=pytest.mark.mpi)])
 def test_constants(tmp_path, ranks):
     out = tmp_path / "err.txt"
-    support.run([sys.executable, WORKER, str(out)], ranks,
-                env={"PYTHONPATH": os.path.dirname(os.path.dirname(WORKER))})
+    support.run([sys.executable, WORKER, str(out)], ranks)
     assert float(out.read_text()) < 1e-12

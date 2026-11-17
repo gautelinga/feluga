@@ -18,7 +18,6 @@ import pytest
 from tests import support
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 WORKER = os.path.join(HERE, "nested_transfer_worker.py")
 TOL = 1e-12
 pytestmark = [pytest.mark.dolfin, pytest.mark.dolfinx]
@@ -29,7 +28,7 @@ def _run(backend, ranks, h5dir, tag, read_from=None):
     cmd = [sys.executable, WORKER, backend, str(out), str(h5dir)]
     if read_from:
         cmd.append(str(read_from))
-    support.run(cmd, ranks, env={"PYTHONPATH": ROOT})
+    support.run(cmd, ranks)
     return json.loads(out.read_text())
 
 

@@ -82,14 +82,13 @@ def test_one_over_volume_weighting_by_hand():
     assert not np.allclose(got, weighted, atol=1e-6)
 
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @pytest.fixture(scope="module")
 def serial_rows(tmp_path_factory):
     """The worker's rows on one rank, the reference for every parallel run."""
     out = tmp_path_factory.mktemp("gradient") / "one.npy"
-    support.run([sys.executable, WORKER, str(out)], 1, env={"PYTHONPATH": ROOT}, timeout=600)
+    support.run([sys.executable, WORKER, str(out)], 1, timeout=600)
     return np.load(out)
 
 
@@ -98,8 +97,7 @@ def serial_rows(tmp_path_factory):
 def test_two_ranks_match_serial(tmp_path, serial_rows, ghost_mode):
     """On two ranks the values are serial's, ghost cells or none: a ghost cell is its
     owner's to weigh, once."""
-    support.run([sys.executable, WORKER, str(tmp_path / "two.npy"), ghost_mode], 2,
-                env={"PYTHONPATH": ROOT}, timeout=600)
+    support.run([sys.executable, WORKER, str(tmp_path / "two.npy"), ghost_mode], 2, timeout=600)
     a, b = serial_rows, np.load(tmp_path / "two.npy")
     assert a.shape == b.shape
     a, b = a[np.lexsort(a[:, :3].T)], b[np.lexsort(b[:, :3].T)]

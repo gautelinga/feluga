@@ -24,7 +24,6 @@ h5py = pytest.importorskip("h5py")
 
 from femtools.layout_reader import LayoutReader  # noqa: E402
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 U = ("0.1 + 0.5*x[0] - 0.25*x[1] + x[0]*x[0] - 0.5*x[1]*x[2]",
      "-0.2 + x[2] + 0.75*x[1]*x[1] - 0.3*x[0]*x[1]",
@@ -63,8 +62,7 @@ def p_exact(x):
 def files(request, tmp_path_factory):
     pytest.importorskip("dolfin")
     out = str(tmp_path_factory.mktemp("layout{}".format(request.param)))
-    support.run([sys.executable, "-c", WRITER, repr(U), P, out], ranks=request.param,
-                env={"PYTHONPATH": ROOT})
+    support.run([sys.executable, "-c", WRITER, repr(U), P, out], ranks=request.param)
     return os.path.join(out, "mesh.h5"), os.path.join(out, "up.h5")
 
 

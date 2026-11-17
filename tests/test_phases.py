@@ -5,7 +5,6 @@
 Serially (no communicator: the world, or one rank without mpi4py) and under `mpirun -n 2`,
 where rank zero alone prints and the summed sizes are at least the largest.
 """
-import os
 import re
 import sys
 
@@ -13,7 +12,6 @@ import pytest
 
 from tests import support
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LINE = re.compile(r"phase (\w+): [\d.]+ s \(total [\d.]+ s\), peak RSS ([\d.]+) GB max a rank, "
                   r"([\d.]+) GB summed; now ([\d.]+) GB max a rank, ([\d.]+) GB summed")
 SCRIPT = r"""
@@ -26,7 +24,7 @@ mpi_print("done", 1)
 
 
 def run(ranks):
-    proc = support.run([sys.executable, "-c", SCRIPT], ranks=ranks, env={"PYTHONPATH": ROOT})
+    proc = support.run([sys.executable, "-c", SCRIPT], ranks=ranks)
     return proc.stdout.splitlines()
 
 

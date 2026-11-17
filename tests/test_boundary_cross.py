@@ -17,20 +17,17 @@ pytestmark = [pytest.mark.dolfinx, pytest.mark.dolfin, pytest.mark.mpi]
 from tests import support  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 WORKER = os.path.join(HERE, "boundary_cross_worker.py")
 
 
 def test_boundary_files_cross_backends(tmp_path):
-    env = {"PYTHONPATH": ROOT}
     for backend in ("dolfin", "dolfinx"):
         for ranks in (1, 3):
-            support.run([sys.executable, WORKER, "write", backend, str(tmp_path)], ranks,
-                        env=env)
+            support.run([sys.executable, WORKER, "write", backend, str(tmp_path)], ranks)
     for backend, other in (("dolfin", "dolfinx"), ("dolfinx", "dolfin")):
         for ranks in (1, 3):
             out = support.run([sys.executable, WORKER, "read", backend, str(tmp_path)],
-                              ranks, env=env).stdout
+                              ranks).stdout
             for dim in (2, 3):
                 for written in (1, 3):
                     name = "{}_{}_{}d.xdmf".format(other, written, dim)

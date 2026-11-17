@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from tests import support
 
 SCRIPT = r"""
 import sys
@@ -38,7 +38,7 @@ print("OK")
 
 
 def test_import_without_dolfin_or_mpi4py(tmp_path):
-    env = dict(os.environ, PYTHONPATH=ROOT)
+    env = dict(os.environ, PYTHONPATH=support.pythonpath())
     proc = subprocess.run([sys.executable, "-c", SCRIPT, str(tmp_path / "q.xdmf")],
                           capture_output=True, text=True, env=env, timeout=120)
     assert proc.returncode == 0 and "OK" in proc.stdout, proc.stderr[-2000:]

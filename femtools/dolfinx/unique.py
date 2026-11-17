@@ -165,6 +165,7 @@ class UniqueDofs:
         from petsc4py import PETSc
 
         from femtools.garbage import register
+        from femtools.memory import release
 
         self.V = V
         self.comm = V.mesh.comm
@@ -200,6 +201,7 @@ class UniqueDofs:
             nodes = np.arange(n_loc) if keys is None else keys // per_node
             cell_dofs = V.dofmap.list if ref_cells is None else ref_cells
             owned_unique = _rcm_order(owned_unique, rep, nodes, cell_dofs)
+            release()       # the graph's sorts, freed below glibc's mmap threshold
         n_unique = len(owned_unique)
         start = self.comm.exscan(n_unique) or 0
         n_global = self.comm.allreduce(n_unique)

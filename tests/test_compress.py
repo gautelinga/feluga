@@ -148,10 +148,7 @@ def test_write_ordered_under_mpi(tmp_path, h5py_build):
     pytest.importorskip("mpi4py")
     from tests import support
     worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compress_worker.py")
-    # the tree's femtools, not an installed one (the worker's own folder is tests/)
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env = {"mpio": {"H5PY_ALWAYS_USE_MPI": "1", "PYTHONPATH": root},
-           "gather": {"H5PY_NEVER_USE_MPI": "1", "PYTHONPATH": root}}
+    env = {"mpio": {"H5PY_ALWAYS_USE_MPI": "1"}, "gather": {"H5PY_NEVER_USE_MPI": "1"}}
     proc = support.run([sys.executable, worker, str(tmp_path)], 3, timeout=300,
                        env=env[h5py_build])
     assert proc.stdout.strip().splitlines() == [h5py_build, "ok"], proc.stdout + proc.stderr
@@ -166,10 +163,7 @@ def test_repeats_in_one_block_only(tmp_path, h5py_build):
     pytest.importorskip("mpi4py")
     from tests import support
     worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "repeats_worker.py")
-    # the tree's femtools, not an installed one (the worker's own folder is tests/)
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env = {"mpio": {"H5PY_ALWAYS_USE_MPI": "1", "PYTHONPATH": root},
-           "gather": {"H5PY_NEVER_USE_MPI": "1", "PYTHONPATH": root}}
+    env = {"mpio": {"H5PY_ALWAYS_USE_MPI": "1"}, "gather": {"H5PY_NEVER_USE_MPI": "1"}}
     proc = support.run([sys.executable, worker, str(tmp_path)], 2, timeout=120,
                        env=env[h5py_build])
     assert proc.stdout.strip().splitlines()[-1:] == ["ok"], proc.stdout + proc.stderr
@@ -186,10 +180,7 @@ def test_rewrite_under_mpi(tmp_path, h5py_build, vlen):
     pytest.importorskip("mpi4py")
     from tests import support
     worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rewrite_worker.py")
-    # the tree's femtools, not an installed one (the worker's own folder is tests/)
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env = {"mpio": {"H5PY_ALWAYS_USE_MPI": "1", "PYTHONPATH": root},
-           "gather": {"H5PY_NEVER_USE_MPI": "1", "PYTHONPATH": root}}
+    env = {"mpio": {"H5PY_ALWAYS_USE_MPI": "1"}, "gather": {"H5PY_NEVER_USE_MPI": "1"}}
     proc = support.run([sys.executable, worker, str(tmp_path)] + (["vlen"] if vlen else []),
                        3, timeout=300, env=env[h5py_build])
     assert proc.stdout.strip().splitlines() == [h5py_build, "0", "ok"], proc.stdout + proc.stderr

@@ -19,7 +19,6 @@ pytestmark = [pytest.mark.dolfinx]
 from tests import support  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 
 
 @pytest.fixture(autouse=True)
@@ -91,6 +90,6 @@ def test_compile_error_and_cache(jit_dir):
 def test_three_ranks(tmp_path, jit_dir):
     out = tmp_path / "res.json"
     support.run([sys.executable, os.path.join(HERE, "dolfinx_expression_worker.py"), str(out)],
-                3, env={"PYTHONPATH": ROOT, "FEMTOOLS_JIT_DIR": str(jit_dir)})
+                3, env={"FEMTOOLS_JIT_DIR": str(jit_dir)})
     res = json.loads(out.read_text())
     assert res["ok"] and res["size"] == 3

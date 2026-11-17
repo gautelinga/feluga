@@ -1,7 +1,7 @@
 # femtools
 
-Shared tools for our FEniCS solvers: stokes-beadpack, twoasis and addictif. Whatever more
-than one of them needed lives here once.
+Tools shared by the FEniCS solvers stokes-beadpack, twoasis and addictif: what more than
+one of them needs, written once.
 
 femtools began as a toolbox for **legacy dolfin** (FEniCS 2019.2). It now also runs on
 **DOLFINx** (0.11): `femtools.backend` gives both libraries one API, so a solver can be
@@ -14,10 +14,10 @@ What it is for:
 - **Periodic boxes that hold up in parallel.** Periodic spaces on either backend, a mesh
   partition that dolfin's parallel periodic dofmap cannot get wrong, and periodic
   refinement that keeps opposite faces matching.
-- **Files that keep what you computed.** XDMF that keeps P2 fields quadratic, dolfin's HDF5
+- **Files that keep what was computed.** XDMF that keeps P2 fields quadratic, dolfin's HDF5
   layout written and read by either backend on any number of ranks, and every dataset
   compressed.
-- **Doing the same work faster.** Forms, boundary conditions, interpolations and transfers
+- **Repeated work done once.** Forms, boundary conditions, interpolations and transfers
   set up once and reused, and matrices that store only the blocks a form couples.
 - **Very large meshes.** Nothing gathered on one rank, readers that stream, and errors that
   stop every rank instead of hanging the job.
@@ -68,7 +68,8 @@ with XDMFFile2(mesh.mpi_comm(), "up.xdmf") as f:
 ```
 
 In ParaView, raise "Nonlinear Subdivision Level" to see the quadratic field. On DOLFINx,
-`femtools.dolfinx.xdmf.XDMFSeries` writes the same file, word for word.
+`femtools.dolfinx.xdmf.XDMFSeries` writes the same XML for a time series (but for the HDF5
+file's name).
 
 ### A periodic box and probes (dolfin)
 
@@ -100,7 +101,7 @@ markers = BoundaryMarkers.read("boundaries.xdmf", mesh)
 
 ```bash
 femtools-cut-facets boundaries.xdmf walls.xdmf --markers 3,5,7:106   # keep some markers
-femtools-build-dof-reorder --out libdof_reorder_star.so              # see "Large meshes"
+femtools-build-dof-reorder --out libdof_reorder_star.so    # "Large meshes and long jobs"
 LD_PRELOAD=$PWD/libdof_reorder_star.so python3 solve.py
 ```
 
@@ -202,7 +203,7 @@ What `backend.dolfinx` is built on; useful directly when writing plain DOLFINx c
 
 ## How the two backends differ
 
-The API is the same; underneath, a few things are not, and you may see them:
+The API is the same; underneath, a few things differ, visibly:
 
 - **Periodicity.** dolfin builds periodic spaces into its dofmap (`constrained_domain`). Its
   parallel version can lose the pairing on some partitions, so a parallel periodic dolfin
@@ -214,6 +215,10 @@ The API is the same; underneath, a few things are not, and you may see them:
 - **Stored vectors.** In dolfin's HDF5 layout, a component split off a periodic mixed space
   is stored on all its nodes by dolfin and on its unique (periodic) dofs by DOLFINx. Both
   files name each cell's dofs, and every reader here goes through those.
+- **XDMF files.** On dolfin `XDMFFile` is femtools' `XDMFFile2` (P2 kept, several fields on
+  one grid), handing what it does not lay out (DG, P3, a whole mixed Function) to dolfin's
+  own writer; it reads and checkpoints too. On DOLFINx it writes facet markers and P1/P2
+  Functions alone, every write a timed grid (t = 0 when none is given).
 - **Methods and properties.** dolfin's `V.mesh()` is DOLFINx's `V.mesh`. Code meant for both
   uses the neutral helpers (`space_mesh`, `function_space`, `mesh_comm`, `owned_dofs`,
   `global_dim`, ...) and `as_backend_type(x).vec()` for a PETSc vector.
@@ -246,7 +251,7 @@ python3 -m pip install --user --break-system-packages --no-deps --no-build-isola
 ## Tests
 
 ```bash
-python3 -m pytest              # the quick tests, seconds
+python3 -m pytest              # the quick tests, a minute or two
 python3 -m pytest -m slow      # the mpirun and compile tests, minutes
 python3 -m pytest -m ""        # everything
 python3 -m pytest -m "" -n 4   # everything, in parallel (pytest-xdist)

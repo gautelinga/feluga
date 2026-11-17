@@ -42,9 +42,33 @@ def test_poiseuille(backend, ranks, kind, layout):
     assert r["split_k"] == pytest.approx(r["k"], rel=1e-12), r     # the split velocity
     assert r["cross"] < 1e-10 and r["divergence"] < 1e-8, r
     assert r["dim"] == 3 * P2_NODES + P1_NODES and r["pressure_dim"] == P1_NODES, r
+    assert r["uy_dim"] == P2_NODES, r                                # W.sub(0).sub(1) too
     assert (r["cells"], r["vertices"]) == (6 * N ** 3, (N + 1) ** 3), r
     assert r["markers"][:2] == [4 * 2 * N * N, 2 * 2 * N * N], r     # 4 other faces; y faces
     assert r["fixed"] == 3 * WALL_NODES, r
+
+
+@pytest.mark.parametrize("kind", ["fieldsplit", "shared"])
+@pytest.mark.parametrize("backend", ["dolfin", "dolfinx"])
+@pytest.mark.parametrize("ranks", [1, pytest.param(2, marks=pytest.mark.mpi)])
+def test_prefix_and_operator_change(backend, ranks, kind):
+    """A KSP with an options prefix gets the AMG on each velocity split (under its prefix),
+    and after A changes the preconditioner set up anew is the one before: the same
+    iterations and k (the pressure split keeps diag(M), not A's empty pressure block)."""
+    pytest.importorskip(backend)
+    proc = support.run([sys.executable, os.path.join(HERE, "backend_stokes_worker.py"),
+                        backend, kind, "vector", "resetup"], ranks, timeout=600)
+    out = [json.loads(line[7:]) for line in proc.stdout.splitlines()
+           if line.startswith("RESULT ")]
+    assert len(out) == 1, proc.stdout[-2000:]
+    r = out[0]
+    again = r["resetup"]
+    assert r["k"] == pytest.approx(1.0 / 12.0, rel=1e-8), r
+    assert again["iterations"] == r["iterations"], r
+    assert again["k"] == pytest.approx(r["k"], rel=1e-12), r
+    if kind == "fieldsplit":
+        assert again["splits"] == [["stokes_fieldsplit_u{}_".format(c), "hypre"]
+                                   for c in range(3)] + [["stokes_fieldsplit_p_", "python"]], r
 
 
 @pytest.mark.parametrize("writer,reader", [("dolfin", "dolfinx"), ("dolfinx", "dolfin")])

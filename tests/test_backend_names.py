@@ -5,7 +5,6 @@ backend's meshes, spaces and Functions. Each backend is imported in a process of
 
     python3 -m pytest tests/test_backend_names.py
 """
-import os
 import sys
 
 import pytest
@@ -13,7 +12,6 @@ import pytest
 from femtools.backend import NAMES
 from tests import support
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CHECK = """
 import importlib, sys
@@ -30,7 +28,7 @@ def test_names_unique():
 @pytest.mark.parametrize("backend", ["dolfin", "dolfinx"])
 def test_backend_exports_the_names(backend):
     pytest.importorskip(backend)
-    proc = support.run([sys.executable, "-c", CHECK, backend], env={"PYTHONPATH": ROOT})
+    proc = support.run([sys.executable, "-c", CHECK, backend])
     assert proc.stdout.strip().splitlines()[-1] == "True True []"
 
 
@@ -54,7 +52,7 @@ print(all(of(o) is L for o in objs), all(is_dolfinx(o) == (sys.argv[1] == "dolfi
 @pytest.mark.parametrize("backend", ["dolfin", "dolfinx"])
 def test_of_finds_the_backend_and_names_are_documented(backend):
     pytest.importorskip(backend)
-    proc = support.run([sys.executable, "-c", OF, backend], env={"PYTHONPATH": ROOT})
+    proc = support.run([sys.executable, "-c", OF, backend])
     assert proc.stdout.strip().splitlines()[-1] == "True True True []"
 
 

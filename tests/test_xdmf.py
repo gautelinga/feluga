@@ -960,9 +960,7 @@ A master dof is another rank's as often as not, so its value comes from the vect
     with open(script, 'w') as handle:
         handle.write(DIRECT_SCRIPT)
     # this checkout's femtools in the children, not whichever one is installed
-    proc = support.run([sys.executable, script, tmp('direct3')], 3, timeout=600,
-                       env={'PYTHONPATH': os.path.dirname(os.path.dirname(
-                           os.path.abspath(__file__)))})
+    proc = support.run([sys.executable, script, tmp('direct3')], 3, timeout=600)
     assert 'OK' in proc.stdout, proc.stdout[-400:]
     for tag in ('stale', 'ghostless'):
         path = tmp('direct3_{}.xdmf'.format(tag))
@@ -1442,9 +1440,8 @@ def test_periodic_read_at_the_nodes_on_other_ranks(ranks):
     with open(script, 'w') as handle:
         handle.write(READ_PERIODIC)
     path = tmp('read_periodic_{}.xdmf'.format(ranks))
-    env = {'PYTHONPATH': os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}
-    support.run([sys.executable, script, 'write', path], 3, timeout=600, env=env)
-    proc = support.run([sys.executable, script, 'read', path], ranks, timeout=600, env=env)
+    support.run([sys.executable, script, 'write', path], 3, timeout=600)
+    proc = support.run([sys.executable, script, 'read', path], ranks, timeout=600)
     assert proc.stdout.strip().endswith('ok'), proc.stdout + proc.stderr
 
 

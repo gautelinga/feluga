@@ -520,10 +520,9 @@ def lookup(comm, edges, block, wanted):
 
 def sorted_unique(a):
     """`np.unique(a)` for an int array: its distinct values, sorted, by a sort and a
-    neighbour comparison. NumPy 2.3 and later take a plain `np.unique` of ints through a
-    hash table and sort what it keeps, 20-100 times slower on many distinct values: in
-    the DOLFINx image's NumPy 2.4 it was 100 of the 123 s of the folded preallocation of
-    an RCP Stokes operator (h0.0175, 128 ranks; Olivia job 3008178, 2026-11-17)."""
+    neighbour comparison, which NumPy 2.3 and later replace with a hash table 20-100 times
+    slower on many distinct values (most of the folded preallocation's time at 10^8 dof
+    pairs)."""
     s = np.sort(np.asarray(a).ravel())
     if len(s) < 2:
         return s

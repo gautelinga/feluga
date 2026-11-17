@@ -4,7 +4,6 @@
 
 numpy and h5py; the three-rank write needs mpirun and mpi4py.
 """
-import os
 import sys
 
 import numpy as np
@@ -80,8 +79,7 @@ def test_three_ranks_write_their_blocks_in_rank_order(tmp_path):
     points, facets, markers = case()
     one, three = str(tmp_path / "one.xdmf"), str(tmp_path / "three.xdmf")
     boundaries.write(one, points, facets, markers)
-    support.run([sys.executable, "-c", WORKER, three, "blocks"], 3, timeout=300,
-                env=dict(PYTHONPATH=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    support.run([sys.executable, "-c", WORKER, three, "blocks"], 3, timeout=300)
     for a, b in zip(boundaries.read(one), boundaries.read(three)):
         assert np.array_equal(a, b) and a.dtype == b.dtype
     with h5py.File(str(tmp_path / "three.h5"), "r") as h5:
@@ -99,8 +97,7 @@ def test_three_ranks_write_nothing(tmp_path, h5py_build):
     boundaries.write(one, np.zeros((0, 3)), np.zeros((0, 3), np.int64), np.zeros(0, np.int64))
     env = {"mpio": {"H5PY_ALWAYS_USE_MPI": "1"}, "gather": {"H5PY_NEVER_USE_MPI": "1"}}
     support.run([sys.executable, "-c", WORKER, three, "empty"], 3, timeout=300,
-                env=dict(env[h5py_build],
-                         PYTHONPATH=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+                env=env[h5py_build])
     for a, b in zip(boundaries.read(one), boundaries.read(three)):
         assert a.shape == b.shape and len(a) == 0 and a.dtype == b.dtype
     assert open(one).read() == open(three).read().replace("three.h5", "one.h5")

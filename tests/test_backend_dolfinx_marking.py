@@ -2,8 +2,9 @@
 .compiled_facets): the facets dolfin's CompiledSubDomain marks, compared by their
 midpoints on the same unit square, with and without on_boundary; and what else of
 dolfin's marking and DirichletBC the backend keeps: the midpoint check of
-BoundaryMarkers.mark, the pointwise method, the refusal of another mesh's markers, and
-an Expression in a given element."""
+BoundaryMarkers.mark, the pointwise method (on a scalar space and on a mixed space's
+components), the refusal of another mesh's markers, and an Expression in a given
+element."""
 import numpy as np
 import pytest
 
@@ -77,6 +78,23 @@ def test_pointwise_pins_a_dof():
     assert len(bc.get_boundary_values()) == 1
     with pytest.raises(ValueError, match="method"):
         b.DirichletBC(Q, 0.0, "near(x[0], 0.0)", "nearby")
+
+
+def test_pointwise_on_mixed_components():
+    """A pointwise condition on the pressure W.sub(1) and on the velocity W.sub(0) of a
+    Taylor-Hood space pins the dofs at the point: one pressure dof, one a velocity
+    component, each among that component's own."""
+    b = _dolfinx_backend()
+    mesh = b.UnitSquareMesh(4, 4)
+    cell = mesh.ufl_cell()
+    W = b.FunctionSpace(mesh, b.MixedElement([b.VectorElement("CG", cell, 2),
+                                              b.FiniteElement("CG", cell, 1)]))
+    at = "near(x[0], 0.0) && near(x[1], 0.0)"
+    p = b.DirichletBC(W.sub(1), 0.0, at, "pointwise").global_rows()
+    u = b.DirichletBC(W.sub(0), (0.0, 0.0), at, "pointwise").global_rows()
+    assert len(p) == 1 and np.isin(p, b.owned_dofs(W, 1)).all()
+    assert len(u) == 2
+    assert [int(np.isin(u, b.owned_dofs(W, (0, j))).sum()) for j in range(2)] == [1, 1]
 
 
 def test_markers_of_another_mesh_refused():

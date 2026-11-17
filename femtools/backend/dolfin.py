@@ -31,10 +31,6 @@ from femtools.fast_assembly import assemble_matrix  # noqa: F401
 from femtools.fast_bc import apply as apply_bc  # noqa: F401
 from femtools.fast_interpolation import interpolate as _fast_interpolate
 from femtools.fast_interpolation import values as nodal_values  # noqa: F401
-# XDMFFile: femtools' drop-in for dolfin's, which keeps a P2 field's midside nodes (dolfin's
-# interpolates them away silently) and writes several fields on one grid, as the DOLFINx
-# backend's XDMFFile does
-from femtools.xdmf import XDMFFile2 as XDMFFile  # noqa: F401
 from femtools.mixed import (  # noqa: F401
     AssignedVectorFunction, set_subfunction, subfunction, subspace)
 from femtools.nullspace import constant_nullspace  # noqa: F401
@@ -42,6 +38,7 @@ from femtools.periodic import extent  # noqa: F401
 # Periodic boundary conditions on a box, from each periodic axis's (lower, upper)
 # bounds, e.g. PeriodicBox({0: (0, Lx)}) for periodicity in x.
 from femtools.periodic import periodic_box_from_bounds as PeriodicBox  # noqa: F401
+from femtools.xdmf import Unsupported, XDMFFile2
 
 # The UFL dolfin was built with: ufl_legacy in recent installations, ufl in older ones.
 try:
@@ -55,6 +52,53 @@ name = "dolfin"
 Coefficient = ufl.Coefficient
 Measure = ufl.Measure
 dx = ufl.dx
+
+
+class XDMFFile(XDMFFile2):
+    """femtools.xdmf.XDMFFile2, dolfin's XDMFFile with a P2 field's midside nodes kept and
+    several fields on one grid (its docstring lists its deliberate differences); a
+    Function it does not lay out (DG, P3, a whole mixed Function: femtools.xdmf
+    .Unsupported) is written by dolfin's own XDMFFile, as dolfin writes it, when it is the
+    file's first write: the file is then dolfin's, and every later write goes to dolfin's
+    writer too. After a grid of XDMFFile2's, such a Function is refused (one file, one
+    layout); so is a checkpoint in dolfin's file."""
+
+    _dolfin = None          # dolfin's XDMFFile, once a write needed it
+
+    def write(self, obj, *args, time=None, encoding=None):
+        import dolfin as df
+        if self._dolfin is None:
+            fresh = self._doc is None
+            try:
+                return super().write(obj, *args, time=time, encoding=encoding)
+            except Unsupported as e:
+                if not fresh:
+                    raise ValueError("{}: {}, and this file holds XDMFFile2's grids; write "
+                                     "it to a file of its own".format(self.path, e)) from e
+                if not isinstance(obj, df.Function):
+                    raise
+                self._doc = None        # made by the refused write, holding nothing
+                self._dolfin = df.XDMFFile(self._mpi_comm(), self.path)
+                for key, value in self.parameters.items():
+                    self._dolfin.parameters[key] = value
+        from femtools.xdmf import Encoding, _merge_write_arg, _split_write_args
+        t, e = _split_write_args(args)
+        time = _merge_write_arg(time, t, "time")
+        Encoding.of(_merge_write_arg(encoding, e, "encoding"))    # HDF5 alone, as XDMFFile2
+        return self._dolfin.write(obj) if time is None else self._dolfin.write(obj, time)
+
+    def write_checkpoint(self, *args, **kwargs):
+        if self._dolfin is not None:
+            raise RuntimeError("{} already holds dolfin's visualisation grids, and a "
+                               "checkpoint has a file layout of its own; use another file"
+                               .format(self.path))
+        return super().write_checkpoint(*args, **kwargs)
+
+    def close(self, compress_checkpoint=True):
+        if self._dolfin is not None:
+            self._dolfin.close()
+            self._dolfin = None
+        return super().close(compress_checkpoint)
 
 
 def set_default_mesh(mesh):
@@ -111,10 +155,8 @@ def owned_dofs(W, i):
     """The owned dofs of component i of the mixed space W (an index, or a path: (0, 1)
     is W.sub(0).sub(1)), as global indices of its vectors."""
     from petsc4py import PETSc
-    sub = W
-    for k in (tuple(i) if isinstance(i, (tuple, list)) else (i,)):
-        sub = sub.sub(k)
-    return np.asarray(sub.dofmap().dofs(), dtype=PETSc.IntType)
+    from femtools.couplings import sub_at
+    return np.asarray(sub_at(W, i).dofmap().dofs(), dtype=PETSc.IntType)
 
 
 def fixed_dofs(W, bcs):
@@ -252,7 +294,9 @@ def hmin(mesh):
 
 
 def global_dim(V):
-    """The space's dofs over all ranks (V.dim(); a component W.sub(i)'s alone)."""
+    """The space's dofs over all ranks (V.dim()); a component's alone, W.sub(i) or
+    W.sub(i).sub(j). Of a collapsed space (`subspace`), its dofs without the periodic
+    constraint, where DOLFINx's collapsed spaces keep it. Collective on DOLFINx."""
     return V.dim()
 
 
@@ -267,14 +311,14 @@ def global_num_vertices(mesh):
 
 
 def marker_counts(markers):
-    """The exterior facets of each marker over all ranks, as an array (`np.bincount`
-    of their markers, as femtools.boundaries.written_marker_counts gives a file's): of
-    `markers`, a facet MeshFunction (BoundaryMarkers). dolfin's own "on boundary" decides
-    which facets are exterior; on a mesh without ghost cells each is on one rank.
-    Collective."""
-    import numpy as np
+    """The number of exterior facets carrying each marker of `markers` (a facet
+    MeshFunction, BoundaryMarkers) over all ranks, as an array indexed by marker
+    (`np.bincount`, as femtools.boundaries.written_marker_counts counts a file's). dolfin's
+    "on_boundary" decides which facets are exterior; a mesh with ghost cells is refused,
+    and so is a negative marker (a size_t of 2**63 or more, a wrapped -1) on any rank, on
+    every rank. Collective."""
     from dolfin import CompiledSubDomain, MeshFunction
-    from mpi4py import MPI as _MPI
+    from femtools.boundaries import marker_bincount
     mesh = markers.mesh()
     tdim = mesh.topology().dim()
     comm = mesh.mpi_comm()
@@ -282,9 +326,7 @@ def marker_counts(markers):
         raise RuntimeError("marker_counts: a mesh with ghost cells")
     exterior = MeshFunction("size_t", mesh, tdim - 1, 0)
     CompiledSubDomain("on_boundary").mark(exterior, 1)
-    values = markers.array()[exterior.array() == 1].astype(np.int64)
-    n = comm.allreduce(int(values.max(initial=-1)) + 1, op=_MPI.MAX)
-    return comm.allreduce(np.bincount(values, minlength=n))
+    return marker_bincount(markers.array()[exterior.array() == 1], comm)
 
 
 def read_mesh_file(fname, periodic=None, tol=None):

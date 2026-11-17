@@ -25,14 +25,13 @@ import pytest
 from tests import support
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 WORKER = os.path.join(HERE, "periodic_robust_worker.py")
 
 
 def _run(mode, tmp_path, ranks, env=None):
     out = tmp_path / "{}_{}.json".format(mode, ranks)
     support.run([sys.executable, WORKER, mode, str(out)], ranks,
-                env=dict({"PYTHONPATH": ROOT}, **(env or {})))
+                env=env)
     return json.loads(out.read_text())
 
 

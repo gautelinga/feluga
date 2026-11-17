@@ -14,14 +14,13 @@ from tests import support
 pytestmark = pytest.mark.mpi
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 WORKER = os.path.join(HERE, "zero_cells_worker.py")
 
 
 def _run(backend, tmp_path):
     out = tmp_path / "{}.json".format(backend)
     support.run([sys.executable, WORKER, backend, str(tmp_path), str(out)], 4,
-                env={"PYTHONPATH": ROOT, "ZC_TIMEOUT": "120"}, timeout=180)
+                env={"ZC_TIMEOUT": "120"}, timeout=180)
     return json.loads(out.read_text())
 
 

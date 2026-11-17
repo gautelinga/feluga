@@ -28,8 +28,8 @@ Function or on a view `u.sub(i)`. A write to `u.x.array` not followed by
 
 Where dolfin's method names clash with DOLFINx's properties (`V.mesh()` against
 `V.mesh`, `u.function_space()` against `u.function_space`, `mesh.geometry().dim()`
-against `mesh.geometry.dim`), code calls the neutral helpers: `space_mesh`,
-`function_space`, `geometric_dimension`, `element_degree`, `owned_dofs`, `fixed_dofs`.
+against `mesh.geometry.dim`), code calls the neutral helpers (femtools.backend's
+docstring lists them).
 
 Supported: scalar and mixed Lagrange spaces (and DG), a mixed space's components
 vector ones too (`VectorElement`: Taylor-Hood as [P2^3, P1] or [P2, P2, P2, P1]),
@@ -59,6 +59,7 @@ from ufl import (  # noqa: F401
     TrialFunctions)
 
 from femtools import ksp  # noqa: F401
+from femtools.boundaries import marker_bincount
 from femtools.couplings import form_couplings  # noqa: F401
 from femtools.dolfinx import assembly as _assembly
 from femtools.dolfinx.boundary_markers import BoundaryMarkers, compiled_facets  # noqa: F401
@@ -71,7 +72,7 @@ from femtools.lru import LRU
 name = "dolfinx"
 dx = ufl.dx
 # What dolfin calls a Coefficient: a Function or a Constant (a ufl.Constant in DOLFINx),
-# for isinstance checks.
+# for isinstance checks alone: a tuple, not a class to call (Coefficient(V) is dolfin's).
 Coefficient = (ufl.Coefficient, ufl.Constant)
 DOLFIN_EPS = 3.0e-16
 DOLFIN_EPS_LARGE = 1.0e-14
@@ -213,11 +214,12 @@ def FiniteElement(family, cell, degree):
 
 
 def VectorElement(family, cell, degree, dim=None):
-    """dolfin's VectorElement: `dim` (default the cell's dimension) components of the
-    scalar element FiniteElement(family, cell, degree)."""
+    """dolfin's VectorElement: `dim` components of the scalar element
+    FiniteElement(family, cell, degree), by default the cell's topological dimension
+    (dolfin's: its geometric one; the two differ on a manifold alone)."""
     base = FiniteElement(family, cell, degree)
     if dim is None:
-        dim = base.cell.topological_dimension      # a property in UFL 2026
+        dim = base.cell.topological_dimension      # a method before UFL 2026, a property since
         dim = dim() if callable(dim) else dim
     n = int(dim)
     return basix.ufl.blocked_element(base, shape=(n,))
@@ -247,9 +249,8 @@ class BoxSpec:
 def PeriodicBox(bounds, tol=1e-10, map_tol=None, comm=None):
     """The box periodic along each axis in `bounds`, which maps the axis to its
     (lower, upper) bounds: {0: (0, Lx)} is periodic in x alone; `tol` the absolute
-    distance from a face that counts as on it. `map_tol` and `comm` are dolfin's (its
-    compiled box maps points within map_tol, and compiles on comm); taken here so a call
-    serves both backends, and unused: DOLFINx pairs dofs by position within `tol`."""
+    distance from a face that counts as on it. `map_tol` and `comm` are accepted for
+    dolfin's signature and unused (DOLFINx pairs dofs by position within `tol`)."""
     lower, upper = ([bounds[i][k] if i in bounds else 0. for i in range(3)] for k in (0, 1))
     return BoxSpec(lower, upper, [i in bounds for i in range(3)], tol)
 
@@ -291,16 +292,14 @@ def check_periodic_pairing(box, spaces):
 
 
 def global_dim(V):
-    """The space's unique dofs over all ranks (periodic slaves folded); a component
-    W.sub(i)'s alone. Collective for a component."""
-    parent = getattr(V, "_parent", None)
-    if parent is None:
+    """The space's unique dofs over all ranks (periodic slaves folded); a component's
+    alone, W.sub(i) or W.sub(i).sub(j). Collective."""
+    root = V
+    while hasattr(root, "_parent"):
+        root = root._parent
+    if root is V:
         return unique_dofs(V).n_global
-    component = list(V.component())
-    if len(component) != 1:
-        raise NotImplementedError("global_dim: a component of a mixed space, not of one of "
-                                  "its components")
-    return parent.mesh.comm.allreduce(len(owned_dofs(parent, component[0])))
+    return V.mesh.comm.allreduce(len(owned_dofs(root, tuple(V.component()))))
 
 
 def global_num_cells(mesh):
@@ -314,17 +313,16 @@ def global_num_vertices(mesh):
 
 
 def marker_counts(markers):
-    """The exterior facets of each marker over all ranks, as an array (`np.bincount`
-    of their markers, as femtools.boundaries.written_marker_counts gives a file's): of
-    `markers`, a BoundaryMarkers; each exterior facet counted by the rank owning it.
+    """The number of exterior facets carrying each marker of `markers` (a BoundaryMarkers)
+    over all ranks, as an array indexed by marker (`np.bincount`, as
+    femtools.boundaries.written_marker_counts counts a file's), each exterior facet
+    counted by its owning rank. A negative marker on any rank is refused on every rank.
     Collective."""
     mesh = markers.mesh
     comm = mesh.comm
     n_own = mesh.topology.index_map(mesh.topology.dim - 1).size_local
     ext = np.asarray(markers.boundary)
-    values = markers.values[ext[ext < n_own]].astype(np.int64)
-    n = comm.allreduce(int(values.max(initial=-1)) + 1, op=_MPI.MAX)
-    return comm.allreduce(np.bincount(values, minlength=n))
+    return marker_bincount(markers.values[ext[ext < n_own]], comm)
 
 
 def read_mesh_file(fname, periodic=None, tol=None):
@@ -474,9 +472,14 @@ def _space(V, box, parent=None):
 
 def FunctionSpace(mesh, family, degree=None, constrained_domain=None):
     """A space as dolfin makes one: FunctionSpace(mesh, 'CG', 2) or
-    FunctionSpace(mesh, element), periodic when constrained_domain is a box spec."""
+    FunctionSpace(mesh, element), periodic when constrained_domain is a box spec; then
+    its unique dofs (the periodic pairing and the dof order: `unique_dofs`) are made
+    here, as dolfin makes its periodic dofmap with the space. Collective."""
     element = FiniteElement(family, mesh.ufl_cell(), degree) if degree is not None else family
-    return _space(fem.functionspace(_first(mesh), element), constrained_domain)
+    V = _space(fem.functionspace(_first(mesh), element), constrained_domain)
+    if constrained_domain is not None:
+        unique_dofs(V)
+    return V
 
 
 def unique_dofs(V):
@@ -970,7 +973,9 @@ def constant_on(value, mesh):
 
 
 class Constant(fem.Constant):
-    """dolfin's Constant(value): on the last mesh a space was made on, unless given."""
+    """dolfin's Constant(value): on the last mesh a space was made on, unless `mesh` is
+    given. The second argument is the mesh, where dolfin's is a cell (`constant_on(value,
+    mesh)` is the call both take)."""
 
     def __init__(self, value, mesh=None):
         mesh = _DEFAULT_MESH[0] if mesh is None else mesh
@@ -1261,13 +1266,12 @@ Measure = ufl.Measure
 class DirichletBC:
     """dolfin's DirichletBC(V, value, markers, marker) on a scalar space, a scalar
     component W.sub(i) of a mixed one, or a vector component (Taylor-Hood's velocity
-    W.sub(0), each of its components in turn); `value` a number, a Constant (a vector one
-    on a vector component, or a tuple), or (on a whole scalar space) a Function on V;
-    DirichletBC(bc) copies one. It acts on the
-    compact vectors and matrices: `apply(A)` sets the constrained rows to the
-    identity's (keeping the pattern, as dolfin does), `apply(b)` sets the values,
-    `apply(A, b)` both. A periodic slave on the boundary is its master (on the
-    boundary too, where the data agree)."""
+    W.sub(0), each of its components in turn); `value` a number, a Constant (a vector one,
+    or a tuple, on a vector component), or on a whole scalar space a Function on V.
+    DirichletBC(bc) copies one. It acts on the compact vectors and matrices: `apply(A)`
+    sets the constrained rows to the identity's (keeping the pattern, as dolfin does),
+    `apply(b)` sets the values, `apply(A, b)` both. A periodic slave on the boundary is
+    its master (on the boundary too, where the data agree)."""
 
     METHODS = ("topological", "geometric", "pointwise")
 
@@ -1385,7 +1389,7 @@ def compiled_dofs(V, code):
     from femtools.dolfinx.expression import CompiledExpression
     if hasattr(V, "_parent"):
         Vc, parent = V.collapse()
-        x, dofs = Vc.tabulate_dof_coordinates(), np.asarray(parent, dtype=np.int32)
+        x, dofs = Vc.tabulate_dof_coordinates(), flat_collapse_map(parent)
     else:
         x = V.tabulate_dof_coordinates()
         dofs = np.arange(len(x), dtype=np.int32)
@@ -1537,11 +1541,12 @@ def constant_nullspace(A, V):
     return null
 
 
-def norm(x, norm_type="L2", mesh=None):
+def norm(v, norm_type="L2", mesh=None):
     """dolfin's norm: of a Vector, "l1", "l2" or "linf"; of a Function, the integral norm
-    "L2", "H1" or "H10" (the name in either case). `mesh` is dolfin's, for a norm of an
-    Expression; this backend's Expressions are Functions on a mesh of their own, so it is
-    taken and not needed. Collective."""
+    "L2", "H1" or "H10" (the name in either case). `mesh` is accepted for dolfin's
+    signature and unused: this backend's Expressions are Functions on a mesh of their own.
+    Collective."""
+    x = v
     t = norm_type.lower()
     if isinstance(x, fem.Function):
         sync(x)
@@ -1618,11 +1623,9 @@ class PETScKrylovSolver:
         k.getPC().setReusePreconditioner(self._reuse)  # what KSPSetReusePreconditioner does
         ksp.apply_parameters(k, self.parameters)
         k.solve(b._v, x._v)
-        reason = k.getConvergedReason()
         its = k.getIterationNumber()
-        if reason < 0 and self.parameters.get("error_on_nonconvergence", True):
-            raise RuntimeError("PETScKrylovSolver: the solve did not converge (PETSc reason "
-                               "{}, {} iterations)".format(reason, its))
+        if self.parameters.get("error_on_nonconvergence", True):
+            ksp.check(k, "PETScKrylovSolver")
         if self.parameters.get("report") and MPI.comm_world.rank == 0:
             print("PETSc Krylov solver ({}, {}) converged in {} iterations.".format(
                 k.getType(), k.getPC().getType(), its))

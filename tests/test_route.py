@@ -9,7 +9,6 @@ same bits; a rank with no rows may pass an empty array of another dtype; ranks p
 rows of different dtypes, and a destination outside the ranks, are refused on every rank
 (the job ends with the message rather than hanging).
 """
-import os
 import shutil
 import subprocess
 import sys
@@ -18,7 +17,6 @@ import pytest
 
 from tests import support
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 WORKER = r"""
 import sys
@@ -84,7 +82,7 @@ def mpirun(tmp_path, kind, env_extra=None):
     script.write_text(WORKER)
     env = support.clean_env()
     env["OMP_NUM_THREADS"] = "1"
-    env["PYTHONPATH"] = ROOT
+    env["PYTHONPATH"] = support.pythonpath()
     env.update(env_extra or {})
     return subprocess.run(["mpirun", "-n", "3", sys.executable, str(script), kind],
                           capture_output=True, text=True, timeout=120, env=env)

@@ -16,6 +16,8 @@ a communicator is passed, dolfin never.
                                           a file's markers on a mesh's exterior facets
     counts = written_marker_counts(path)  how many facets carry each marker, the markers
                                           read a block at a time
+    counts = marker_bincount(values, comm)
+                                          the same over ranks' shares of the markers
     BoundaryMarkers(mesh)                 a facet MeshFunction written and read as this file
                                           (femtools.boundary_markers; imports dolfin)
 """
@@ -338,3 +340,21 @@ def written_marker_counts(path, chunk=1 << 24):
                 counts = np.pad(counts, (0, len(block) - len(counts)))
             counts[:len(block)] += block
     return counts
+
+
+
+def marker_bincount(values, comm):
+    """`np.bincount` of the markers `values` (this rank's share, ints) summed over the
+    ranks of `comm` (mpi4py), as long as the largest marker on any rank, as
+    `written_marker_counts` counts a file's. A negative marker on any rank (an int64 view
+    of a size_t of 2**63 or more, such as a wrapped -1, included) is refused on every rank
+    together. Collective."""
+    from mpi4py import MPI
+    values = np.asarray(values).astype(np.int64)
+    mine = np.array([values.min(initial=0) < 0, values.max(initial=-1) + 1], dtype=np.int64)
+    agreed = np.empty_like(mine)
+    comm.Allreduce(mine, agreed, op=MPI.MAX)
+    if agreed[0]:
+        raise ValueError("marker_bincount: a negative marker (or a size_t one of 2**63 or "
+                         "more) on some rank")
+    return comm.allreduce(np.bincount(values, minlength=int(agreed[1])))

@@ -133,6 +133,18 @@ def diagonal_matrix(values, comm):
     return D
 
 
+def check(ksp, what="the Krylov solver"):
+    """The iterations of the petsc4py KSP's last solve, raising unless it converged (a
+    negative converged reason; the reason is the same on every rank, so every rank
+    raises)."""
+    iterations = ksp.getIterationNumber()
+    reason = ksp.getConvergedReason()
+    if reason < 0:
+        raise RuntimeError("{} did not converge: PETSc reason {}, after {} iterations"
+                           .format(what, reason, iterations))
+    return iterations
+
+
 def apply_parameters(ksp, parameters):
     """Apply dolfin's Krylov solver parameters to the petsc4py KSP `ksp`:
     nonzero_initial_guess, relative_tolerance, absolute_tolerance, divergence_limit,

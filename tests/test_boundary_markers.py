@@ -20,7 +20,6 @@ from femtools import boundaries  # noqa: E402
 from femtools.boundaries import BoundaryMarkers  # noqa: E402
 from tests import support  # noqa: E402
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARTRAC = os.environ.get("PARTRAC_BIN", os.path.expanduser("~/git/partrac/build/bin"))
 
 MARK = """
@@ -170,8 +169,7 @@ def test_three_ranks_write_and_read_the_one_rank_file(tmp_path):
     mesh, b = marked(3, 5)
     one, three = str(tmp_path / "one.xdmf"), str(tmp_path / "three.xdmf")
     b.write(one)
-    support.run([sys.executable, "-c", WORKER, one, three], 3, timeout=600,
-                env=dict(PYTHONPATH=ROOT))
+    support.run([sys.executable, "-c", WORKER, one, three], 3, timeout=600)
     assert np.array_equal(boundaries.read(one)[0], boundaries.read(three)[0])
     assert by_position(one) == by_position(three)
     assert np.array_equal(BoundaryMarkers.read(three, mesh).array(), expected(b))
@@ -198,6 +196,5 @@ def test_fewer_facets_than_ranks_and_none(tmp_path):
     """One marked facet on three ranks, and none: ranks with nothing to send take part
     in the exchange rather than raising before it"""
     proc = support.run([sys.executable, "-c", FEW, str(tmp_path / "few.xdmf")], 3,
-                       timeout=300,
-                       env=dict(PYTHONPATH=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+                       timeout=300)
     assert "READ 1 OF 1" in proc.stdout and "READ 0 OF 0" in proc.stdout, proc.stdout

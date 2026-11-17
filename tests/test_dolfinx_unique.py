@@ -23,13 +23,11 @@ pytestmark = [pytest.mark.dolfinx]
 from tests import support  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 
 
 def _run(worker, tmp_path, ranks):
     out = tmp_path / f"{worker}.{ranks}.json"
-    support.run([sys.executable, os.path.join(HERE, worker + ".py"), str(out)], ranks,
-                env={"PYTHONPATH": ROOT})
+    support.run([sys.executable, os.path.join(HERE, worker + ".py"), str(out)], ranks)
     return json.loads(out.read_text())
 
 

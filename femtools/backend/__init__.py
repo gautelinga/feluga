@@ -17,6 +17,15 @@ written for both calls the neutral helpers instead: `space_mesh`, `function_spac
 counts over all ranks `global_dim`, `global_num_cells`, `global_num_vertices`,
 `marker_counts`.
 
+The names' signatures agree but where tests/test_backend_signatures.py lists them, each
+with its reason: UFL's own parameter names and versions, dolfin's generic `(*args,
+**kwargs)` wrappers, and the documented differences of the DOLFINx backend --
+`Coefficient` a tuple for isinstance checks, `Constant(value, mesh)` against dolfin's
+`Constant(value, cell)`, `VectorElement`'s default `dim` (the topological dimension, not
+the geometric one), and `XDMFFile(comm, path)` for writing alone, every write a timed grid
+(t = 0 when none is given), where dolfin's is femtools.xdmf.XDMFFile2 (a name or a
+communicator and a name; reads and checkpoints too).
+
 Neither module is imported by `import femtools.backend`. Code that takes a mesh, space or
 Function of either finds its backend with `of(obj)` (the module, to write once against
 NAMES) or `is_dolfinx(obj)` (to branch where the mechanism differs); `load(name)` imports

@@ -18,13 +18,12 @@ import pytest
 from tests import support
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 
 
 def _run(backend, ranks):
     pytest.importorskip(backend)
     proc = support.run([sys.executable, os.path.join(HERE, "shared_amg_worker.py"), backend],
-                       ranks, env={"PYTHONPATH": ROOT})
+                       ranks)
     out = [json.loads(line[7:]) for line in proc.stdout.splitlines()
            if line.startswith("RESULT ")]
     assert len(out) == ranks, proc.stdout[-2000:]

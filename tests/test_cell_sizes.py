@@ -40,6 +40,5 @@ def test_hmin_hmax_over_all_ranks(backend):
     if backend == "dolfinx":
         pytest.importorskip("dolfinx")
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    proc = support.run([sys.executable, "-c", SCRIPT, backend], 3, cwd=root,
-                       env={"PYTHONPATH": root})
+    proc = support.run([sys.executable, "-c", SCRIPT, backend], 3, cwd=root)
     assert "SAME True True" in proc.stdout, proc.stdout[-2000:]

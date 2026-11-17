@@ -219,9 +219,7 @@ def test_grids_on_ranks_parsed_by_rank_zero(tmp_path):
     from tests import support
     path = tmp_path / "u.xdmf"
     path.write_text(SERIES)
-    proc = support.run([sys.executable, "-c", GRIDS_ON_RANKS, str(path)], 3,
-                       env={"PYTHONPATH": os.path.dirname(os.path.dirname(
-                           os.path.abspath(__file__)))})
+    proc = support.run([sys.executable, "-c", GRIDS_ON_RANKS, str(path)], 3)
     assert proc.stdout.strip() == str([(1, [0.0, 0.5], "FileNotFoundError")]
                                       + [(0, [0.0, 0.5], "FileNotFoundError")] * 2), \
         proc.stdout

@@ -155,6 +155,12 @@ class Encoding(object):
         return name
 
 
+class Unsupported(ValueError):
+    """A Function whose element `XDMFFile2` does not lay out (not P1 or P2 Lagrange),
+    refused before anything is written; dolfin's XDMFFile writes it, interpolated to the
+    vertices."""
+
+
 class XDMFParameters(object):
     """dolfin's three parameters, and its habit of refusing a key it does not know.
 
@@ -1632,11 +1638,11 @@ def _check_functions(functions):
     for V in spaces:
         element = V.ufl_element()
         if element.family() not in ('Lagrange', 'P', 'CG'):
-            raise ValueError('{} is not a Lagrange element; use dolfin.XDMFFile'
-                             .format(element.family()))
+            raise Unsupported('{} is not a Lagrange element; use dolfin.XDMFFile'
+                              .format(element.family()))
         if element.degree() not in (1, 2):
-            raise ValueError('degree {} is not something this writes; use '
-                             'dolfin.XDMFFile'.format(element.degree()))
+            raise Unsupported('degree {} is not something this writes; use '
+                              'dolfin.XDMFFile'.format(element.degree()))
     degree = max(V.ufl_element().degree() for V in spaces)
     cellname = mesh.ufl_cell().cellname()
     if cellname not in ('interval', 'triangle', 'tetrahedron'):

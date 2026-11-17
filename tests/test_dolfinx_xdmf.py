@@ -1,10 +1,10 @@
 """`femtools.dolfinx.xdmf.XDMFSeries`: DOLFINx time series in XDMFFile2's layout.
 
 DOLFINx writes two steps of a periodic P2 scalar, a P1 scalar and a periodic P2 vector,
-and of the vector and the P1 scalar together on one node set (`write((u, p), t)`, as
-solve-stokes writes its flow), on one rank and on three; dolfin's XDMFFile2 reads every step back into its own spaces
-(the periodic ones included) equal to the fields to round-off, and the XML is the one
-XDMFFile2 writes for the same fields, word for word but for the HDF5 file's name.
+and of the vector and the P1 scalar together on one node set (`write((u, p), t)`), on one
+rank and on three; dolfin's XDMFFile2 reads every step back into its own spaces (the
+periodic ones included) equal to the fields to round-off, and the XML is the one XDMFFile2
+writes for the same fields, word for word but for the HDF5 file's name.
 
     python3 -m pytest tests/test_dolfinx_xdmf.py -m "dolfinx and dolfin"
 """
@@ -20,14 +20,13 @@ pytestmark = [pytest.mark.dolfinx, pytest.mark.dolfin]
 from tests import support  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 WORKER = os.path.join(HERE, "dolfinx_xdmf_worker.py")
 FIELDS = ("s2", "s1", "v2")
 
 
 def _run(mode, folder, ranks, out=None):
     argv = [sys.executable, WORKER, mode, str(folder)] + ([str(out)] if out else [])
-    support.run(argv, ranks, env={"PYTHONPATH": ROOT})
+    support.run(argv, ranks)
     return json.loads(out.read_text()) if out else None
 
 
@@ -52,6 +51,7 @@ def test_series_three_ranks(tmp_path):
     _check(tmp_path, 3)
 
 
+@pytest.mark.mpi
 @pytest.mark.parametrize("ranks", [1, 3])
 def test_read_on_dolfinx(tmp_path, ranks):
     """DOLFINx reads every step of both backends' series (written on three ranks and by

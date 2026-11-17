@@ -94,8 +94,7 @@ def test_refuses(what):
 @pytest.mark.mpi
 def test_three_ranks(tmp_path):
     out = tmp_path / "err.txt"
-    support.run([sys.executable, WORKER, str(out)], 3,
-                env={"PYTHONPATH": os.path.dirname(os.path.dirname(os.path.abspath(__file__)))})
+    support.run([sys.executable, WORKER, str(out)], 3)
     assert float(out.read_text()) < 1e-13
 
 

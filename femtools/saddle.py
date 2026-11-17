@@ -18,20 +18,17 @@ for its setup alone (`femtools.ksp.scoped`). `W` is the Taylor-Hood space of eit
 [P2^3, P1] or [P2, P2, P2, P1]: the pressure is its last component, the velocity every
 scalar component before it (`shared_amg.velocity_paths`). A is the operator stored by
 component (`femtools.couplings`), as `assemble(a, couplings="form", bcs=bcs)` gives it on
-either backend. From stokes-beadpack's solve-stokes (2026-11-16), where it was written out
-for legacy dolfin.
+either backend. From stokes-beadpack's solve-stokes (2026-11-16).
 """
 import numpy as np
 
-
-def _backend(W):
-    from femtools.backend import of
-    return of(W)
+from femtools.backend import of
+from femtools.couplings import num_sub_spaces
 
 
 def _pressure_index(W):
     """The pressure's index among W's sub-spaces: its last."""
-    n = W.num_sub_spaces() if callable(W.num_sub_spaces) else W.num_sub_spaces
+    n = num_sub_spaces(W)
     if n < 2:
         raise ValueError("a Stokes space has a velocity and a pressure; this one has {} "
                          "sub-space(s)".format(n))
@@ -40,13 +37,13 @@ def _pressure_index(W):
 
 def pressure_dofs(W):
     """The pressure's owned dofs, as global indices of A's numbering."""
-    return _backend(W).owned_dofs(W, _pressure_index(W))
+    return of(W).owned_dofs(W, _pressure_index(W))
 
 
 def pressure_mass_diagonal(W, mu=1.0):
     """diag(M)/mu on the pressure's owned dofs (in `pressure_dofs` order): the lumped P1
     mass times 2/(d + 2), which is diag(M) exactly on simplices. Collective."""
-    L = _backend(W)
+    L = of(W)
     i = _pressure_index(W)
     mesh = L.space_mesh(W)
     if (L.element_degree(W.sub(i)) != 1
@@ -63,36 +60,66 @@ class BlockPreconditioner:
     """What `block_preconditioner` set up and must free: `destroy()` once the solves are
     done (before the next phases' buffers; the KSP is the caller's)."""
 
-    def __init__(self, kind, shell=None, D=None, sets=()):
-        self.kind, self.shell, self.D, self.sets = kind, shell, D, list(sets)
+    def __init__(self, kind, shell=None, held=()):
+        self.kind, self.shell, self.held = kind, shell, list(held)
 
     def destroy(self):
-        for o in (self.shell, self.D, *self.sets):
+        for o in (self.shell, *self.held):
             if o is not None:
                 o.destroy()
-        self.shell, self.D, self.sets = None, None, []
+        self.shell, self.held = None, []
+
+
+class _Jacobi:
+    """The pressure split's preconditioner, y = x / diag(M): a Python PC holding diag(M)
+    itself, where PETSc's Jacobi would read the split's operator, which PCFieldSplit sets
+    to A's (empty) pressure block again whenever A changes and the PC is set up anew. The
+    same arithmetic as Jacobi on diag(M) (VecPointwiseMult by the reciprocals)."""
+
+    def __init__(self, inverse):
+        self.inverse = inverse
+
+    def setUp(self, pc):
+        pass
+
+    def apply(self, pc, x, y):
+        y.pointwiseMult(x, self.inverse)
+
+    def destroy(self, pc=None):
+        """Called by PETSc with the PC when the KSP goes, and by BlockPreconditioner:
+        once is enough."""
+        self.inverse.destroy()
 
 
 def block_preconditioner(ksp, A, W, diag_M, amg_options, kind="shared", velocity=None):
     """Set up `ksp`'s preconditioner on A (the operator on W) as diag(AMG on each velocity
     component, Jacobi on `diag_M`): `kind` "shared" (one AMG, `shared_amg.SharedVelocityPC`)
     or "fieldsplit" (one each). `velocity`, the components' paths (default every scalar
-    component but the last); `amg_options` without a prefix (PETSC_OPTIONS winning). Sets
-    the KSP up. Returns the BlockPreconditioner to destroy. Collective."""
+    component but the last); `amg_options` without a prefix (PETSC_OPTIONS winning), on
+    "fieldsplit" set under the KSP's own options prefix. Sets the KSP up; on "fieldsplit"
+    A may change afterwards (the splits are set up anew, diag_M kept). Returns the
+    BlockPreconditioner to destroy. Collective."""
     from petsc4py import PETSc
 
-    from femtools.ksp import defaults, diagonal_matrix, scoped
+    from femtools.ksp import defaults, scoped
+    from femtools.memory import release
     from femtools.shared_amg import (SharedVelocityPC, check_blocks, component_index_sets,
-                                     velocity_paths)
-    L = _backend(W)
+                                     first_block, velocity_paths)
+    L = of(W)
     comm = L.mesh_comm(L.space_mesh(W))
     velocity = velocity_paths(W) if velocity is None else tuple(velocity)
     p_dofs = pressure_dofs(W)
     pc = ksp.getPC()
     if kind == "shared":
         sets = component_index_sets(W, comm, velocity)
-        check_blocks(A, sets, comm)
-        shell = SharedVelocityPC(A, sets, p_dofs, diag_M, comm, amg_options)
+        K = first_block(A, sets, comm)      # extracted once: checked, then the AMG's
+        try:
+            check_blocks(A, sets, comm, K0=K)
+        except Exception:
+            K.destroy()
+            raise
+        release()       # their temporaries, before the AMG's setup
+        shell = SharedVelocityPC(A, sets, p_dofs, diag_M, comm, amg_options, K=K)
         pc.setType("python")
         pc.setPythonContext(shell)
         ksp.setFromOptions()
@@ -106,35 +133,35 @@ def block_preconditioner(ksp, A, W, diag_M, amg_options, kind="shared", velocity
               for c, path in enumerate(velocity)]
     splits.append(("p", PETSc.IS().createGeneral(p_dofs, comm=comm)))
     pc.setFieldSplitIS(*splits)
-    # the pressure split's operator is replaced below; until then it is the operator's
+    # the pressure split's preconditioner is set below; until then its operator is A's
     # empty pressure block, on which nothing should be set up
-    options = {"pc_fieldsplit_type": "additive", "fieldsplit_p_ksp_type": "preonly",
-               "fieldsplit_p_pc_type": "none"}
+    prefix = ksp.getOptionsPrefix() or ""
+    options = {prefix + "pc_fieldsplit_type": "additive",
+               prefix + "fieldsplit_p_ksp_type": "preonly",
+               prefix + "fieldsplit_p_pc_type": "none"}
     for c in range(len(velocity)):
-        prefix = "fieldsplit_u{}_".format(c)
-        options.update({prefix + "ksp_type": "preonly", prefix + "pc_type": "hypre"})
-        options.update(defaults(prefix, amg_options))
+        split = prefix + "fieldsplit_u{}_".format(c)
+        options.update({split + "ksp_type": "preonly", split + "pc_type": "hypre"})
+        options.update(defaults(split, amg_options))
     # in the database for the setup, which reads them, and taken out after it: left
     # there, a later build in the process kept this one's AMG settings whatever it asked
     with scoped("", options):
         ksp.setFromOptions()
         ksp.setUp()
-    D = diagonal_matrix(diag_M, comm)
-    pressure = pc.getFieldSplitSubKSP()[len(velocity)]
-    pressure.setOperators(D, D)
-    pressure.getPC().setType("jacobi")
+    inverse = PETSc.Vec().createMPI((len(diag_M), PETSc.DECIDE), comm=comm)
+    inverse.setArray(1.0 / np.asarray(diag_M, dtype=float))
+    jacobi = _Jacobi(inverse)
+    pressure = pc.getFieldSplitSubKSP()[len(velocity)].getPC()
+    pressure.setType("python")
+    pressure.setPythonContext(jacobi)
     pressure.setUp()
-    return BlockPreconditioner(kind, D=D, sets=[s for _, s in splits])
+    return BlockPreconditioner(kind, held=[jacobi] + [s for _, s in splits])
 
 
 def solve_checked(ksp, b, x):
     """ksp.solve(b, x) (PETSc vectors), raising unless it converged; returns the
     iterations. The ghosts of a Function whose vector x is are the caller's to bring up to
     date (the backend's `sync`)."""
+    from femtools.ksp import check
     ksp.solve(b, x)
-    iterations = ksp.getIterationNumber()
-    reason = ksp.getConvergedReason()
-    if reason < 0:
-        raise RuntimeError("the Krylov solver did not converge: PETSc reason {}, after {} "
-                           "iterations".format(reason, iterations))
-    return iterations
+    return check(ksp)

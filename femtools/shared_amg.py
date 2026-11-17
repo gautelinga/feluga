@@ -26,6 +26,8 @@ Stokes solve's velocity preconditioner.
 import numpy as np
 from petsc4py import PETSc
 
+from femtools.couplings import sub_at
+
 PREFIX = "velocity_"
 VELOCITY = ((0, 0), (0, 1), (0, 2))      # [P2^3, P1]'s velocity, as paths
 
@@ -57,23 +59,17 @@ def component_index_sets(W, comm, components=None):
     return _dolfin_sets(W, comm, components)
 
 
-def _sub(W, path, legacy):
-    for i in path:
-        W = W.sub(i) if legacy else W.sub([i])
-    return W
-
-
-def _paired(first, other, c, comm):
-    """`other`'s entry at each distinct value of `first` (aligned), refusing two (on every
-    rank together)."""
+def _paired(keys, inv, other, c, comm):
+    """`other`'s entry at each distinct value `keys` of the first component's dofs, `inv`
+    their positions (np.unique's inverse; `other` aligned with them), refusing two (on
+    every rank together)."""
     from femtools.hdf5_rows import agreed
-    keys, inv = np.unique(first, return_inverse=True)
     pair = np.full(len(keys), -1, dtype=np.int64)
     pair[inv] = other
     if agreed(comm, not np.array_equal(pair[inv], other)):
         raise RuntimeError("component {} is paired with the first differently by two "
                            "cells".format(c))
-    return keys, pair
+    return pair
 
 
 def _dolfin_sets(W, comm, components):
@@ -82,8 +78,8 @@ def _dolfin_sets(W, comm, components):
     to_global = np.asarray(W.dofmap().tabulate_local_to_global_dofs(), dtype=np.int64)
     from femtools.hdf5_rows import agreed
     cells = np.arange(W.mesh().num_cells(), dtype=np.int64)
-    maps = [_sub(W, p, True).dofmap() for p in components]
-    nodes = _sub(W, components[0], True).element().space_dimension()   # a cell's, every rank
+    maps = [sub_at(W, p).dofmap() for p in components]
+    nodes = sub_at(W, components[0]).element().space_dimension()   # a cell's, every rank
     rows = [cell_dofs(m, cells, nodes, comm).ravel() for m in maps]
     first = np.asarray(maps[0].dofs(), dtype=np.int64) - lo
     sets = [first + lo]
@@ -104,15 +100,15 @@ def _dolfin_sets(W, comm, components):
 def _dolfinx_sets(W, comm, components):
     U = W.unique_dofs()
     cpp = W._cpp_object
-    maps = [np.asarray(_sub(cpp, p, False).dofmap.map()) for p in components]
+    maps = [np.asarray(sub_at(cpp, p, lambda V, i: V.sub([i])).dofmap.map())
+            for p in components]
     first = U.compact[maps[0]].ravel()
     lo, hi = U.owned_range
-    keys = None
+    keys, inv = np.unique(first, return_inverse=True)        # once, for every component
     sets = []
     for c in range(len(components)):
-        k, pair = _paired(first, U.compact[maps[c]].ravel(), c, comm)
-        keys = k if keys is None else keys
-        sets.append(pair[(k >= lo) & (k < hi)])
+        pair = _paired(keys, inv, U.compact[maps[c]].ravel(), c, comm)
+        sets.append(pair[(keys >= lo) & (keys < hi)])
     # every unique dof of the first component this rank owns is in a cell here
     first_local = np.zeros(len(U.compact), dtype=bool)
     first_local[maps[0].ravel()] = True
@@ -124,11 +120,23 @@ def _dolfinx_sets(W, comm, components):
     return sets
 
 
-def check_blocks(A, sets, comm, tol=1e-12):
-    """Raises unless A's block on each component, in the shared node order, acts as the
-    first one does: one random vector through `A` per component."""
+def first_block(A, sets, comm):
+    """A's block on the first component (`sets[0]`, in the shared node order), an AIJ
+    copy. Collective."""
     first = PETSc.IS().createGeneral(np.asarray(sets[0], dtype=PETSc.IntType), comm=comm)
-    K0 = A.createSubMatrix(first, first)
+    try:
+        return A.createSubMatrix(first, first)
+    finally:
+        first.destroy()
+
+
+def check_blocks(A, sets, comm, tol=1e-12, K0=None):
+    """Raises unless A's block on each component, in the shared node order, acts as the
+    first one does: one random vector through `A` per component. `K0`, the first block
+    (`first_block`), is the caller's when given, else made and destroyed here."""
+    own = K0 is None
+    if own:
+        K0 = first_block(A, sets, comm)
     x0, y0 = K0.createVecs()
     yc = y0.duplicate()
     w, Aw = A.createVecs()
@@ -153,7 +161,7 @@ def check_blocks(A, sets, comm, tol=1e-12):
                 scatter.destroy()
                 is_c.destroy()
     finally:
-        for o in (x0, y0, yc, w, Aw, K0, first):
+        for o in (x0, y0, yc, w, Aw) + ((K0,) if own else ()):
             o.destroy()
 
 
@@ -161,9 +169,10 @@ class SharedVelocityPC:
     """The python context of a PCSHELL: one AMG on each velocity component in turn, and the
     pressure divided by `diag_M` (its rows `p_dofs`, global indices of A). `amg_options`
     (without the prefix) are set for the AMG's setup alone, PETSC_OPTIONS winning
-    (`femtools.ksp.defaults`)."""
+    (`femtools.ksp.defaults`). `K`, the first component's block (`first_block`), is taken
+    over when given (converted to hypre's format in place), else extracted here."""
 
-    def __init__(self, A, sets, p_dofs, diag_M, comm, amg_options, prefix=PREFIX):
+    def __init__(self, A, sets, p_dofs, diag_M, comm, amg_options, prefix=PREFIX, K=None):
         self.comm = comm
         self.sets = [PETSc.IS().createGeneral(np.asarray(s, dtype=PETSc.IntType), comm=comm)
                      for s in sets]
@@ -171,7 +180,7 @@ class SharedVelocityPC:
         # hypre's own format, so the AMG holds the block once: PCHYPRE uses a MATHYPRE as it is
         # and would otherwise keep both the AIJ and its converted copy. petsc4py's convert
         # with no `out` converts in place, letting the AIJ storage go.
-        self.K = A.createSubMatrix(self.sets[0], self.sets[0])
+        self.K = A.createSubMatrix(self.sets[0], self.sets[0]) if K is None else K
         self.K.convert('hypre')
         from femtools.ksp import defaults, scoped
         self.amg = PETSc.PC().create(comm)

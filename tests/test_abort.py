@@ -89,7 +89,7 @@ def test_one_rank_failing_ends_the_job(tmp_path, kind, status, text):
     script.write_text(SCRIPT)
     env = support.clean_env()
     env['OMP_NUM_THREADS'] = '1'
-    env['PYTHONPATH'] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env['PYTHONPATH'] = support.pythonpath()
     proc = subprocess.run(['mpirun', '-n', '2', sys.executable, str(script), kind],
                           capture_output=True, text=True, timeout=120, env=env)
     out = proc.stdout + proc.stderr

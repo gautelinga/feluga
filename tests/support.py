@@ -3,6 +3,9 @@ import os
 import shutil
 import subprocess
 
+# the tree whose femtools the children import
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def clean_env():
     """The environment without MPI_Init's own variables, which a nested mpirun would
@@ -12,11 +15,20 @@ def clean_env():
             if not k.startswith(("OMPI_", "PMIX_", "PMI_")) or k.startswith("OMPI_MCA_")}
 
 
+def pythonpath(env=None):
+    """A child's PYTHONPATH: the tree's femtools first, never an installed copy, then the
+    PYTHONPATH of `env` (a caller's) and the inherited one, joined rather than replaced."""
+    paths = []
+    for value in ((env or {}).get("PYTHONPATH", ""), os.environ.get("PYTHONPATH", "")):
+        paths += [p for p in value.split(os.pathsep) if p and p != ROOT and p not in paths]
+    return os.pathsep.join([ROOT] + paths)
+
+
 def run(argv, ranks=1, env=None, timeout=900, check=True, cwd=None, text=True):
-    """`argv` in a child (the tree's femtools first on its PYTHONPATH), under `mpirun -n
-    ranks` when `ranks` > 1 (skipped where there
-    is no mpirun, failed instead with FEMTOOLS_REQUIRE_MPI set, as CI sets it), one
-    OpenMP thread a rank; raises with the output's tails on failure."""
+    """`argv` in a child (its PYTHONPATH `pythonpath(env)`, `env` otherwise over the
+    inherited environment), under `mpirun -n ranks` when `ranks` > 1 (skipped where there
+    is no mpirun, failed instead with FEMTOOLS_REQUIRE_MPI set, as CI sets it), one OpenMP
+    thread a rank; raises with the output's tails on failure."""
     if ranks > 1 and shutil.which("mpirun") is None:
         import pytest
         if os.environ.get("FEMTOOLS_REQUIRE_MPI"):
@@ -25,10 +37,7 @@ def run(argv, ranks=1, env=None, timeout=900, check=True, cwd=None, text=True):
     full = clean_env()
     full["OMP_NUM_THREADS"] = "1"
     full.update(env or {})
-    # the tree's femtools first, never an installed copy: a child's own folder is tests/
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    paths = [p for p in full.get("PYTHONPATH", "").split(os.pathsep) if p and p != root]
-    full["PYTHONPATH"] = os.pathsep.join([root] + paths)
+    full["PYTHONPATH"] = pythonpath(env)
     cmd = (["mpirun", "-n", str(ranks)] if ranks > 1 else []) + list(argv)
     proc = subprocess.run(cmd, capture_output=True, text=text, timeout=timeout, env=full,
                           cwd=cwd)

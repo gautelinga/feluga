@@ -68,6 +68,7 @@ def create_matrix(a, rows, cols=None, couplings=None, bcs=()):
     from petsc4py import PETSc
 
     from femtools.garbage import cleanup
+    from femtools.memory import release
 
     cols = rows if cols is None else cols
     if rows.bs != 1 or cols.bs != 1:
@@ -89,6 +90,8 @@ def create_matrix(a, rows, cols=None, couplings=None, bcs=()):
     nnz = patterns.get(key)
     if not comm.allreduce(nnz is not None, op=MPI.LAND):
         nnz = patterns[key] = _preallocation(a, rows, cols, filt)
+        release()   # the pairs' chunks, freed below glibc's mmap threshold, before the
+        #             matrix's pages are touched
     K = PETSc.Mat().createAIJ(((rows.n_owned, rows.n_global), (cols.n_owned, cols.n_global)),
                               nnz=nnz, comm=comm)
     K.setLGMap(rows.lgmap, cols.lgmap)
@@ -133,16 +136,6 @@ class _Couplings:
         self.key = (self.mask.shape, self.mask.tobytes(), self.square, h)   # local, as
         #                                                                      _domains_key
 
-    def pairs(self, R_cells, C_cells, diagonal):
-        """Which (row, column) entries of each cell's element matrix are kept: (m, r, c);
-        `diagonal` (m, r, c) marks the entries on the matrix's diagonal, which a fixed dof
-        keeps."""
-        keep = self.mask[self.rows[R_cells][:, :, None], self.cols[C_cells][:, None, :]] != 0
-        if len(self.fixed):
-            fixed = (self.fixed[R_cells] != 0)[:, :, None] | (self.fixed[C_cells] != 0)[:, None, :]
-            keep &= ~fixed | diagonal
-        return keep
-
 
 def _one_cell_integral(a):
     """Whether compiled form `a` is one cell integral and nothing else."""
@@ -176,14 +169,33 @@ def _coupled_cells(a):
             yield d.reshape(-1, 1) if d.ndim == 1 else d[..., 0].reshape(len(d), -1)
 
 
+def _element_pairs(filt, rmap, cmap, m, comm):
+    """The entries kept of an integration entity's element matrix, the same for every
+    entity: (ii, jj), positions among its rows' and its columns' local dofs (those of its
+    `m` cells one after the other). With couplings `filt`, the entries between components
+    they couple; the component of a dofmap's local position is the same in every cell
+    (refused on every rank together otherwise). Collective."""
+    nr, nc = rmap.shape[1] * m, cmap.shape[1] * m
+    if filt is None:
+        return np.divmod(np.arange(nr * nc, dtype=np.int64), nc)
+    from femtools.hdf5_rows import agreed
+    lab_r, lab_c = filt.rows[rmap], filt.cols[cmap]
+    if agreed(comm, not ((lab_r == lab_r[:1]).all() and (lab_c == lab_c[:1]).all())):
+        raise NotImplementedError("a dofmap whose components vary by cell")
+    if not len(rmap):
+        return np.zeros(0, np.int64), np.zeros(0, np.int64)
+    r, c = np.tile(lab_r[0], m), np.tile(lab_c[0], m)
+    return np.nonzero(filt.mask[r[:, None], c[None, :]])
+
+
 def _preallocation(a, rows, cols, filt=None):
     """(d_nnz, o_nnz) of the folded matrix of `a`, from the dofmaps alone: every (row,
-    column) pair of dofs that an integration entity couples (all dofs of its cells, as
-    in DOLFINx's sparsity pattern, which adds no diagonal of its own; with couplings
-    `filt`, those of coupled components, and the diagonal of a square form) is taken to
-    compact indices, sent to the owner of its row if another rank owns that, and
-    counted once. Pairs are made at most about `_CHUNK` at a time and kept as one int64
-    key each, split by row range so that each range is made unique on its own.
+    column) pair of dofs that an integration entity couples (all dofs of its cells, as in
+    DOLFINx's sparsity pattern, which adds no diagonal of its own; with couplings `filt`,
+    those of coupled components, and the diagonal of a square form) is taken to compact
+    indices, sent to the owner of its row if another rank owns that, and counted once. The pairs kept of an element matrix are the same for every entity
+    (`_element_pairs`); they are made at most about `_CHUNK` at a time and kept as one
+    int64 key each, split by row range so that each range is made unique on its own.
     Collective."""
     from petsc4py import PETSc
     from femtools.hdf5_rows import route, unique_rows
@@ -198,9 +210,10 @@ def _preallocation(a, rows, cols, filt=None):
     if n * width >= 2 ** 63:
         raise NotImplementedError("more (row, column) pairs than an int64 numbers")
     rmap, cmap = (V.dofmap.map() for V in spaces)
-    per_cell = rmap.shape[1] * cmap.shape[1]
-    domains = list(_coupled_cells(a))
-    total = sum(len(c) * c.shape[1] ** 2 * per_cell for c in domains)
+    domains = [(cells, _element_pairs(filt, rmap, cmap, cells.shape[1], comm))
+               for cells in _coupled_cells(a)]
+    fixed = filt.fixed != 0 if filt is not None and len(filt.fixed) else None
+    total = sum(len(cells) * len(ii) for cells, (ii, _) in domains)
     # keys of the owned rows, split in row ranges of about _CHUNK keys
     n_ranges = max(1, min(n, -(-total // _CHUNK)))
     edges = np.linspace(0, n, n_ranges + 1).astype(np.int64)
@@ -214,10 +227,10 @@ def _preallocation(a, rows, cols, filt=None):
                 held[r].append(part)
 
     far = []  # pairs in rows owned elsewhere: (compact row, compact column)
-    for cells in domains:
+    for cells, (ii, jj) in domains:
         # The cells in the order of their first row: a row's pairs then come mostly in
         # one chunk, where they are made unique before they are held.
-        step = max(1, _CHUNK // (cells.shape[1] ** 2 * per_cell))
+        step = max(1, _CHUNK // max(len(ii), 1))
         first = np.empty(len(cells), np.int64)
         for s in range(0, len(cells), step):
             c = cells[s:s + step]
@@ -227,22 +240,20 @@ def _preallocation(a, rows, cols, filt=None):
         for s in range(0, len(cells), step):
             c = cells[s:s + step]
             Rl, Cl = rmap[c].reshape(len(c), -1), cmap[c].reshape(len(c), -1)
-            R = rows.compact[Rl] - start
-            C = cols.compact[Cl]
+            R = (rows.compact[Rl] - start)[:, ii]
+            C = cols.compact[Cl][:, jj]
             mine = (R >= 0) & (R < n)
-            keys = (R * width)[:, :, None] + C[:, None, :]
-            if filt is None:
-                hold(keys[mine].ravel())
-                if not mine.all():
-                    ent, k = np.nonzero(~mine)
-                    far.append(unique_rows(np.stack(
-                        [np.repeat(R[ent, k] + start, C.shape[1]), C[ent].ravel()], axis=1)))
-                continue
-            keep = filt.pairs(Rl, Cl, (R + start)[:, :, None] == C[:, None, :])
-            hold(keys[keep & mine[:, :, None]])
-            fe, fk, fj = np.nonzero(keep & ~mine[:, :, None])
-            if len(fe):
-                far.append(unique_rows(np.stack([R[fe, fk] + start, C[fe, fj]], axis=1)))
+            kept = None
+            if fixed is not None:
+                # a fixed dof's row and column keep the diagonal alone
+                fx = fixed[Rl][:, ii] | fixed[Cl][:, jj]
+                if fx.any():
+                    kept = ~fx | (R + start == C)
+            sel = mine if kept is None else mine & kept
+            hold(R[sel] * width + C[sel])
+            sel = ~mine if kept is None else ~mine & kept
+            if sel.any():
+                far.append(unique_rows(np.stack([R[sel] + start, C[sel]], axis=1)))
     if filt is not None and filt.square:
         hold(np.arange(n, dtype=np.int64) * width + start + np.arange(n, dtype=np.int64))
     if comm.size > 1:

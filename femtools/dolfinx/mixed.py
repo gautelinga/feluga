@@ -12,6 +12,7 @@ femtools.dolfinx.unique) carry them along.
 """
 import numpy as np
 
+from femtools.couplings import path_of, sub_at
 from femtools.dolfinx.periodic import flat_collapse_map
 
 
@@ -21,10 +22,7 @@ class _Component:
     local dof -> W local dof)."""
 
     def __init__(self, W, i):
-        sub = W
-        for k in (tuple(i) if isinstance(i, (tuple, list)) else (i,)):
-            sub = sub.sub(k)
-        self.space, dofs = sub.collapse()
+        self.space, dofs = sub_at(W, i).collapse()
         self.map = flat_collapse_map(dofs)
 
 
@@ -32,7 +30,7 @@ def _component(W, i):
     """Kept in W's own dict: W, its components and its mesh form a cycle the collector
     frees with W, where a module-level cache would keep every mesh it saw."""
     held = W.__dict__.setdefault("_femtools_components", {})
-    key = tuple(i) if isinstance(i, (tuple, list)) else i
+    key = path_of(i) if isinstance(i, (tuple, list)) else i
     c = held.get(key)
     if c is None:
         c = held[key] = _Component(W, key)

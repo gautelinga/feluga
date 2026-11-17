@@ -22,7 +22,6 @@ pytestmark = [pytest.mark.dolfinx]
 from tests import support  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 WORKER = os.path.join(HERE, "dolfinx_refine_worker.py")
 LOCAL = tuple("{}_{}".format(n, s) for n in ("rect", "right", "box") for s in ("upper", "lower"))
 NAMES = ("rect", "right", "box")
@@ -30,7 +29,7 @@ NAMES = ("rect", "right", "box")
 
 def _run(mode, tmp_path, ranks):
     out = tmp_path / "{}_{}.json".format(mode, ranks)
-    support.run([sys.executable, WORKER, mode, str(out)], ranks, env={"PYTHONPATH": ROOT})
+    support.run([sys.executable, WORKER, mode, str(out)], ranks)
     return json.loads(out.read_text())
 
 

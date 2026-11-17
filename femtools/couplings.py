@@ -101,14 +101,32 @@ def ones(form):
     return np.ones(tuple(_width(x) for x in args), dtype=bool)
 
 
+def path_of(i):
+    """A sub-space index or path as a path: 1 is (1,); (0, 1) and [0, 1] are (0, 1)."""
+    return tuple(i) if isinstance(i, (tuple, list)) else (i,)
+
+
+def sub_at(W, i, sub=None):
+    """The sub-space of `W` at index or path `i` (`path_of`): (0, 1) is W.sub(0).sub(1).
+    `sub(V, k)` gives a sub-space (by default `V.sub(k)`)."""
+    for k in path_of(i):
+        W = W.sub(k) if sub is None else sub(W, k)
+    return W
+
+
+def num_sub_spaces(V):
+    """The number of V's sub-spaces: dolfin's `V.num_sub_spaces()`, DOLFINx's property."""
+    n = V.num_sub_spaces
+    return n() if callable(n) else n
+
+
 def leaves(V, sub=None, count=None):
     """The paths (tuples of sub-space indices) of the scalar components of space `V`, in
     value order: () for a scalar space, ((0, 0), (0, 1), (0, 2), (1,)) for [P2^3, P1].
     `sub(V, i)` gives a sub-space and `count(V)` the number of them (by default `V.sub(i)`
-    and `V.num_sub_spaces`, called or read)."""
+    and `num_sub_spaces`)."""
     sub = sub or (lambda W, i: W.sub(i))
-    count = count or (lambda W: W.num_sub_spaces() if callable(W.num_sub_spaces)
-                      else W.num_sub_spaces)
+    count = count or num_sub_spaces
     out = []
 
     def walk(W, path):
@@ -427,9 +445,7 @@ def dolfinx_labels(V):
         raise NotImplementedError("more than 127 components")
     labels = np.full(n, -1, dtype=np.int8)
     for k, path in enumerate(paths):
-        W = V
-        for i in path:
-            W = W.sub([i])
+        W = sub_at(V, path, lambda S, i: S.sub([i]))
         labels[np.asarray(W.dofmap.map()).ravel()] = k
     from femtools.hdf5_rows import agreed
     if agreed(V.mesh.comm, (labels < 0).any()):        # every rank raises, or none

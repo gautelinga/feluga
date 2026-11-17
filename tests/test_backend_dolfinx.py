@@ -19,13 +19,12 @@ pytestmark = [pytest.mark.dolfinx]
 from tests import support  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 
 
 def _run(tmp_path, ranks):
     out = tmp_path / "backend.{}.json".format(ranks)
     support.run([sys.executable, os.path.join(HERE, "backend_dolfinx_worker.py"), str(out)],
-                ranks, env={"PYTHONPATH": ROOT})
+                ranks)
     return json.loads(out.read_text())
 
 

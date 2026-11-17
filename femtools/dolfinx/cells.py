@@ -9,7 +9,8 @@ reads of a DOLFINx space.
   one after the other, a vector's unrolled -- found through the dof layout's entity dofs.
 
 Continuous Lagrange elements of degree 1 and 2 on affine triangles and tetrahedra, vector
-(blocked) elements of them, and mixed elements of them (Taylor-Hood too).
+(blocked) elements of them, and mixed elements of them (Taylor-Hood too); and piecewise
+constants (DG0), a cell's one dof.
 """
 import numpy as np
 
@@ -26,9 +27,28 @@ def components(V):
     return [leaf for i in range(n) for leaf in components(V.sub(i))]
 
 
-def lagrange_degree(S):
-    """The degree of the scalar space S, refusing what dolfin's layout here does not
-    hold: other than continuous Lagrange of degree 1 or 2 on simplices."""
+def is_dg0(V):
+    """Whether V is piecewise constant (DG0, scalar or vector): one value per cell."""
+    e = V.ufl_element()
+    return (bool(getattr(e, "discontinuous", False))
+            and e.family_name in ("P", "Lagrange", "DG", "Discontinuous Lagrange")
+            and e.embedded_superdegree == 0)
+
+
+def dg0_values(f, n_cells):
+    """The DG0 Function f's values on this rank's first n_cells cells (its owned ones,
+    for n_cells = the cells' local size), in local cell order: (n_cells, block size)."""
+    V = f.function_space
+    bs = V.dofmap.index_map_bs
+    dofs = np.asarray(V.dofmap.list)[:n_cells, 0]
+    return np.asarray(f.x.array).reshape(-1, bs)[dofs].copy()
+
+
+def layout_degree(S):
+    """The degree of the scalar space S in dolfin's layout, refusing what that layout
+    here does not hold: 1 or 2 for continuous Lagrange on simplices, 0 for DG0."""
+    if is_dg0(S):
+        return 0
     e = S.ufl_element()
     if getattr(e, "discontinuous", False) or e.family_name not in ("P", "Lagrange"):
         raise NotImplementedError("dolfin layout: continuous Lagrange elements on "
@@ -51,8 +71,10 @@ def signature(V):
     def sig(S):
         n = S.element.num_sub_elements
         if n == 0:
-            return "FiniteElement('Lagrange', {}, {})".format(CELL_NAMES[tdim],
-                                                              lagrange_degree(S))
+            degree = layout_degree(S)
+            return "FiniteElement('{}', {}, {})".format(
+                "Discontinuous Lagrange" if degree == 0 else "Lagrange", CELL_NAMES[tdim],
+                degree)
         parts = [sig(S.sub(i)) for i in range(n)]
         if _blocked(S):
             return "VectorElement({}, dim={})".format(parts[0], n)
@@ -103,9 +125,11 @@ def _dolfin_cell_dofs(V):
     blocks = []
     for S in components(V):
         layout = S.dofmap.dof_layout
-        vdof = np.array([layout.entity_dofs(0, j)[0] for j in range(tdim + 1)])
-        cols = vdof[perm]
-        if lagrange_degree(S) == 2:
+        if layout_degree(S) == 0:                    # the cell's one dof
+            cols = np.full((n, 1), layout.entity_dofs(tdim, 0)[0])
+        else:
+            cols = np.array([layout.entity_dofs(0, j)[0] for j in range(tdim + 1)])[perm]
+        if layout_degree(S) == 2:
             edof = np.array([layout.entity_dofs(1, e)[0] for e in range(len(pairs))])
             cols = np.concatenate([cols, edof[ref_edges]], axis=1)
         D = np.asarray(S.dofmap.list[:n])            # V's local dofs, DOLFINx's order

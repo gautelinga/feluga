@@ -39,7 +39,13 @@ class BoundaryMarkers:
         n, self.boundary = local_facets(mesh)
         self.values = np.full(n, value, dtype=np.int32)
         self._tags = None
+        self._name = None     # rename's: written as the meshtags' name (else DOLFINx's)
         self.version = 0      # counts the changes, for the forms compiled with them
+
+    def rename(self, name, label=None):
+        """The name the markers are written under (dolfin's MeshFunction.rename)."""
+        self._name = str(name)
+        self._tags = None
 
     def set_all(self, value):
         self.values[:] = value
@@ -104,6 +110,8 @@ class BoundaryMarkers:
             facets = np.sort(self.boundary).astype(np.int32)
             self._tags = dolfinx.mesh.meshtags(self.mesh, self.mesh.topology.dim - 1,
                                                facets, self.values[facets])
+            if self._name is not None:
+                self._tags.name = self._name
         return self._tags
 
 

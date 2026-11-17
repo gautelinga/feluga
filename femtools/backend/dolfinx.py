@@ -383,6 +383,17 @@ def extent(mesh):
     return extent(mesh.geometry.x[:, :gdim], mesh.comm, gdim)
 
 
+def refine_cells(mesh, markers):
+    """The mesh with the cells marked (a boolean per owned cell) refined: Plaza
+    refinement (femtools.dolfinx.refine, no periodic axes), whose ties between equally
+    long edges are broken by position, so that dolfin's refine_cells makes the same
+    cells. Collective."""
+    from femtools.dolfinx.refine import refine_periodic
+    lower, upper = extent(mesh)
+    return refine_periodic(mesh, np.asarray(markers, dtype=bool), list(upper), [],
+                           lower=list(lower))[0]
+
+
 def mark_walls(boundaries, mesh, marker=1, tol=1e-10):
     """Mark the walls of the obstacles inside the mesh's bounding box `marker`: every
     boundary facet except those on the box's faces, which are set to 0 (femtools.box's
@@ -525,6 +536,21 @@ def function_space(u):
 def space_mesh(V):
     """The mesh of space `V`."""
     return V.mesh
+
+
+def cell_values(f):
+    """The DG0 Function f's values on the owned cells, in local cell order: one per cell
+    for a scalar field, (cells, components) for a vector one."""
+    from femtools.dolfinx.cells import dg0_values, is_dg0
+    V = f.function_space
+    if not is_dg0(V):
+        raise ValueError("cell_values: a DG0 Function, not {}".format(V.ufl_element()))
+    sync(f)
+    values = dg0_values(f, V.mesh.topology.index_map(V.mesh.topology.dim).size_local)
+    return values[:, 0] if values.shape[1] == 1 else values
+
+
+from femtools.dolfinx.probes import GradProbes, Probes  # noqa: E402,F401
 
 
 def mesh_comm(mesh):
@@ -1425,10 +1451,40 @@ def apply_bc(bc, *tensors):
 # --- interpolation, mixed components, null spaces --------------------------------------
 
 def interpolate(f, V, out=None):
-    """dolfin.interpolate(f, V), into out (a Function on V, made if None)."""
+    """dolfin.interpolate(f, V), into out (a Function on V, made if None). A Function on
+    another mesh is evaluated at V's interpolation points, which must lie in that mesh
+    (DOLFINx's interpolate_nonmatching; dolfin's LagrangeInterpolator on dolfin).
+    Collective."""
     out = Function(V) if out is None else out
-    _interpolate(out, _interpolant(f))
+    if (isinstance(f, fem.Function) and not isinstance(f, Expression)
+            and f.function_space.mesh is not V.mesh):
+        # an Expression is code, evaluated at V's own points (`_interpolant`) wherever
+        # its interpolant in forms lives
+        _interpolate_nonmatching(out, sync(f))
+    else:
+        _interpolate(out, _interpolant(f))
     return out.restrict()
+
+
+def _interpolate_nonmatching(u, f):
+    """u.interpolate_nonmatching(f) over all of u's local cells (owned and ghost). The
+    point location (create_interpolation_data, collective) is kept by u's space for f's
+    space, and redone when either mesh's coordinates have changed. Collective."""
+    from mpi4py import MPI
+    V, W = u.function_space, f.function_space
+    mesh = V.mesh
+    imap = mesh.topology.index_map(mesh.topology.dim)
+    stamp = (float(np.sum(mesh.geometry.x)), float(np.sum(W.mesh.geometry.x)))
+    held = _held(V, "_femtools_nonmatching", 4)        # by id(W), W itself held weakly
+    entry = held.get(id(W))
+    stale = mesh.comm.allreduce(entry is None or entry[0]() is not W or entry[1] != stamp,
+                                op=MPI.LOR)
+    if stale:
+        cells = np.arange(imap.size_local + imap.num_ghosts, dtype=np.int32)
+        entry = (weakref.ref(W), stamp, cells, fem.create_interpolation_data(V, W, cells))
+        held[id(W)] = entry
+    u.x.array[:] = 0.0
+    fem.Function.interpolate_nonmatching(u, f, entry[2], entry[3])
 
 
 def _interpolant(f):
@@ -1668,12 +1724,24 @@ def solve(equation, u, bcs=None):
 # --- output ----------------------------------------------------------------------------
 
 class XDMFFile:
-    """dolfin's XDMFFile(comm, path) for what the driver writes: facet markers (a
-    BoundaryMarkers) and Functions, each with its mesh."""
+    """dolfin's XDMFFile(comm, path), or XDMFFile(path) on COMM_WORLD, for writing only:
+    facet markers (a BoundaryMarkers) and Functions, or a tuple of them on one grid, as
+    femtools.xdmf.XDMFFile2 writes them (Lagrange on the nodes, a P2 field's midside nodes
+    kept, DG0 on the cells). Every write is a timed grid (t = 0 when none is given), where
+    dolfin's untimed write is not; no read or checkpoints. `parameters` holds dolfin's
+    three (femtools.xdmf.XDMFParameters, an unknown key refused): `functions_share_mesh`
+    puts writes at one time on one grid, as XDMFFile2 does; `rewrite_function_mesh` and
+    `flush_output` are accepted and have no effect (the mesh is stored once, each write
+    flushed)."""
 
-    def __init__(self, comm, path):
-        self.comm, self.path = comm, path
+    def __init__(self, comm_or_path, path=None):
+        from femtools.xdmf import XDMFParameters
+        if path is None:
+            from mpi4py import MPI as _MPI
+            comm_or_path, path = _MPI.COMM_WORLD, comm_or_path
+        self.comm, self.path = comm_or_path, path
         self._file = self._series = None
+        self.parameters = XDMFParameters()
 
     def __enter__(self):
         return self
@@ -1687,10 +1755,12 @@ class XDMFFile:
                 f.close()
         self._file = self._series = None
 
-    def write(self, obj, t=None):
+    def write(self, obj, t=None, time=None):
         """Facet markers (a BoundaryMarkers) through DOLFINx's XDMFFile; a Function, or a
         tuple of them on one node set (`write((u, p))`), as femtools.xdmf.XDMFFile2 writes
-        them (femtools.dolfinx.xdmf: P2 kept)."""
+        them (femtools.dolfinx.xdmf: P2 kept), at time t (or `time=`, XDMFFile2's
+        keyword)."""
+        t = time if t is None else t
         if isinstance(obj, BoundaryMarkers):
             if self._file is None:
                 self._file = dolfinx.io.XDMFFile(self.comm, self.path, "w")
@@ -1702,7 +1772,8 @@ class XDMFFile:
                 self._series = XDMFSeries(self.comm, self.path)
             fields = (tuple(sync(f) for f in obj) if isinstance(obj, (tuple, list))
                       else sync(obj))
-            self._series.write(fields, 0.0 if t is None else float(t))
+            self._series.write(fields, 0.0 if t is None else float(t),
+                               share=bool(self.parameters["functions_share_mesh"]))
 
 
 class TimeSeriesFile:

@@ -44,7 +44,7 @@ NAMES = (
     # meshes and boxes
     "Mesh", "RectangleMesh", "UnitSquareMesh", "BoxMesh", "Point", "read_mesh_file",
     "write_mesh_h5", "mesh_coordinates", "hmax", "hmin", "extent", "Faces", "mark_walls",
-    "global_num_cells", "global_num_vertices", "marker_counts",
+    "global_num_cells", "global_num_vertices", "marker_counts", "refine_cells",
     "SubDomain", "PeriodicBox", "repair_partition", "check_periodic_pairing",
     # spaces, functions, conditions
     "FunctionSpace", "Function", "Constant", "Expression", "DirichletBC", "BoundaryMarkers",
@@ -60,6 +60,7 @@ NAMES = (
     # neutral helpers
     "set_default_mesh", "mesh_id", "space_id", "function_space", "space_mesh", "mesh_comm",
     "geometric_dimension", "element_degree", "is_lagrange", "owned_dofs", "fixed_dofs",
+    "cell_values", "Probes", "GradProbes",
     "sync", "collect_garbage", "constant_on",
     # files: dolfin's HDF5 layout and XDMF time series, the same on both backends
     "XDMFFile", "TimeSeriesFile", "write_dof_tables", "write_function_h5",

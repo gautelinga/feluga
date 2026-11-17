@@ -365,8 +365,8 @@ def test_refusals():
             assert 'XDMFFile2 does not write' in str(exc), str(exc)
         else:
             raise AssertionError('a string was accepted')
-    # a discontinuous element is not something this writes
-    V = df.FunctionSpace(mesh, 'DG', 0)
+    # a discontinuous element other than DG0 (cell data) is not something this writes
+    V = df.FunctionSpace(mesh, 'DG', 1)
     u = df.Function(V)
     u.rename('u', 'u')
     with XDMFFile2(df.MPI.comm_world, tmp('bad2.xdmf')) as f:
@@ -1335,8 +1335,9 @@ if df.MPI.rank(df.MPI.comm_world) == 0:
 def test_quadratic_grid_read_back_on_three_ranks():
     """a P2 field written on three ranks reads back exactly on three, each rank matching
     its own dofs among the nodes routed to it; a mesh that is not the file's is refused
-    on every rank rather than leaving the others in the vector's assembly; a DG field
-    is refused on every rank rather than written as though it were continuous"""
+    on every rank rather than leaving the others in the vector's assembly; a DG1 field
+    is refused on every rank rather than written as though it were continuous (DG0 is
+    cell data, test_dg0_xdmf.py)"""
     script = '''
 import sys
 import numpy as np, dolfin as df
@@ -1359,8 +1360,8 @@ try:
     refused = False
 except ValueError:
     refused = True
-# a DG field is refused on every rank, not interpolated onto Lagrange nodes
-dg = df.Function(df.FunctionSpace(mesh, 'DG', 0)); dg.rename('d', 'd')
+# a DG1 field is refused on every rank, not interpolated onto Lagrange nodes
+dg = df.Function(df.FunctionSpace(mesh, 'DG', 1)); dg.rename('d', 'd')
 try:
     with XDMFFile2(C, sys.argv[1] + '.dg.xdmf') as f:
         f.write(dg)

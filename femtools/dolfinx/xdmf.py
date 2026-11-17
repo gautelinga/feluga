@@ -18,7 +18,9 @@ positions are made when it is stored, and no rank keeps the XML of written steps
 Node numbers are DOLFINx's (global vertex and edge indices), not dolfin's; a reader
 matches nodes by position (`XDMFFile2.read_checkpoint`), so it does not care. A node's
 value comes from its dof through the dof layout (no point search). Scalar and
-vector Lagrange Functions of degree 1 or 2 (not mixed: write their components).
+vector Lagrange Functions of degree 1 or 2 (not mixed: write their components), and
+piecewise constant (DG0) ones, written as XDMFFile2 writes them: a cell-centred attribute
+of the grid, one value per cell.
 """
 import weakref
 
@@ -163,15 +165,28 @@ def _space_dofs(V, nodes):
 
 
 def _check_space(V):
-    """The degree of a space XDMFSeries writes: continuous Lagrange of degree 1 or 2,
-    scalar or vector, not mixed."""
+    """The degree of a space XDMFSeries writes: continuous Lagrange of degree 1 or 2, or
+    0 for a piecewise constant (DG0) one, scalar or vector, not mixed."""
+    from femtools.dolfinx.cells import is_dg0
     e = V.ufl_element()
     if V.element.num_sub_elements > 0 and V.dofmap.index_map_bs == 1:
         raise NotImplementedError("XDMFSeries: a mixed space; write its components")
+    if is_dg0(V):
+        return 0
     degree = e.embedded_superdegree
     if degree not in (1, 2) or getattr(e, "discontinuous", False):
-        raise NotImplementedError("XDMFSeries: continuous Lagrange of degree 1 or 2")
+        raise NotImplementedError("XDMFSeries: continuous Lagrange of degree 1 or 2, or "
+                                  "DG0")
     return degree
+
+
+def _cell_values(f, n_cells):
+    """A DG0 Function's values on this rank's first n_cells (its owned) cells, in their
+    local order, which is the order the grid's topology was written in: one row a cell,
+    a vector's components padded to 3."""
+    from femtools.dolfinx.cells import dg0_values
+    values = dg0_values(f, n_cells)
+    return _pad3(values) if values.shape[1] > 1 else values
 
 
 class XDMFSeries:
@@ -186,6 +201,8 @@ class XDMFSeries:
         # would come back for a later mesh once this one is freed, and its steps would
         # point at the freed mesh's datasets
         self._stored = weakref.WeakKeyDictionary()
+        # the open step's time and its grids by (mesh, degree), which `share` writes join
+        self._time, self._grids = None, []
 
     def __enter__(self):
         return self
@@ -194,12 +211,18 @@ class XDMFSeries:
         self.close()
         return False
 
-    def write(self, u, t):
+    def write(self, u, t, share=False):
         """A step at time t: u (a Function, its values in DOLFINx's array, ghosts
         included), or a tuple of Functions on one mesh (`write((u, p), t)`), on a grid of
         its own in the temporal collection. Several share the grid of the highest degree
         among them, as XDMFFile2 writes them: a P1 pressure beside a P2 velocity is
-        carried onto the quadratic nodes, exactly (`_raised`). Collective."""
+        carried onto the quadratic nodes, exactly (`_raised`). A DG0 Function is a cell
+        attribute of that grid (of a degree-1 one when it is all there is).
+
+        With `share` (XDMFFile2's `functions_share_mesh`), a write at the time of the one
+        before it adds its fields to that step's grid of the same mesh and degree, rather
+        than starting a step of its own; the step is complete once the time changes.
+        Collective."""
         fields = list(u) if isinstance(u, (tuple, list)) else [u]
         if not fields:
             raise ValueError("XDMFSeries.write: no Function")
@@ -207,7 +230,10 @@ class XDMFSeries:
         if any(f.function_space.mesh is not mesh for f in fields[1:]):
             raise ValueError("XDMFSeries.write: Functions written together share one mesh")
         degrees = [_check_space(f.function_space) for f in fields]
-        degree = max(degrees)
+        cells = [f for f, d in zip(fields, degrees) if d == 0]
+        fields, degrees = ([f for f, d in zip(fields, degrees) if d > 0],
+                           [d for d in degrees if d > 0])
+        degree = max(degrees, default=1)
         if self._doc is None:
             self._doc = XdmfDocument(self.path, comm=self.comm if self.comm.size > 1 else None)
         doc = self._doc
@@ -215,6 +241,41 @@ class XDMFSeries:
         if degree not in nodes:
             nodes[degree] = _MeshNodes(mesh, degree)
         L = nodes[degree]
+        if not share or t != self._time:
+            doc.seal()             # the step before is complete: no rank holds its XML after
+            self._time, self._grids = t, []
+        grid = next((g for m, d, g in self._grids if m() is mesh and d == degree), None)
+        if grid is None:
+            grid = self._new_grid(doc, mesh, degree, L, t)
+            self._grids.append((weakref.ref(mesh), degree, grid))
+        for f, d in zip(fields, degrees):
+            if d < degree:
+                f = _raised(f, degree)
+            V = f.function_space
+            dofs = _SPACES.get((V,), lambda: _space_dofs(V, L))
+            bs = V.dofmap.index_map_bs
+            values = np.asarray(f.x.array).reshape(-1, bs)[dofs]
+            values = _pad3(values[:, 0] if bs == 1 else values)
+            if values.ndim == 1:
+                values = values.reshape(-1, 1)
+            ref = doc.rows("VisualisationVector/{}".format(doc._next("VisualisationVector")),
+                           L.rows, values, L.n_nodes, plans=L.plans)
+            doc.attribute(grid, f.name, values, "Node", ref=ref,
+                          shape=(L.n_nodes, values.shape[1]))
+        # a cell attribute takes the rank-major block the topology took, at its offset
+        for f in cells:
+            values = _cell_values(f, mesh.topology.index_map(mesh.topology.dim).size_local)
+            ref = doc.slab("VisualisationVector/{}".format(doc._next("VisualisationVector")),
+                           L.cell_offset, values, L.n_cells)
+            doc.attribute(grid, f.name, values, "Cell", ref=ref,
+                          shape=(L.n_cells, values.shape[1]))
+        if not share:
+            doc.seal()
+        doc.flush()
+
+    def _new_grid(self, doc, mesh, degree, L, t):
+        """A grid at time t in the temporal collection, on the mesh's nodes of `degree`
+        (stored at the series' first grid of them, pointed at after)."""
         grid = doc.grid("mesh", doc.collection())
         stored = self._stored.setdefault(mesh, {})
         store = stored.get(degree)
@@ -230,22 +291,7 @@ class XDMFSeries:
                      wide=is_wide(L.n_nodes))
         doc.geometry(grid, None, ref=store[1], shape=(L.n_nodes, L.gdim))
         doc.time(grid, t)
-        for f, d in zip(fields, degrees):
-            if d < degree:
-                f = _raised(f, degree)
-            V = f.function_space
-            dofs = _SPACES.get((V,), lambda: _space_dofs(V, L))
-            bs = V.dofmap.index_map_bs
-            values = np.asarray(f.x.array).reshape(-1, bs)[dofs]
-            values = _pad3(values[:, 0] if bs == 1 else values)
-            if values.ndim == 1:
-                values = values.reshape(-1, 1)
-            ref = doc.rows("VisualisationVector/{}".format(doc._next("VisualisationVector")),
-                           L.rows, values, L.n_nodes, plans=L.plans)
-            doc.attribute(grid, f.name, values, "Node", ref=ref,
-                          shape=(L.n_nodes, values.shape[1]))
-        doc.seal()                 # the step is complete: no rank holds its XML after
-        doc.flush()
+        return grid
 
     def close(self):
         if self._doc is not None:

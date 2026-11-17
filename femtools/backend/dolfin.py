@@ -130,6 +130,35 @@ def space_mesh(V):
     return V.mesh()
 
 
+def Probes(x, V):
+    """femtools.probes.Probes(x, V): V's Functions at the points x (flat, the same on
+    every rank), evaluated many times (built at the first use, collectively)."""
+    from femtools import probes
+    return probes.Probes(x, V)
+
+
+def GradProbes(x, V):
+    """femtools.probes.GradProbes(x, V): Probes that take the gradient too."""
+    from femtools import probes
+    return probes.GradProbes(x, V)
+
+
+def cell_values(f):
+    """The DG0 Function f's values on the owned cells, in local cell order: one per cell
+    for a scalar field, (cells, components) for a vector one."""
+    V = f.function_space()
+    e = V.ufl_element()
+    if e.family() not in ("Discontinuous Lagrange", "DG") or e.degree() != 0:
+        raise ValueError("cell_values: a DG0 Function, not {}".format(e))
+    mesh = V.mesh()
+    tdim = mesh.topology().dim()
+    n_own = mesh.topology().ghost_offset(tdim)
+    bs = max(int(np.prod(e.value_shape())), 1)
+    dofs = np.asarray(V.dofmap().entity_dofs(mesh, tdim), dtype=np.int64)
+    values = f.vector().get_local()[dofs.reshape(-1, bs)[:n_own]]
+    return values[:, 0] if bs == 1 else values
+
+
 def mesh_comm(mesh):
     """The mesh's MPI communicator (mpi4py)."""
     return mesh.mpi_comm()
@@ -260,9 +289,16 @@ def _matrix_bcs(tensor):
 
 def interpolate(f, V, out=None):
     """f interpolated into V, into `out` if given (a Function on V): a Function by
-    femtools.fast_interpolation (a transfer matrix built once), an Expression by
-    dolfin."""
+    femtools.fast_interpolation (a transfer matrix built once), a Function on another
+    mesh by dolfin's LagrangeInterpolator (V's interpolation points must lie in that
+    mesh), an Expression by dolfin. Collective."""
     if isinstance(f, Function):
+        if f.function_space().mesh().id() != V.mesh().id():
+            from dolfin import LagrangeInterpolator
+            out = Function(V) if out is None else out
+            out.vector().zero()
+            LagrangeInterpolator.interpolate(out, f)
+            return out
         return _fast_interpolate(f, V, out=out)
     from dolfin import interpolate as dolfin_interpolate
     g = dolfin_interpolate(f, V)
@@ -327,6 +363,27 @@ def marker_counts(markers):
     exterior = MeshFunction("size_t", mesh, tdim - 1, 0)
     CompiledSubDomain("on_boundary").mark(exterior, 1)
     return marker_bincount(markers.array()[exterior.array() == 1], comm)
+
+
+def refine_cells(mesh, markers):
+    """The mesh with the cells marked (a boolean per owned cell, or per owned then ghost
+    cell) refined: Plaza refinement (femtools.plaza_periodic, no periodic axes), whose
+    ties between equally long edges are broken by position, so that DOLFINx's
+    refine_cells makes the same cells. Markers of another length are refused on every
+    rank, as on DOLFINx. Collective."""
+    import dolfin as df
+    from femtools.hdf5_rows import agreed
+    from femtools.plaza_periodic import refine_periodic
+    tdim = mesh.topology().dim()
+    n_own, n_all = mesh.topology().ghost_offset(tdim), mesh.num_cells()
+    markers = np.asarray(markers, dtype=bool).ravel()
+    if agreed(mesh.mpi_comm(), len(markers) not in (n_own, n_all)):
+        raise ValueError("refine_cells: boolean markers need one entry a local cell "
+                         "(owned, or owned then ghost)")
+    flags = df.MeshFunction("bool", mesh, tdim, False)
+    flags.array()[:n_own] = markers[:n_own]
+    lower, upper = extent(mesh)
+    return refine_periodic(mesh, flags, list(upper), [], lower=list(lower))[0]
 
 
 def read_mesh_file(fname, periodic=None, tol=None):

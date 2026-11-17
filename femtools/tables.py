@@ -33,11 +33,11 @@ numpy at import; dolfin or DOLFINx where a mesh or space of theirs is passed.
 import numpy as np
 
 
-from femtools.backend import is_dolfinx  # noqa: E402,F401  (its home; kept importable here)
+from femtools.backend import is_dolfinx  # moved to femtools.backend; re-exported
 
 
 def _n_nodes(d, degree):
-    return d + 1 if degree == 1 else (d + 1) * (d + 2) // 2
+    return {0: 1, 1: d + 1}.get(degree, (d + 1) * (d + 2) // 2)
 
 
 class SpaceTables:
@@ -124,7 +124,7 @@ def _dolfin_leaves(V):
 
 def _dolfinx_space(t, V, U):
     from femtools.dolfinx.cells import (
-        components, dolfin_cell_dofs, lagrange_degree, signature, ufc_vertices)
+        components, dolfin_cell_dofs, layout_degree, signature, ufc_vertices)
     if U is None and hasattr(V, "unique_dofs"):     # a femtools.backend.dolfinx space
         U = V.unique_dofs()
     if U is None:
@@ -146,7 +146,7 @@ def _dolfinx_space(t, V, U):
     t.signature = signature(V)
     t.components, first = [], 0
     for S in components(V):           # a vector (sub-)space's components too, unrolled
-        degree = lagrange_degree(S)
+        degree = layout_degree(S)
         k = _n_nodes(d, degree)
         t.components.append((first, k, degree))
         first += k

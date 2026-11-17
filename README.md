@@ -48,6 +48,8 @@ print(B.assemble(w * B.dx))                              # 1/12, on either backe
 Both backends export the same names (`femtools.backend.NAMES`). Code that is handed a mesh
 or Function finds its backend with `femtools.backend.of(obj)`.
 `tests/backend_stokes_worker.py` is a complete periodic Stokes solve written this way.
+`docs/porting-to-backend.md` is a guide to porting dolfin code to the backend, and so to
+DOLFINx.
 
 ### Quadratic fields in XDMF (dolfin)
 

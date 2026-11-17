@@ -872,8 +872,15 @@ class XDMFFile2(object):
         """
         if not functions:
             raise ValueError('nothing to write')
+        # DG0 Functions are cell data, written as the MeshFunctions in `tags` are; the
+        # others go on the node set (a grid of the mesh's own vertices when there are none)
+        cells = [f for f in functions if _is_dg0(f)]
+        functions = [f for f in functions if not _is_dg0(f)]
         doc = self._document(encoding)
-        mesh, degree, widths = _check_functions(functions)
+        if functions:
+            mesh, degree, widths = _check_functions(functions)
+        else:
+            mesh, degree, widths = cells[0].function_space().mesh(), 1, []
         self._mesh = mesh
         layout = _shared(self._held, mesh.mpi_comm(), ('mesh', mesh.id(), degree),
                          lambda: _node_layout(mesh, degree))
@@ -934,10 +941,11 @@ class XDMFFile2(object):
         # too: that group is where an attribute of a function grid goes, whatever it
         # is centred on and whatever its rank -- dolfin puts scalars there as readily
         # as vectors.
-        for name, values in _local_cell_tags(tags, mesh, layout['n_own']):
+        for name, values in (_local_cell_tags(tags, mesh, layout['n_own'])
+                             + _local_cell_functions(cells, mesh, layout['n_own'])):
             ref = doc.slab('VisualisationVector/{}'.format(doc._next('VisualisationVector')),
                            layout['cell_offset'], values, n_cells)
-            doc.attribute(grid, name, values, 'Cell', ref=ref, shape=(n_cells, 1))
+            doc.attribute(grid, name, values, 'Cell', ref=ref, shape=(n_cells, values.shape[1]))
         self._finish()
 
     def _warn_rewrite(self, key):
@@ -1620,6 +1628,32 @@ def _local_cell_tags(tags, mesh, n_local):
     _check_cell_tags(tags, mesh)
     return [(_tag_name(mf, index), np.asarray(mf.array())[:n_local].reshape(-1, 1))
             for index, mf in enumerate(tags)]
+
+
+def _is_dg0(f):
+    """Whether the Function f is piecewise constant (DG0): one value per cell."""
+    element = f.function_space().ufl_element()
+    return element.family() in ('Discontinuous Lagrange', 'DG') and element.degree() == 0
+
+
+def _local_cell_functions(functions, mesh, n_local):
+    """(name, values) per DG0 Function, as `_local_cell_tags` gives a MeshFunction's: each
+    rank its own cells' values, in its local cell order (a vector's components padded to
+    3, as a node field's are)."""
+    tdim = mesh.topology().dim()
+    out = []
+    for index, f in enumerate(functions):
+        V = f.function_space()
+        if V.mesh().id() != mesh.id():
+            raise ValueError('the DG0 function is on a different mesh from the others; it '
+                             'cannot be their cell data')
+        width = int(np.prod(f.value_shape())) if len(f.value_shape()) else 1
+        dofs = _entity_dofs(V.dofmap(), mesh, tdim).reshape(-1, width)[:n_local]
+        values = _node_values(f, [(np.ascontiguousarray(dofs[:, c]), None)
+                                  for c in range(width)])
+        values = _pad3(values) if width > 1 else values.reshape(-1, 1)
+        out.append((f.name() if f.name() else 'cellfield{}'.format(index), values))
+    return out
 
 
 def _check_functions(functions):

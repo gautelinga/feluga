@@ -841,8 +841,24 @@ def _point_evaluation(V):
 def _interpolate(u, f, *args, **kwargs):
     """DOLFINx's u.interpolate(f). A callable f into a space whose dofs are point
     values is evaluated once per dof, at the dof coordinates; DOLFINx would evaluate it
-    at every cell's points, several times as many."""
+    at every cell's points, several times as many. Into a mixed space, which DOLFINx's
+    interpolate refuses, each sub-space takes its own components of f (a callable's
+    rows, in the sub-spaces' order, or a Function's sub-function on the same space)."""
     V = u.function_space
+    if getattr(V.ufl_element(), "is_mixed", False) and not args and not kwargs:
+        offset = 0
+        for i in range(V.num_sub_spaces):
+            sub = u.sub(i)
+            size = int(np.prod(sub.function_space.ufl_element().reference_value_shape))
+            if isinstance(f, fem.Function):
+                part = f.sub(i)
+            else:
+                def part(x, lo=offset, n=size):
+                    rows = np.asarray(f(x)).reshape(-1, x.shape[1])[lo:lo + n]
+                    return rows[0] if n == 1 else rows
+            fem.Function.interpolate(sub, part)
+            offset += size
+        return
     if callable(f) and not isinstance(f, fem.Function) and not args and not kwargs \
             and _point_evaluation(V):
         x = V.tabulate_dof_coordinates()          # (dofs, 3), contiguous

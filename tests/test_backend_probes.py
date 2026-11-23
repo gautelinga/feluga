@@ -1,10 +1,10 @@
 """femtools.backend's Probes and GradProbes on dolfin and DOLFINx: the values and
-gradients of a P2 scalar (two snapshots), the gradient of a P1 vector and the values of
-a DG0 field, at seeded random points inside the unit cube and one outside it, on one
-rank and two. The fields are polynomials the spaces hold exactly, so values and
-gradients are checked against the formulas on each backend; the two backends are
-compared with each other, and DOLFINx's probes on cell faces between one rank and two,
-in the slow tier.
+gradients of a P2 scalar (two snapshots), the gradient of a P1 vector, the values of
+a DG0 field and of a mixed P2 x P1 field, at seeded random points inside the unit cube
+and one outside it, on one rank and two. The fields are polynomials the spaces hold
+exactly, so values and gradients are checked against the formulas on each backend; the
+two backends are compared with each other, and DOLFINx's probes on cell faces between
+one rank and two, in the slow tier.
 
     python3 -m pytest tests/test_backend_probes.py
 """
@@ -56,7 +56,9 @@ def test_probes_exact(probed, backend, ranks):
                        atol=1e-12)
     du = np.array([1, 2, 0, -1, 0, 3, 0, 1, 0], dtype=float)
     assert np.allclose(r["du"][inside], du, atol=1e-11)
-    for name in ("f", "df", "u", "du", "m"):
+    assert r["mixed"].shape == (41, 2)
+    assert np.allclose(r["mixed"][inside], np.column_stack((f, X - Y)), atol=1e-12)
+    for name in ("f", "df", "u", "du", "m", "mixed"):
         assert not r[name][40].any(), name          # outside the mesh: 0
     # on a face z = c, the centroid z of the cell on either side: c -+ 1/16 or 3/16
     side = np.abs(np.ravel(r["face"]) - face_points()[:, 2])
@@ -71,7 +73,7 @@ def test_probes_exact(probed, backend, ranks):
 @pytest.mark.parametrize("ranks", RANKS)
 def test_probes_backends_agree(probed, ranks):
     a, b = probed("dolfin", ranks), probed("dolfinx", ranks)
-    for name in ("f", "df", "u", "du", "m"):
+    for name in ("f", "df", "u", "du", "m", "mixed"):
         assert np.allclose(a[name], b[name], atol=1e-11), name
 
 

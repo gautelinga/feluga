@@ -134,7 +134,7 @@ def _dolfinx_space(t, V, U):
     t.gc, D = dolfin_cell_dofs(V)
     dtype = np.int32 if U.n_global < 2**31 else np.int64    # dolfin's int32 when it fits
     t.dofs = U.compact[D].astype(dtype)
-    t.vertices_per_cell = mesh.geometry.dofmap.shape[1]
+    t.vertices_per_cell = mesh.geometry.dofmaps[0].shape[1]
     t.gdim = mesh.geometry.dim
     t._make_x = lambda: mesh.geometry.x[ufc_vertices(mesh)][:, :, :mesh.geometry.dim]
     t._make_vgid = lambda: np.asarray(mesh.geometry.input_global_indices,

@@ -86,8 +86,8 @@ def _vertex_gradient_dolfinx(mesh, delta_, S):
     lump = L.assemble(w * L.dx).get_local()
     g = L.Function(S)
     dofs = np.asarray(S.dofmap.list).ravel()
-    nodes = np.asarray(mesh.geometry.dofmap).ravel()
-    if np.asarray(S.dofmap.list).shape[1] != mesh.geometry.dofmap.shape[1]:
+    nodes = np.asarray(mesh.geometry.dofmaps[0]).ravel()
+    if np.asarray(S.dofmap.list).shape[1] != mesh.geometry.dofmaps[0].shape[1]:
         raise NotImplementedError("recovered_vertex_gradient: a P1 space on an affine mesh")
     out = np.empty((len(mesh.geometry.x), 3))
     for i in range(3):

@@ -155,10 +155,10 @@ def _p1_nodes(V):
     order); and the nodes' file rows."""
     mesh = V.mesh
     if V.dofmap.index_map_bs != 1 or V.num_sub_spaces or V.element.space_dimension != \
-            mesh.geometry.dofmap.shape[1]:
+            mesh.geometry.dofmaps[0].shape[1]:
         raise NotImplementedError("vertex_field: a P1 scalar space on an affine mesh")
     dofs = np.asarray(V.dofmap.list).ravel()
-    nodes = np.asarray(mesh.geometry.dofmap).ravel()
+    nodes = np.asarray(mesh.geometry.dofmaps[0]).ravel()
     rows = np.asarray(mesh.geometry.input_global_indices, dtype=np.int64)
     return dofs, nodes, rows
 

@@ -117,7 +117,7 @@ def rows_field():
         f.vector().apply("insert")
         return f
     dofs = np.asarray(V1.dofmap.list).ravel()
-    nodes = np.asarray(mesh.geometry.dofmap).ravel()
+    nodes = np.asarray(mesh.geometry.dofmaps[0]).ravel()
     f.x.array[dofs] = np.asarray(mesh.geometry.input_global_indices, dtype=float)[nodes]
     return f.restrict()
 

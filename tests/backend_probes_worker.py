@@ -5,8 +5,9 @@ dolfin or DOLFINx.
 
 On the unit cube (4^3, tetrahedra), at 40 seeded random points and one outside: f, a
 quadratic in P2 (values and gradients, two snapshots, the second of 2f), a linear
-vector in P1 (gradients) and a DG0 field (its cell means); and at 48 points on cell faces
-the DG0 field of the cells' centroid z, which differs across those faces. Rank 0 saves
+vector in P1 (gradients), a DG0 field (its cell means) and a mixed P2 x P1 field (f and
+x - y: values); and at 48 points on cell faces the DG0 field of the cells' centroid z,
+which differs across those faces. Rank 0 saves
 the gathered arrays.
 """
 import sys
@@ -46,11 +47,17 @@ def main(backend, out_path):
     gu.grad(u)
     p = be.Probes(x, D0)
     p(m)
+    cell = mesh.ufl_cell()
+    W = be.FunctionSpace(mesh, be.MixedElement([be.FiniteElement("Lagrange", cell, 2),
+                                                be.FiniteElement("Lagrange", cell, 1)]))
+    w = be.interpolate(be.Expression((F, "x[0] - x[1]"), degree=2), W)
+    pw = be.Probes(x, W)
+    pw(w)
     z = be.interpolate(be.Expression("x[2]", degree=1), D0)         # centroids' z
     pf = be.Probes(face_points().flatten(), D0)
     pf(z)
     out = dict(f=g.array(), df=g.array_grad(), u=gu.array(0), du=gu.array_grad(0),
-               m=p.array(0), face=pf.array(0))
+               m=p.array(0), mixed=pw.array(0), face=pf.array(0))
     g.dump(out_path[:-4] + "_f")
     be.mesh_comm(mesh).barrier()
     if be.mesh_comm(mesh).rank == 0:

@@ -87,7 +87,7 @@ def _vertex_order(mesh):
     """This rank's own cells' local vertices (their reference positions) in dolfin's
     (UFC's) order: by increasing input global index. (n, tdim+1)."""
     tdim = mesh.topology.dim
-    if tdim not in UFC_EDGES or mesh.geometry.cmap.degree != 1:
+    if tdim not in UFC_EDGES or mesh.geometry.cmaps[0].degree != 1:
         raise NotImplementedError("dolfin layout: affine triangles and tetrahedra only")
     n = mesh.topology.index_map(tdim).size_local
     G = mesh.geometry.dofmaps[0][:n]

@@ -25,7 +25,7 @@ else:
     tdim = mesh.topology.dim
     n = mesh.topology.index_map(tdim).size_local
     ids = np.asarray(mesh.topology.original_cell_index)[:n]
-    x = mesh.geometry.x[mesh.geometry.dofmap[:n]]
+    x = mesh.geometry.x[mesh.geometry.dofmaps[0][:n]]
     counts = (mesh.topology.index_map(tdim).size_global,
               mesh.topology.index_map(0).size_global)
 # each cell's vertices, as coordinates, are its file row's (in any order)

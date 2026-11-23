@@ -35,6 +35,11 @@ def _value_size(V):
     return int(np.prod(shape)) if len(shape) else 1
 
 
+def _mixed(V):
+    """Whether V's element is mixed (not a blocked vector or tensor element)."""
+    return bool(getattr(V.ufl_element(), "is_mixed", False))
+
+
 def _locate(mesh, x):
     """The points x (N, gdim) this rank keeps, as (indices, points padded to 3, cells):
     each point goes to the owned cell holding it with the smallest original cell index
@@ -103,6 +108,11 @@ class Probes(_Collection):
     def _at(self, u):
         if not len(self._ids):
             return np.zeros((0, _value_size(u.function_space)))
+        if _mixed(u.function_space):
+            # DOLFINx's Function.eval refuses a mixed element (0.11: "Element does not
+            # have a reference_value_shape"): each sub-function's values, side by side
+            return np.hstack([self._at(u.sub(i))
+                              for i in range(u.function_space.num_sub_spaces)])
         return np.asarray(u.eval(self._x, self._cells)).reshape(len(self._ids), -1)
 
     def values(self):

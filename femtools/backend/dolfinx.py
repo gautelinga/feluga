@@ -1655,7 +1655,7 @@ class PETScKrylovSolver:
     def __init__(self, method=None, preconditioner=None):
         self._ksp = PETSc.KSP().create(MPI.comm_world)
         self.parameters = {}
-        self._reuse = False
+        self._reuse = None            # set_reuse_preconditioner's, else the PC's own flag
         self._operators = None        # (A, P), Matrices, from set_operator(s)
         if method is not None:
             # dolfin's PETScKrylovSolver(method, preconditioner), by femtools.ksp's names
@@ -1692,7 +1692,8 @@ class PETScKrylovSolver:
             raise TypeError("PETScKrylovSolver.solve(A, x, b) or solve(x, b)")
         k = self._ksp
         k.setOperators(A._m, P._m)
-        k.getPC().setReusePreconditioner(self._reuse)  # what KSPSetReusePreconditioner does
+        if self._reuse is not None:   # as dolfin: a flag set on the PC itself is kept
+            k.getPC().setReusePreconditioner(self._reuse)
         ksp.apply_parameters(k, self.parameters)
         k.solve(b._v, x._v)
         its = k.getIterationNumber()

@@ -34,6 +34,7 @@ def test_same_calls_same_results(tmp_path, backend, ranks):
     assert r["split_independent"] == pytest.approx(1.0, rel=1e-12), r
     assert r["norm"] == pytest.approx(math.sqrt(1.0 / 3.0), rel=1e-12), r
     assert r["krylov_mean"] == pytest.approx([1.0] * 3, rel=1e-10), r
+    assert r["reuse_setups"] == [1, 1, 2], r    # kept across a new operator state, then not
     assert r["krylov_same"] < 1e-10, r
     assert r["mesh_groups"] == ["first", "second"], r
     assert r["p2_kept"] and r["markers_written"], r

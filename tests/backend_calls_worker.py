@@ -63,6 +63,36 @@ out["krylov_same"] = max(float(comm.allreduce(np.abs(x.vector().get_local()
                                                      - xs[0].vector().get_local()).max(initial=0),
                                               op=MPI.MAX)) for x in xs)
 
+# the preconditioner's reuse flag: one set on the KSP's PC is kept by solve (as dolfin keeps
+# it), set_reuse_preconditioner's replaces it: counted as the set-ups of a python PC, the
+# operator's state changed before each solve
+
+
+class CountingPC:
+    setups = 0
+
+    def setUp(self, pc):
+        CountingPC.setups += 1
+
+    def apply(self, pc, x, y):
+        x.copy(y)
+
+
+s = L.PETScKrylovSolver("cg", "jacobi")
+pc = s.ksp().getPC()
+pc.setType("python")
+pc.setPythonContext(CountingPC())
+pc.setReusePreconditioner(True)
+Amat = L.as_backend_type(A).mat()
+setups = []
+for reuse in (None, None, False):
+    if reuse is not None:
+        s.set_reuse_preconditioner(reuse)
+    Amat.scale(2.0)                 # a new state of the operator
+    s.solve(A, L.Function(V1).vector(), rhs)
+    setups.append(CountingPC.setups)
+out["reuse_setups"] = setups
+
 # write_mesh_h5 with name and mode: two meshes in one file
 h5 = os.path.join(folder, "meshes.h5")
 L.write_mesh_h5(h5, mesh, name="first", mode="w")

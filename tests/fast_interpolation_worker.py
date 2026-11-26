@@ -10,8 +10,8 @@ import dolfin as df
 import numpy as np
 from mpi4py import MPI
 
-from femtools.fast_interpolation import interpolate
-from femtools.periodic import PeriodicBox
+from feluga.fast_interpolation import interpolate
+from feluga.periodic import PeriodicBox
 
 mesh = df.RectangleMesh(df.Point(0, 0), df.Point(2, 1), 24, 12)
 pb = PeriodicBox([2, 1], periodic=[True, False])

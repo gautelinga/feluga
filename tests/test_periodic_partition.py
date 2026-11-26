@@ -135,8 +135,8 @@ def test_the_check_takes_the_lower_corner(dim):
     land on the middle plane."""
     import dolfin as df
     from mpi4py import MPI
-    from femtools import periodic_partition as pp
-    from femtools.periodic import periodic_box
+    from feluga import periodic_partition as pp
+    from feluga.periodic import periodic_box
     lo, hi = [-0.5] * dim, [0.5] * dim
     mesh = (df.RectangleMesh(MPI.COMM_SELF, df.Point(*lo), df.Point(*hi), 6, 6) if dim == 2
             else df.BoxMesh(MPI.COMM_SELF, df.Point(*lo), df.Point(*hi), 4, 4, 4))
@@ -167,7 +167,7 @@ def test_the_dual_graph_is_every_shared_face(n):
     import dolfin as df
     import numpy as np
     from mpi4py import MPI
-    from femtools.periodic_partition import dual_graph_of
+    from feluga.periodic_partition import dual_graph_of
     mesh = df.UnitCubeMesh(MPI.COMM_SELF, *n)
     cells = np.asarray(mesh.cells(), np.int64)
     rows, cols, offset = dual_graph_of(cells, MPI.COMM_SELF)
@@ -182,7 +182,7 @@ def test_a_face_of_three_cells_is_refused():
     every rank (`agreed`), rather than handed to ParMETIS."""
     import numpy as np
     from mpi4py import MPI
-    from femtools.periodic_partition import dual_graph_of
+    from feluga.periodic_partition import dual_graph_of
     cells = np.array([[0, 1, 2, 3], [0, 1, 2, 4], [0, 1, 2, 5]], np.int64)
     with pytest.raises(RuntimeError, match='three or more cells'):
         dual_graph_of(cells, MPI.COMM_SELF)
@@ -194,7 +194,7 @@ def test_a_graph_past_idx_t_is_refused():
     import dolfin as df
     import numpy as np
     from mpi4py import MPI
-    from femtools import periodic_partition as pp
+    from feluga import periodic_partition as pp
     module = pp._graph_module()
     if module.IDX_BITS != 32:
         pytest.skip('ParMETIS here has a {}-bit idx_t'.format(module.IDX_BITS))
@@ -210,8 +210,8 @@ import sys
 from mpi4py import MPI
 import dolfin as df
 import numpy as np
-from femtools import periodic_partition as pp
-from femtools.periodic import PeriodicBox
+from feluga import periodic_partition as pp
+from feluga.periodic import PeriodicBox
 comm = MPI.COMM_WORLD
 path, L, periodic = sys.argv[1], [6.0, 1.0, 1.0], (True, False, False)
 if comm.rank == 0:
@@ -247,7 +247,7 @@ import sys
 from mpi4py import MPI
 import dolfin as df
 import numpy as np
-from femtools import periodic_partition as pp
+from feluga import periodic_partition as pp
 comm = MPI.COMM_WORLD
 path = sys.argv[1]
 if comm.rank == 0:
@@ -293,8 +293,8 @@ def test_rows_of_nothing_are_rows():
     (0, width) array, not numpy's error; and the class split of no face nodes is none."""
     import numpy as np
     from mpi4py import MPI
-    from femtools.hdf5_rows import as_rows
-    from femtools.periodic_partition import _split_classes
+    from feluga.hdf5_rows import as_rows
+    from feluga.periodic_partition import _split_classes
     assert as_rows(np.zeros((0, 2, 3))).shape == (0, 6)
     assert as_rows(np.zeros(0)).shape == (0, 1)
     assert as_rows(np.arange(6).reshape(3, 2)).tolist() == [[0, 1], [2, 3], [4, 5]]
@@ -308,7 +308,7 @@ def test_the_csr_is_the_dual_graph_sorted():
     import dolfin as df
     import numpy as np
     from mpi4py import MPI
-    from femtools.periodic_partition import dual_csr, dual_graph_of
+    from feluga.periodic_partition import dual_csr, dual_graph_of
     mesh = df.UnitCubeMesh(MPI.COMM_SELF, 4, 3, 2)
     cells = np.asarray(mesh.cells(), np.int64)
     rows, cols, _ = dual_graph_of(cells, MPI.COMM_SELF)
@@ -327,7 +327,7 @@ def test_a_rebuild_on_one_rank_is_the_same_mesh():
     import dolfin as df
     import numpy as np
     from mpi4py import MPI
-    from femtools.periodic_partition import Rebuild
+    from feluga.periodic_partition import Rebuild
     mesh = df.UnitCubeMesh(MPI.COMM_SELF, 4, 3, 2)
     gv, gc = (np.asarray(mesh.topology().global_indices(d), np.int64) for d in (0, 3))
     plan = Rebuild(mesh, np.zeros(mesh.num_cells(), np.int64))
@@ -345,8 +345,8 @@ BELOW_ZERO = r"""
 import os, sys
 import numpy as np, h5py, dolfin as df
 from mpi4py import MPI
-from femtools import periodic_partition as pp
-from femtools.periodic import periodic_box
+from feluga import periodic_partition as pp
+from feluga.periodic import periodic_box
 comm = MPI.COMM_WORLD
 tmp, shift = sys.argv[1], float(sys.argv[2])
 periodic, tol = (True,) * 3, 1e-8
@@ -398,7 +398,7 @@ def test_a_box_at_or_below_zero_is_repaired(tmp_path, shift):
 GHOSTED = r"""
 import numpy as np, dolfin as df
 from mpi4py import MPI
-from femtools import periodic_partition as pp
+from feluga import periodic_partition as pp
 df.parameters['ghost_mode'] = 'shared_facet'
 comm = MPI.COMM_WORLD
 mesh = df.UnitCubeMesh(6, 6, 6)
@@ -422,7 +422,7 @@ def _kuhn_layer(n, parts, seed):
     tetrahedra a cube) that touch the upper face of x or y (periodic there), their
     vertices' upper-face masks, and a random part out of `parts` for each."""
     import numpy as np
-    from femtools import periodic_partition as pp
+    from feluga import periodic_partition as pp
     g = np.arange(n + 1)
     x = np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3) / n
     corner = np.stack(np.meshgrid(*[np.arange(n)] * 3, indexing="ij"), -1).reshape(-1, 3)
@@ -446,8 +446,8 @@ def _lowest_rank_rule(mask, topo, owner, rounds):
     """Whether moving every endangered holder's cells to the lowest rank with an exterior
     facet at the entity, round after round, ends within `rounds` rounds."""
     import numpy as np
-    from femtools import periodic_partition as pp
-    from femtools.hdf5_rows import find_rows
+    from feluga import periodic_partition as pp
+    from feluga.hdf5_rows import find_rows
     owner = owner.copy()
     for _ in range(rounds):
         bad, (keys, low) = pp._endangered(mask, topo, owner)
@@ -464,7 +464,7 @@ def test_the_repair_ends_where_moving_to_the_lowest_rank_cycles():
     lowest rank with an exterior facet there goes round in circles: the repair moves
     cells to lower ranks only, ends, and leaves nothing endangered."""
     import numpy as np
-    from femtools import periodic_partition as pp
+    from feluga import periodic_partition as pp
     mask, topo, owner = _kuhn_layer(4, 9, 0)
     assert not _lowest_rank_rule(mask, topo, owner, 50)
     fixed, moved = pp._repair(mask, topo, owner)
@@ -475,7 +475,7 @@ def test_the_repair_ends_where_moving_to_the_lowest_rank_cycles():
 DISTRIBUTED_REPAIR = r"""
 import numpy as np
 from mpi4py import MPI
-from femtools import periodic_partition as pp
+from feluga import periodic_partition as pp
 from tests.test_periodic_partition import _kuhn_layer
 comm = MPI.COMM_WORLD
 for n, parts, seed in ((4, 9, 0), (6, 64, 1), (5, 3, 2)):

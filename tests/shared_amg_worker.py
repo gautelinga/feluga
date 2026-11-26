@@ -8,10 +8,10 @@ import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from femtools.ksp import BOOMERAMG_CLASSICAL
-from femtools.shared_amg import SharedVelocityPC, check_blocks, component_index_sets
+from feluga.ksp import BOOMERAMG_CLASSICAL
+from feluga.shared_amg import SharedVelocityPC, check_blocks, component_index_sets
 
-L = importlib.import_module("femtools.backend." + sys.argv[1])
+L = importlib.import_module("feluga.backend." + sys.argv[1])
 comm = MPI.COMM_WORLD
 mesh = L.BoxMesh(L.Point(0, 0, 0), L.Point(1, 1, 1), 4, 4, 4)
 cell = mesh.ufl_cell()

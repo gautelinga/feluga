@@ -1,4 +1,4 @@
-"""`femtools.xdmf.grids`: where the arrays of every grid of an XDMF file are; and
+"""`feluga.xdmf.grids`: where the arrays of every grid of an XDMF file are; and
 `parse_xdmf`, partractools' interface to the same.
 
     python3 -m pytest tests/test_xdmf_grids.py
@@ -12,7 +12,7 @@ import os
 
 import pytest
 
-from femtools.xdmf import grids, parse_xdmf
+from feluga.xdmf import grids, parse_xdmf
 
 SERIES = """<?xml version="1.0"?>
 <Xdmf Version="3.0" xmlns:xi="http://www.w3.org/2001/XInclude">
@@ -160,7 +160,7 @@ def step_file(path, times):
 def test_continued_series_merged(tmp_path):
     """A restart from t = 0.2 replaces the steps from 0.2 on; a second one from 0.4."""
     from xml.etree import ElementTree as ET
-    from femtools.xdmf import continued, merge_series
+    from feluga.xdmf import continued, merge_series
     assert continued([[0, 1, 2, 3], [2, 2.5], [], [2.5, 4]], float) == [0, 1, 2, 2.5, 4]
     files = [str(tmp_path / n) for n in ("a.xdmf", "b.xdmf", "c.xdmf")]
     for f, times in zip(files, ([0., 0.1, 0.2, 0.3], [0.2, 0.3, 0.4], [0.4, 0.5])):
@@ -173,7 +173,7 @@ def test_continued_series_merged(tmp_path):
 def test_an_unchanged_file_is_parsed_once(tmp_path, monkeypatch):
     """`grids` parses a file again only once it changed (its size or modification time,
     or another file renamed over it)"""
-    from femtools import xdmf
+    from feluga import xdmf
     path = tmp_path / "u.xdmf"
     path.write_text(SERIES)
     parsed = []
@@ -194,7 +194,7 @@ def test_an_unchanged_file_is_parsed_once(tmp_path, monkeypatch):
 GRIDS_ON_RANKS = r"""
 import sys
 from mpi4py import MPI
-from femtools import xdmf
+from feluga import xdmf
 comm = MPI.COMM_WORLD
 parsed = []
 parse = xdmf._parse

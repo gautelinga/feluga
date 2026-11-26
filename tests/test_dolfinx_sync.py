@@ -1,4 +1,4 @@
-"""femtools.backend.dolfinx: a Function's compact vector and DOLFINx's array kept
+"""feluga.backend.dolfinx: a Function's compact vector and DOLFINx's array kept
 consistent, whatever writes them, on one rank and two.
 
     python3 -m pytest tests/test_dolfinx_sync.py [-m mpi]

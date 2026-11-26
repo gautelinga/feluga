@@ -1,4 +1,4 @@
-"""`femtools/compress.py`: every dataset written compressed, and existing files rewritten so.
+"""`feluga/compress.py`: every dataset written compressed, and existing files rewritten so.
 
     python3 -m pytest tests/test_compress.py
 
@@ -19,8 +19,8 @@ import pytest
 
 h5py = pytest.importorskip("h5py")
 
-from femtools import compress  # noqa: E402
-from femtools.hdf5_rows import write_ordered  # noqa: E402
+from feluga import compress  # noqa: E402
+from feluga.hdf5_rows import write_ordered  # noqa: E402
 
 
 def arrays():
@@ -201,7 +201,7 @@ class _World:
         recv[...] = sum(len(r) for r in self.rows[:self.rank])
 
     def Allreduce(self, send, recv, op):
-        from femtools.hdf5_rows import _runs
+        from feluga.hdf5_rows import _runs
         if self.capture:
             self.sent = send.copy()
             recv[...] = send
@@ -218,7 +218,7 @@ class _World:
 def test_runs_are_recognised_only_when_they_tile_the_rows():
     """`_runs`: every rank one contiguous run, in rank order, 0..n-1 exactly (a rank may
     hold none) -- anything else is the general path, on every rank."""
-    from femtools.hdf5_rows import _runs
+    from feluga.hdf5_rows import _runs
 
     def runs(rows, n):
         rows = [np.asarray(r, dtype=np.int64) for r in rows]
@@ -239,7 +239,7 @@ def test_place_is_what_it_was():
     places rows given once each without one: the same block and verdict as comparing
     every neighbour and `np.unique`, on rows given once, shuffled, repeated, missing,
     repeated with other bits, and out of range."""
-    from femtools.hdf5_rows import _place, as_rows
+    from feluga.hdf5_rows import _place, as_rows
 
     def before(rows, values, lo, hi):
         block = np.zeros((hi - lo,) + values.shape[1:], dtype=values.dtype)

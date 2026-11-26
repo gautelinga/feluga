@@ -42,7 +42,7 @@ H_CPP = "sin(2*pi*x[0]/LX) + x[1]"
 
 def dolfin_spaces():
     import dolfin as df
-    from femtools.periodic import periodic_box_from_bounds
+    from feluga.periodic import periodic_box_from_bounds
     mesh = df.RectangleMesh(df.Point(0, 0), df.Point(LX, LY), NX, NY, "right")
     out = {}
     for name, (degrees, periodic) in SPACES.items():
@@ -71,8 +71,8 @@ def dolfinx_spaces():
     import basix.ufl
     from dolfinx import fem, mesh as dmesh
     from mpi4py import MPI
-    from femtools.dolfinx.periodic import flat_collapse_map, periodic_box
-    from femtools.dolfinx.unique import UniqueDofs
+    from feluga.dolfinx.periodic import flat_collapse_map, periodic_box
+    from feluga.dolfinx.unique import UniqueDofs
     msh = dmesh.create_rectangle(MPI.COMM_WORLD, [[0, 0], [LX, LY]], [NX, NY],
                                  dmesh.CellType.triangle, diagonal=dmesh.DiagonalType.right)
     out = {}
@@ -113,16 +113,16 @@ def dolfinx_spaces():
 def main(mode, folder, out=None):
     res = {}
     if mode == "write-dolfin":
-        from femtools.dolfin_layout import write_function
+        from feluga.dolfin_layout import write_function
         for name, (V, u) in dolfin_spaces().items():
             write_function(os.path.join(folder, name + ".h5"), u, "u", mode="w")
     elif mode in ("read-dolfin", "read-dolfin-tables"):
         import dolfin as df
-        from femtools.dolfin_layout import read_function
+        from feluga.dolfin_layout import read_function
         for name, (V, exact) in dolfin_spaces().items():
             u = df.Function(V)
             path = os.path.join(folder, name + ".h5")
-            if mode == "read-dolfin-tables":      # femtools.tables.read_values
+            if mode == "read-dolfin-tables":      # feluga.tables.read_values
                 read_function(path, u, "u")
             else:                                 # dolfin's own reader
                 with df.HDF5File(V.mesh().mpi_comm(), path, "r") as h:
@@ -131,7 +131,7 @@ def main(mode, folder, out=None):
             res[name] = float(V.mesh().mpi_comm().allreduce(d.max() if d.size else 0.0,
                                                            op=__import__("mpi4py").MPI.MAX))
     elif mode == "write-dolfinx":
-        from femtools.dolfinx.checkpoint import write_dofs, write_function
+        from feluga.dolfinx.checkpoint import write_dofs, write_function
         for name, (V, U, exact) in dolfinx_spaces().items():
             # the tables in a file of their own, linked, as checkpoints write them
             write_dofs(os.path.join(folder, name + "_dofs.h5"), V, U, "dofs")
@@ -139,7 +139,7 @@ def main(mode, folder, out=None):
                            dofs=(name + "_dofs.h5", "dofs"))
     elif mode == "read-dolfinx":
         from mpi4py import MPI
-        from femtools.dolfinx.checkpoint import read_function
+        from feluga.dolfinx.checkpoint import read_function
         for name, (V, U, exact) in dolfinx_spaces().items():
             got = read_function(os.path.join(folder, name + ".h5"), "u", V, U)
             d = np.abs(got - exact)

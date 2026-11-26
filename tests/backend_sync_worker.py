@@ -6,7 +6,7 @@ import importlib
 import json
 import sys
 
-L = importlib.import_module("femtools.backend." + sys.argv[1])  # before mpi4py (dolfin)
+L = importlib.import_module("feluga.backend." + sys.argv[1])  # before mpi4py (dolfin)
 from mpi4py import MPI  # noqa: E402
 
 comm = MPI.COMM_WORLD

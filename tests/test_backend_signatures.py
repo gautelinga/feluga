@@ -1,4 +1,4 @@
-"""femtools.backend: every name in NAMES has the same kind (callable or not) and the same
+"""feluga.backend: every name in NAMES has the same kind (callable or not) and the same
 signature (parameter names, kinds and defaults) on dolfin and on DOLFINx, but for the
 differences listed in DIFFERENCES, each with its reason; a new difference fails, and so
 does an entry that no longer differs. A name whose signature one side cannot report
@@ -16,7 +16,7 @@ from tests import support
 
 DUMP = """
 import importlib, inspect, json, sys
-m = importlib.import_module("femtools.backend." + sys.argv[1])
+m = importlib.import_module("feluga.backend." + sys.argv[1])
 def sig(o):
     try:
         s = inspect.signature(o)
@@ -49,7 +49,7 @@ DIFFERENCES = {
                 "is the call both take)",
     "FunctionSpace": GENERIC, "Function": GENERIC, "Expression": GENERIC,
     "DirichletBC": GENERIC, "solve": GENERIC,
-    "XDMFFile": "dolfin's: femtools.xdmf.XDMFFile2(comm_or_name, name=None), reading and "
+    "XDMFFile": "dolfin's: feluga.xdmf.XDMFFile2(comm_or_name, name=None), reading and "
                 "checkpoints too; DOLFINx's: XDMFFile(comm, path), writing alone",
 }
 

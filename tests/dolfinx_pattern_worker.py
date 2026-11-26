@@ -22,9 +22,9 @@ from dolfinx import fem, mesh
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from femtools.dolfinx import assembly
-from femtools.dolfinx.periodic import periodic_box
-from femtools.dolfinx.unique import UniqueDofs
+from feluga.dolfinx import assembly
+from feluga.dolfinx.periodic import periodic_box
+from feluga.dolfinx.unique import UniqueDofs
 
 comm = MPI.COMM_WORLD
 
@@ -37,7 +37,7 @@ def assembled_preallocation(a, rows, cols):
     unique there, with the other entries of the rows they reach. Collective."""
     from dolfinx.fem import petsc
     from petsc4py import PETSc
-    from femtools.hdf5_rows import route, unique_rows
+    from feluga.hdf5_rows import route, unique_rows
 
     comm = rows.comm
     A = petsc.create_matrix(a)

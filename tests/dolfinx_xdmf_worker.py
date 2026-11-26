@@ -38,7 +38,7 @@ G_CPP = "cos(2*pi*x[0]/LX)*(1.0 + x[1])"
 
 def dolfin_fields():
     import dolfin as df
-    from femtools.periodic import periodic_box_from_bounds
+    from feluga.periodic import periodic_box_from_bounds
     mesh = df.RectangleMesh(df.Point(0, 0), df.Point(LX, LY), NX, NY, "right")
     out = {}
     for name, (degree, vector, periodic) in FIELDS.items():
@@ -53,7 +53,7 @@ def dolfin_fields():
 def write_dolfinx(folder):
     from dolfinx import fem, mesh as dmesh
     from mpi4py import MPI
-    from femtools.dolfinx.xdmf import XDMFSeries
+    from feluga.dolfinx.xdmf import XDMFSeries
     msh = dmesh.create_rectangle(MPI.COMM_WORLD, [[0, 0], [LX, LY]], [NX, NY],
                                  dmesh.CellType.triangle, diagonal=dmesh.DiagonalType.right)
     for name, (degree, vector, periodic) in FIELDS.items():
@@ -86,7 +86,7 @@ def write_dolfinx(folder):
 
 def write_dolfin(folder):
     import dolfin as df
-    from femtools.xdmf import XDMFFile2
+    from feluga.xdmf import XDMFFile2
     for name, u in dolfin_fields().items():
         u.rename(name, name)
         f2 = XDMFFile2(df.MPI.comm_world, os.path.join(folder, "d_" + name + ".xdmf"))
@@ -116,7 +116,7 @@ def write_dolfin(folder):
 
 def read_dolfin(folder, out):
     import dolfin as df
-    from femtools.xdmf import grids, XDMFFile2
+    from feluga.xdmf import grids, XDMFFile2
     res = {}
     for name, u in dolfin_fields().items():
         errs = []
@@ -157,13 +157,13 @@ def read_dolfin(folder, out):
 
 
 def read_dolfinx(folder, out):
-    """DOLFINx reads every step of both backends' series (femtools.dolfinx.xdmf_read) into
+    """DOLFINx reads every step of both backends' series (feluga.dolfinx.xdmf_read) into
     its own spaces, the periodic ones included (UniqueDofs: restricted values compared)."""
     from dolfinx import fem, mesh as dmesh
     from mpi4py import MPI
-    from femtools.dolfinx.periodic import periodic_box
-    from femtools.dolfinx.unique import UniqueDofs
-    from femtools.dolfinx.xdmf_read import read_nodal
+    from feluga.dolfinx.periodic import periodic_box
+    from feluga.dolfinx.unique import UniqueDofs
+    from feluga.dolfinx.xdmf_read import read_nodal
     comm = MPI.COMM_WORLD
     msh = dmesh.create_rectangle(comm, [[0, 0], [LX, LY]], [NX, NY], dmesh.CellType.triangle,
                                  diagonal=dmesh.DiagonalType.right)
@@ -183,7 +183,7 @@ def read_dolfinx(folder, out):
                 errs.append(comm.allreduce(float(d.max()) if d.size else 0.0, op=MPI.MAX))
         res[name] = max(errs)
     # read at the nodes of the spaces above: no plain space made
-    from femtools.dolfinx import xdmf_read
+    from feluga.dolfinx import xdmf_read
     res["plain_spaces"] = len(xdmf_read._PLAIN)
     # onto another degree, through a plain space of the file's: the P2 field's values at
     # the P1 nodes, its own

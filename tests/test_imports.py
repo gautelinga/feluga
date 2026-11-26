@@ -1,4 +1,4 @@
-"""`import femtools`, its I/O modules, `hierarchical_transfer`, `dof_reorder`, `abort`,
+"""`import feluga`, its I/O modules, `hierarchical_transfer`, `dof_reorder`, `abort`,
 `memory`, `phases`, `digest`, `layout_reader`, `couplings`, `vertex_field`, `recovery`,
 `cell_mean`, `swap` and `ksp` need numpy and h5py alone: dolfin and mpi4py made unimportable, they import
 without loading cppimport or the compiled modules, and a quadratic grid is written and
@@ -14,14 +14,14 @@ import sys
 for name in ("dolfin", "mpi4py", "ufl", "ffc", "dijitso", "petsc4py"):
     sys.modules[name] = None
 import numpy as np
-import femtools, femtools.xdmf, femtools.compress, femtools.hdf5_rows, femtools.facets
-import femtools.boundaries
-import femtools.dolfin_layout, femtools.abort, femtools.memory, femtools.swap, femtools.ksp
-import femtools.hierarchical_transfer, femtools.dof_reorder
-import femtools.phases, femtools.digest, femtools.layout_reader, femtools.couplings
-import femtools.vertex_field, femtools.recovery, femtools.cell_mean
-assert not any(m in sys.modules for m in ("cppimport", "femtools.probes", "femtools.gradient"))
-from femtools.xdmf import write_quadratic, _scan, _read_grid_geometry, _read_grid_attribute
+import feluga, feluga.xdmf, feluga.compress, feluga.hdf5_rows, feluga.facets
+import feluga.boundaries
+import feluga.dolfin_layout, feluga.abort, feluga.memory, feluga.swap, feluga.ksp
+import feluga.hierarchical_transfer, feluga.dof_reorder
+import feluga.phases, feluga.digest, feluga.layout_reader, feluga.couplings
+import feluga.vertex_field, feluga.recovery, feluga.cell_mean
+assert not any(m in sys.modules for m in ("cppimport", "feluga.probes", "feluga.gradient"))
+from feluga.xdmf import write_quadratic, _scan, _read_grid_geometry, _read_grid_attribute
 coords = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], float)
 mid = [(0, 1), (1, 2), (0, 2), (0, 3), (1, 3), (2, 3)]
 coords = np.vstack([coords] + [0.5 * (coords[a] + coords[b]) for a, b in mid])

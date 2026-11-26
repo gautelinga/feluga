@@ -1,5 +1,5 @@
 """Boundary facet files across the backends: facet markers written by
-femtools.boundary_markers on dolfin read by femtools.backend.dolfinx's BoundaryMarkers, and
+feluga.boundary_markers on dolfin read by feluga.backend.dolfinx's BoundaryMarkers, and
 the other way round, each written and read on one rank and on three, on a rectangle and
 a box.
 

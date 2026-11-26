@@ -1,4 +1,4 @@
-"""`femtools.probes`: Probes and GradProbes on a P2 field (scalar and vector) on a
+"""`feluga.probes`: Probes and GradProbes on a P2 field (scalar and vector) on a
 UnitCubeMesh give the function's own value and gradient at the probe points, every
 gradient component and every gradient snapshot; a Probes built from located GradProbes
 gives the same values."""
@@ -11,7 +11,7 @@ df = pytest.importorskip("dolfin")
 pytest.importorskip("cppimport")
 pytestmark = [pytest.mark.dolfin]
 
-from femtools.probes import GradProbes, Probes  # noqa: E402
+from feluga.probes import GradProbes, Probes  # noqa: E402
 
 POINTS = np.array([[0.1, 0.2, 0.3], [0.5, 0.5, 0.5], [0.77, 0.13, 0.91], [0.33, 0.9, 0.05]])
 
@@ -98,7 +98,7 @@ def square():
 
 def test_a_restarted_snapshot_counts():
     """`restart_probe` is a snapshot of its own: the next evaluation is the next one."""
-    from femtools.probes import Probe
+    from feluga.probes import Probe
     _, V, u = square()
     p = Probe(np.array([0.3, 0.4]), V)
     p.restart_probe(np.array([7.0]))
@@ -162,7 +162,7 @@ BOUNDARY = r"""
 import glob, os, sys
 import numpy as np, dolfin as df
 from mpi4py import MPI
-from femtools.probes import Probes, read_dump
+from feluga.probes import Probes, read_dump
 comm = MPI.COMM_WORLD
 mesh = df.UnitSquareMesh(8, 8)
 V = df.FunctionSpace(mesh, "CG", 1)
@@ -210,7 +210,7 @@ def test_a_point_on_a_partition_boundary_is_held_once(tmp_path):
 def test_dump_is_a_file_a_rank_and_reads_back(tmp_path):
     """`dump` writes the probes of a rank into one file, all components or one, in the
     text a probe's own dump writes; `read_dump` reads it, and fenicstools' file a probe"""
-    from femtools.probes import Probe, read_dump
+    from feluga.probes import Probe, read_dump
     mesh = df.UnitSquareMesh(4, 4)
     W = df.VectorFunctionSpace(mesh, "CG", 1)
     w = df.interpolate(df.Expression(("x[0]", "2*x[1]"), degree=1), W)

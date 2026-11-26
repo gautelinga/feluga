@@ -16,10 +16,10 @@ from dolfinx.fem import petsc
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from femtools.dolfinx.assembly import (assemble_matrix, assemble_vector, constant_nullspace,
+from feluga.dolfinx.assembly import (assemble_matrix, assemble_vector, constant_nullspace,
                                        create_matrix)
-from femtools.dolfinx.periodic import periodic_box
-from femtools.dolfinx.unique import UniqueDofs
+from feluga.dolfinx.periodic import periodic_box
+from feluga.dolfinx.unique import UniqueDofs
 
 comm = MPI.COMM_WORLD
 LX, LY = 1.0, 2.0
@@ -150,7 +150,7 @@ for name, form in (("same_cells", 2.0 * u * v * ufl.dx + ufl.inner(ufl.grad(u), 
 
 # 3. periodic solve with nonzero wall data (corners on both walls and periodic faces),
 # the conditions applied by the backend's DirichletBC
-from femtools.backend import dolfinx as B  # noqa: E402
+from feluga.backend import dolfinx as B  # noqa: E402
 
 Vb = B.FunctionSpace(msh, "CG", 2, constrained_domain=B.PeriodicBox({0: (0, LX)}))
 Ub = B.unique_dofs(Vb)
@@ -228,7 +228,7 @@ res["nullspace"] = bool(ns.test(K))
 
 # 5. interleaved numbering of a mixed space: the components at a node one after the
 # other, the same operator up to the permutation, values through restrict and prolong
-from femtools.dolfinx.periodic import flat_collapse_map  # noqa: E402
+from feluga.dolfinx.periodic import flat_collapse_map  # noqa: E402
 
 UWi = UniqueDofs(W, *periodic_box(W, periodic=(True, False)), interleave=True)
 K = create_matrix(a_W, UWi)
@@ -305,7 +305,7 @@ res["reordered_dg0"] = bool(comm.allreduce(int(not np.array_equal(
 # permutation, values through restrict and prolong, and the node graph built from the
 # reference component's pairs alone giving the same order as from every dof's; [P3, P2]
 # (P2's edge dof against P3's two) keeps its order
-from femtools.dolfinx import unique as _unique  # noqa: E402
+from feluga.dolfinx import unique as _unique  # noqa: E402
 
 
 def taylor_hood(msh_, W_, name):

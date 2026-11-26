@@ -1,4 +1,4 @@
-"""dolfin's DirichletBC(V, value, "C++ code") on DOLFINx (femtools.backend.dolfinx
+"""dolfin's DirichletBC(V, value, "C++ code") on DOLFINx (feluga.backend.dolfinx
 .compiled_facets): the facets dolfin's CompiledSubDomain marks, compared by their
 midpoints on the same unit square, with and without on_boundary; and what else of
 dolfin's marking and DirichletBC the backend keeps: the midpoint check of
@@ -29,7 +29,7 @@ def _dolfinx_midpoints(code):
     pytest.importorskip("dolfinx")
     import dolfinx.mesh as dm
     from mpi4py import MPI
-    from femtools.backend.dolfinx import compiled_facets
+    from feluga.backend.dolfinx import compiled_facets
     mesh = dm.create_unit_square(MPI.COMM_SELF, 8, 8)
     facets = compiled_facets(mesh, code)
     mid = dm.compute_midpoints(mesh, 1, facets)[:, :2]
@@ -45,7 +45,7 @@ def test_same_facets_as_dolfin(code):
 
 def _dolfinx_backend():
     pytest.importorskip("dolfinx")
-    from femtools.backend import dolfinx as b
+    from feluga.backend import dolfinx as b
     return b
 
 

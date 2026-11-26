@@ -21,7 +21,7 @@ import sys
 import dolfin as df
 import numpy as np
 
-from femtools import dolfin_layout, hdf5_rows
+from feluga import dolfin_layout, hdf5_rows
 from dolfin_layout_worker import Periodic
 
 

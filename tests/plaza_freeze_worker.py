@@ -15,7 +15,7 @@ import numpy as np
 
 import dolfin as df
 
-from femtools.refine_periodic import refine_congruent
+from feluga.refine_periodic import refine_congruent
 
 
 def z0_facets(mesh):

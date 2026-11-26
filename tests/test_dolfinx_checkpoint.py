@@ -1,9 +1,9 @@
-"""`femtools.dolfinx.checkpoint`: DOLFINx Functions in dolfin's HDF5 layout, across the
+"""`feluga.dolfinx.checkpoint`: DOLFINx Functions in dolfin's HDF5 layout, across the
 backends and the numbers of ranks.
 
 dolfin writes on one rank, DOLFINx reads on three; DOLFINx writes on three, dolfin reads
 on one and DOLFINx on two. dolfin also reads through the reader DOLFINx uses
-(femtools.tables.read_values, femtools.dolfin_layout.read_function): both backends' files,
+(feluga.tables.read_values, feluga.dolfin_layout.read_function): both backends' files,
 on one rank and on two. Scalar P1 and P2, mixed P2xP2 and P2xP1, a P2 vector, periodic in
 x, P2 without periodicity, and Taylor-Hood (a vector P2 and a P1) periodic in x; every
 value read equals the field at the reader's own dof.
@@ -63,7 +63,7 @@ def test_dolfinx_written_on_three_ranks(tmp_path):
 
 @pytest.mark.mpi
 def test_one_reader_on_dolfin(tmp_path):
-    """femtools.dolfin_layout.read_function (the reader DOLFINx uses) on dolfin: a file
+    """feluga.dolfin_layout.read_function (the reader DOLFINx uses) on dolfin: a file
     dolfin wrote, read on two ranks, and one DOLFINx wrote on three, on one and two."""
     pytest.importorskip("dolfin")
     (tmp_path / "d").mkdir()

@@ -1,4 +1,4 @@
-"""`femtools.ksp`: a KSP set up from options under a prefix, dolfin's names translated,
+"""`feluga.ksp`: a KSP set up from options under a prefix, dolfin's names translated,
 a preconditioner PETSc did not build refused; options set for a block and restored.
 
     python3 -m pytest tests/test_ksp.py
@@ -7,7 +7,7 @@ import pytest
 
 PETSc = pytest.importorskip("petsc4py.PETSc")
 
-from femtools.ksp import configure, scoped, solver_options  # noqa: E402
+from feluga.ksp import configure, scoped, solver_options  # noqa: E402
 
 
 def ksp():
@@ -63,7 +63,7 @@ def test_scoped_restores_the_database():
 
 
 def test_defaults_leave_what_the_database_holds():
-    from femtools.ksp import defaults
+    from feluga.ksp import defaults
     db = PETSc.Options()
     db["tdef_pc_hypre_boomeramg_P_max"] = 2
     try:
@@ -75,7 +75,7 @@ def test_defaults_leave_what_the_database_holds():
 
 def test_the_classical_set_is_taken_by_boomeramg():
     """configure() refuses a preconditioner PETSc did not build; hypre reads the set."""
-    from femtools.ksp import BOOMERAMG, BOOMERAMG_CLASSICAL
+    from feluga.ksp import BOOMERAMG, BOOMERAMG_CLASSICAL
     k = ksp()
     A = PETSc.Mat().createAIJ((4, 4), comm=PETSc.COMM_SELF)
     A.setUp()
@@ -96,7 +96,7 @@ def test_the_classical_set_is_taken_by_boomeramg():
 def test_a_diagonal_matrix():
     import numpy as np
     from mpi4py import MPI
-    from femtools.ksp import diagonal_matrix
+    from feluga.ksp import diagonal_matrix
     D = diagonal_matrix([1.0, 2.0, 3.0], MPI.COMM_SELF)
     assert D.getSize() == (3, 3) and D.getInfo()["nz_used"] == 3
     assert np.array_equal(D.getDiagonal().getArray(), [1.0, 2.0, 3.0])

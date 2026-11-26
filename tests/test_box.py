@@ -1,4 +1,4 @@
-"""`femtools.box`: faces of a box, the walls of the obstacles inside it, and
+"""`feluga.box`: faces of a box, the walls of the obstacles inside it, and
 `periodic.periodic_box_from_bounds`.
 
     python3 -m pytest tests/test_box.py
@@ -9,8 +9,8 @@ import pytest
 df = pytest.importorskip("dolfin")
 pytestmark = [pytest.mark.dolfin]
 
-from femtools.box import Faces, mark_walls  # noqa: E402
-from femtools.periodic import periodic_box, periodic_box_from_bounds  # noqa: E402
+from feluga.box import Faces, mark_walls  # noqa: E402
+from feluga.periodic import periodic_box, periodic_box_from_bounds  # noqa: E402
 
 
 def marked(mf, mesh, marker):

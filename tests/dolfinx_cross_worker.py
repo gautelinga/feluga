@@ -1,5 +1,5 @@
 """Worker for tests/test_dolfinx_unique.py: dolfin (constrained_domain from
-femtools.periodic) against dolfinx (UniqueDofs from femtools.dolfinx) in one process, on
+feluga.periodic) against dolfinx (UniqueDofs from feluga.dolfinx) in one process, on
 the same periodic mesh: unique dof count, norm and sum of a periodic field, Frobenius norm
 of the folded operator. Serial. Writes JSON.
 
@@ -16,9 +16,9 @@ from dolfinx import fem, mesh
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from femtools.dolfinx.assembly import assemble_matrix, create_matrix
-from femtools.dolfinx.periodic import periodic_box as periodic_box_x
-from femtools.periodic import periodic_box
+from feluga.dolfinx.assembly import assemble_matrix, create_matrix
+from feluga.dolfinx.periodic import periodic_box as periodic_box_x
+from feluga.periodic import periodic_box
 
 LX, LY, NX, NY, Q = 1.0, 2.0, 12, 24, 6
 res = {}
@@ -38,7 +38,7 @@ Ad = df.as_backend_type(df.assemble(kd * df.inner(df.grad(ud), df.grad(vd)) * dx
 # dolfinx: the same mesh, periodic in x through UniqueDofs
 xm = mesh.create_rectangle(MPI.COMM_SELF, [[0, 0], [LX, LY]], [NX, NY])
 V = fem.functionspace(xm, ("Lagrange", 2))
-from femtools.dolfinx.unique import UniqueDofs  # noqa: E402
+from feluga.dolfinx.unique import UniqueDofs  # noqa: E402
 
 U = UniqueDofs(V, *periodic_box_x(V, periodic=(True, False)))
 fx = fem.Function(V)

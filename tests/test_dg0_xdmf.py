@@ -1,10 +1,10 @@
 """DG0 Functions in XDMF: XDMFFile2 (dolfin) and XDMFSeries (DOLFINx), through
-femtools.backend's XDMFFile, write a piecewise constant field as a cell-centred attribute
+feluga.backend's XDMFFile, write a piecewise constant field as a cell-centred attribute
 of the grid, one value per cell in the topology's own order.
 
 A P1 field `a`, its cell means `m` and the cell centroids `x` (a 2D vector, padded to 3)
 are written at one time, one call each, on one and two ranks; the file is read here
-without femtools, and every cell's `m` must be the mean of `a` at its three nodes and its
+without feluga, and every cell's `m` must be the mean of `a` at its three nodes and its
 `x` the mean of their positions. With `functions_share_mesh` the three are one grid,
 without it one grid each, on both backends. A DG1 Function, alone in its file, is
 written by dolfin's own XDMFFile on dolfin and refused on DOLFINx.

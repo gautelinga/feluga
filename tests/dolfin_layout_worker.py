@@ -1,5 +1,5 @@
 """Worker for tests/test_dolfin_layout.py: under mpirun, write a mesh and two Functions
-with dolfin's HDF5File and with `femtools.dolfin_layout`, and report on rank zero whether the
+with dolfin's HDF5File and with `feluga.dolfin_layout`, and report on rank zero whether the
 files hold the same datasets, dtypes, values and attributes, whether ours are compressed,
 and whether dolfin reads ours back to the same values.
 
@@ -12,7 +12,7 @@ import dolfin as df
 import h5py
 import numpy as np
 
-from femtools import dolfin_layout
+from feluga import dolfin_layout
 
 
 class Periodic(df.SubDomain):

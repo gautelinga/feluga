@@ -1,4 +1,4 @@
-"""femtools.periodic_partition's rebalance: `repartition_plan` on an unbalanced periodic
+"""feluga.periodic_partition's rebalance: `repartition_plan` on an unbalanced periodic
 mesh, built, keeps every cell and vertex with its global id, balances the ranks, keeps the
 periodic pairing, and `carry_by_id` brings rank-local arrays along.
 

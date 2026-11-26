@@ -1,11 +1,11 @@
-"""`femtools.swap`: a folder swapped in whole, and put back after a kill at any point
+"""`feluga.swap`: a folder swapped in whole, and put back after a kill at any point
 between the renames.
 
     python3 -m pytest tests/test_swap.py
 """
 import os
 
-from femtools.swap import new_folder, recover, swap_in
+from feluga.swap import new_folder, recover, swap_in
 
 
 def folder(path, text):

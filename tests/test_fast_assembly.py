@@ -1,4 +1,4 @@
-"""`femtools.fast_assembly`: assemble gives dolfin.assemble's matrices and vectors,
+"""`feluga.fast_assembly`: assemble gives dolfin.assemble's matrices and vectors,
 with cell and facet integrals, for a form compiled once; a coefficient changed in
 place is assembled with its new values; each form object is compiled once."""
 import numpy as np
@@ -7,7 +7,7 @@ import pytest
 df = pytest.importorskip("dolfin")
 pytestmark = [pytest.mark.dolfin]
 
-from femtools import fast_assembly as fa  # noqa: E402
+from feluga import fast_assembly as fa  # noqa: E402
 
 
 def setup():

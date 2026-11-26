@@ -1,10 +1,12 @@
-# femtools
+# feluga
+
+**F**inite **el**ement **u**tilities with a **g**eneric **A**PI.
 
 Tools shared by the FEniCS solvers stokes-beadpack, twoasis and addictif: what more than
 one of them needs, written once.
 
-femtools began as a toolbox for **legacy dolfin** (FEniCS 2019.2). It now also runs on
-**DOLFINx** (0.11): `femtools.backend` gives both libraries one API, so a solver can be
+feluga began as a toolbox for **legacy dolfin** (FEniCS 2019.2). It now also runs on
+**DOLFINx** (0.11): `feluga.backend` gives both libraries one API, so a solver can be
 written once and run on either.
 
 What it is for:
@@ -27,9 +29,9 @@ What it is for:
 ### A solver written once, run on either backend
 
 ```python
-import femtools.backend
+import feluga.backend
 
-B = femtools.backend.load("dolfinx")                     # or "dolfin"
+B = feluga.backend.load("dolfinx")                     # or "dolfin"
 
 mesh = B.BoxMesh(B.Point(0, 0, 0), B.Point(1, 1, 1), 8, 8, 8)
 box = B.PeriodicBox({0: (0.0, 1.0), 1: (0.0, 1.0)})      # periodic in x and y
@@ -45,8 +47,8 @@ B.solve(B.inner(B.grad(u), B.grad(v)) * B.dx == B.Constant(1.0) * v * B.dx, w, b
 print(B.assemble(w * B.dx))                              # 1/12, on either backend
 ```
 
-Both backends export the same names (`femtools.backend.NAMES`). Code that is handed a mesh
-or Function finds its backend with `femtools.backend.of(obj)`.
+Both backends export the same names (`feluga.backend.NAMES`). Code that is handed a mesh
+or Function finds its backend with `feluga.backend.of(obj)`.
 `tests/backend_stokes_worker.py` is a complete periodic Stokes solve written this way.
 `docs/porting-to-backend.md` is a guide to porting dolfin code to the backend, and so to
 DOLFINx.
@@ -58,7 +60,7 @@ drop-in replacement that keeps the midside nodes, and can put several fields on 
 
 ```python
 import dolfin as df
-from femtools.xdmf import XDMFFile2
+from feluga.xdmf import XDMFFile2
 
 mesh = df.UnitCubeMesh(8, 8, 8)
 u = df.Function(df.VectorFunctionSpace(mesh, "CG", 2), name="u")
@@ -70,14 +72,14 @@ with XDMFFile2(mesh.mpi_comm(), "up.xdmf") as f:
 ```
 
 In ParaView, raise "Nonlinear Subdivision Level" to see the quadratic field. On DOLFINx,
-`femtools.dolfinx.xdmf.XDMFSeries` writes the same XML for a time series (but for the HDF5
+`feluga.dolfinx.xdmf.XDMFSeries` writes the same XML for a time series (but for the HDF5
 file's name).
 
 ### A periodic box and probes (dolfin)
 
 ```python
-from femtools.periodic import periodic_box
-from femtools.probes import Probes
+from feluga.periodic import periodic_box
+from feluga.probes import Probes
 
 V = df.FunctionSpace(mesh, "CG", 2, constrained_domain=periodic_box(
     upper=(Lx, Ly), periodic=(True, False), lower=(0, 0)))
@@ -90,7 +92,7 @@ values = probes.array()
 ### Boundary markers that are written and read back (dolfin)
 
 ```python
-from femtools.boundaries import BoundaryMarkers
+from feluga.boundaries import BoundaryMarkers
 
 markers = BoundaryMarkers(mesh)                          # where a facet MeshFunction was
 markers.mark(df.CompiledSubDomain("on_boundary && near(x[2], 0)"), 5)
@@ -102,8 +104,8 @@ markers = BoundaryMarkers.read("boundaries.xdmf", mesh)
 ### Command-line tools
 
 ```bash
-femtools-cut-facets boundaries.xdmf walls.xdmf --markers 3,5,7:106   # keep some markers
-femtools-build-dof-reorder --out libdof_reorder_star.so    # "Large meshes and long jobs"
+feluga-cut-facets boundaries.xdmf walls.xdmf --markers 3,5,7:106   # keep some markers
+feluga-build-dof-reorder --out libdof_reorder_star.so    # "Large meshes and long jobs"
 LD_PRELOAD=$PWD/libdof_reorder_star.so python3 solve.py
 ```
 
@@ -116,7 +118,7 @@ Each module's docstring has the details, the trade-offs and the measurements.
 | module | what it is for |
 |---|---|
 | `backend` | `load(name)`, `of(obj)`, `is_dolfinx(obj)` and `NAMES`: the one API |
-| `backend.dolfin` | that API on legacy dolfin (mostly dolfin itself, plus femtools' tools) |
+| `backend.dolfin` | that API on legacy dolfin (mostly dolfin itself, plus feluga' tools) |
 | `backend.dolfinx` | that API on DOLFINx, built on the `dolfinx.*` modules below |
 | `tables`, `ufc` | a mesh's cells and a space's dofs as arrays, in dolfin's order, on either backend |
 
@@ -133,7 +135,7 @@ Each module's docstring has the details, the trade-offs and the measurements.
 | `vertex_field` | a P1 field stored as one value per mesh vertex: much smaller, either backend |
 | `digest` | a SHA-256 of what a stored Mesh or Function holds, the same on any number of ranks |
 | `boundaries`, `boundary_markers` | boundary facet files (the layout partrac reads) and `BoundaryMarkers`, a facet MeshFunction that writes and reads them |
-| `facets` | `femtools-cut-facets`: a facet file cut down to some markers |
+| `facets` | `feluga-cut-facets`: a facet file cut down to some markers |
 
 ### Periodic meshes and refinement
 
@@ -181,7 +183,7 @@ Each module's docstring has the details, the trade-offs and the measurements.
 |---|---|
 | `abort` | `run(main)`: an exception on one MPI rank ends the job instead of hanging it |
 | `jit`, `lru` | compiled extensions built on one rank and loaded on all; bounded and weak caches |
-| `dof_reorder` | `femtools-build-dof-reorder`: dolfin's dof reordering without its memory peak at large sizes |
+| `dof_reorder` | `feluga-build-dof-reorder`: dolfin's dof reordering without its memory peak at large sizes |
 | `swap` | a folder written aside and swapped in, never left half-written by a kill |
 | `memory`, `phases` | freed heap handed back, and a line per phase of a run with its time and memory |
 | `garbage` | PETSc objects Python dropped, destroyed collectively |
@@ -201,7 +203,7 @@ What `backend.dolfinx` is built on; useful directly when writing plain DOLFINx c
 | `dolfinx.refine` | periodic Plaza refinement on DOLFINx |
 | `dolfinx.expression` | dolfin's C++ `Expression` for DOLFINx |
 | `dolfinx.boundary_markers`, `dolfinx.cells` | facet markers as on dolfin; a space's cells and dofs in dolfin's order |
-| `dolfinx.compiled` | the C++ extensions above, built on first use (`python3 -m femtools.dolfinx.compiled` builds them ahead) |
+| `dolfinx.compiled` | the C++ extensions above, built on first use (`python3 -m feluga.dolfinx.compiled` builds them ahead) |
 
 ## How the two backends differ
 
@@ -210,14 +212,14 @@ The API is the same; underneath, a few things differ, visibly:
 - **Periodicity.** dolfin builds periodic spaces into its dofmap (`constrained_domain`). Its
   parallel version can lose the pairing on some partitions, so a parallel periodic dolfin
   mesh should be read through `read_mesh_file(..., periodic=...)`, which partitions it
-  safely (`periodic_partition`). DOLFINx spaces are made periodic by femtools
+  safely (`periodic_partition`). DOLFINx spaces are made periodic by feluga
   (`dolfinx.unique`), and pair correctly on any partition.
 - **Dof order.** The two number dofs differently, so iteration counts of AMG or ILU solves
   differ a little between backends. Answers agree to the solver tolerance.
 - **Stored vectors.** In dolfin's HDF5 layout, a component split off a periodic mixed space
   is stored on all its nodes by dolfin and on its unique (periodic) dofs by DOLFINx. Both
   files name each cell's dofs, and every reader here goes through those.
-- **XDMF files.** On dolfin `XDMFFile` is femtools' `XDMFFile2` (P2 kept, several fields on
+- **XDMF files.** On dolfin `XDMFFile` is feluga' `XDMFFile2` (P2 kept, several fields on
   one grid), handing what it does not lay out (DG, P3, a whole mixed Function) to dolfin's
   own writer; it reads and checkpoints too. On DOLFINx it writes facet markers and P1/P2
   Functions alone, every write a timed grid (t = 0 when none is given).
@@ -227,16 +229,16 @@ The API is the same; underneath, a few things differ, visibly:
 
 ## Requirements
 
-- **Always:** numpy and h5py. `import femtools` needs nothing else; dolfin, DOLFINx,
+- **Always:** numpy and h5py. `import feluga` needs nothing else; dolfin, DOLFINx,
   mpi4py and scipy are imported only where used.
 - **For the dolfin side:** legacy dolfin 2019.2, with a compiler and `libdolfin-dev`, since
   several modules compile C++ on first use (dolfin's JIT, or cppimport for `probes` and
   `gradient`).
 - **For the DOLFINx side:** DOLFINx 0.11 with its headers, CMake and nanobind: the
-  extensions in `dolfinx.compiled` build on first use and are cached in `FEMTOOLS_JIT_DIR`
-  (default `~/.cache/femtools`). That cache must be on a file system every rank sees.
+  extensions in `dolfinx.compiled` build on first use and are cached in `FELUGA_JIT_DIR`
+  (default `~/.cache/feluga`). That cache must be on a file system every rank sees.
 - **Parallel HDF5:** h5py built with MPI (Debian/Ubuntu: `python3-h5py-mpi`). Without it
-  every file goes through rank 0, which is correct but slow on large meshes; femtools says
+  every file goes through rank 0, which is correct but slow on large meshes; feluga says
   so once.
 - **Very large meshes:** past 2^31 cells, ParMETIS with a 64-bit `idx_t`; past 2^31 dofs,
   PETSc and hypre with 64-bit indices.
@@ -271,4 +273,4 @@ Tests for a backend that is not installed skip themselves.
   Anders Logg, Ola Skavhaug, Garth N. Wells and others.
 
 Both are LGPL-3.0-or-later, and their files keep their headers; NOTICE lists what came from
-where and what changed. femtools is LGPL-3.0-or-later (COPYING.LESSER, COPYING).
+where and what changed. feluga is LGPL-3.0-or-later (COPYING.LESSER, COPYING).

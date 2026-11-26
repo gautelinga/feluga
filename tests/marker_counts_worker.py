@@ -4,7 +4,7 @@ a wrapped -1). Each rank prints "RAISED <message>" or "COUNTS <counts>"."""
 import importlib
 import sys
 
-L = importlib.import_module("femtools.backend." + sys.argv[1])  # before mpi4py (dolfin)
+L = importlib.import_module("feluga.backend." + sys.argv[1])  # before mpi4py (dolfin)
 import numpy as np  # noqa: E402
 from mpi4py import MPI  # noqa: E402
 

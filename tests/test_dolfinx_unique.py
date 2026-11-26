@@ -1,4 +1,4 @@
-"""`femtools.dolfinx`: assembly over unique dofs (periodic slaves folded onto masters).
+"""`feluga.dolfinx`: assembly over unique dofs (periodic slaves folded onto masters).
 
 Against plain DOLFINx without periodicity (identical), against PᵀAP with an explicit P
 (square, rectangular and mixed forms, forms over cells, interior facets and a subdomain;

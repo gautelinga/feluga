@@ -15,8 +15,8 @@ import h5py
 import dolfin as df
 from mpi4py import MPI
 
-from femtools import periodic_partition as pp
-from femtools.periodic import periodic_box
+from feluga import periodic_partition as pp
+from feluga.periodic import periodic_box
 
 comm = MPI.COMM_WORLD
 tmp = sys.argv[1]

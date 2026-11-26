@@ -1,5 +1,5 @@
-"""`femtools.dolfinx.refine.refine_periodic`: DOLFINx's Plaza refinement with periodic
-faces bisected alike (femtools.plaza_periodic's port).
+"""`feluga.dolfinx.refine.refine_periodic`: DOLFINx's Plaza refinement with periodic
+faces bisected alike (feluga.plaza_periodic's port).
 
 A rectangle (crossed diagonals) and a box, refined near the upper and near the lower x
 face: the two periodic faces carry the same P2 nodes and every slave finds its master,

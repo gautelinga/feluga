@@ -29,7 +29,7 @@ h5py = pytest.importorskip("h5py")
 
 def _mesh(folder):
     """A 4 x 4 x 3 box's mesh file in dolfin's layout, its coordinate rows shuffled."""
-    from femtools.dolfin_layout import write_mesh_arrays
+    from feluga.dolfin_layout import write_mesh_arrays
     n = (4, 4, 3)
     g = np.stack(np.meshgrid(*[np.linspace(0, 1, k + 1) for k in n], indexing="ij"),
                  axis=-1).reshape(-1, 3)

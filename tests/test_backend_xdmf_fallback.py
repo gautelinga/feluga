@@ -1,4 +1,4 @@
-"""femtools.backend.dolfin.XDMFFile writes what femtools.xdmf.XDMFFile2 does not lay out
+"""feluga.backend.dolfin.XDMFFile writes what feluga.xdmf.XDMFFile2 does not lay out
 (DG1, P3, a whole mixed Function) through dolfin's own XDMFFile, the file dolfin's writes,
 XML and datasets alike; it keeps a file to one writer, refusing such a Function after a grid
 of XDMFFile2's and a checkpoint after dolfin's grids.
@@ -16,7 +16,7 @@ pytestmark = [pytest.mark.dolfin]
 import dolfin as df  # noqa: E402
 import h5py  # noqa: E402
 
-import femtools.backend.dolfin as L  # noqa: E402
+import feluga.backend.dolfin as L  # noqa: E402
 
 
 def _function(mesh, kind):

@@ -10,7 +10,7 @@ import dolfin as df
 import numpy as np
 from mpi4py import MPI
 
-from femtools.gradient import compute_weighted_gradient_matrix
+from feluga.gradient import compute_weighted_gradient_matrix
 
 df.parameters["ghost_mode"] = sys.argv[2] if len(sys.argv) > 2 else "none"
 mesh = df.UnitCubeMesh(4, 4, 4)

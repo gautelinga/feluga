@@ -1,4 +1,4 @@
-"""`femtools.gradient`: the weighted gradient matrix gives the exact derivatives of a
+"""`feluga.gradient`: the weighted gradient matrix gives the exact derivatives of a
 linear p on P1 in 2D and 3D, weighs the cells around a node by 1/|K| (checked by hand
 on unequal cells), and gives the same values on 2 ranks as on one, with ghost cells too;
 one weight matrix serves every direction."""
@@ -12,7 +12,7 @@ df = pytest.importorskip("dolfin")
 pytest.importorskip("cppimport")
 pytestmark = [pytest.mark.dolfin]
 
-from femtools.gradient import (compute_weighted_gradient_matrix,  # noqa: E402
+from feluga.gradient import (compute_weighted_gradient_matrix,  # noqa: E402
                                weighted_gradient_matrix)
 from tests import support  # noqa: E402
 

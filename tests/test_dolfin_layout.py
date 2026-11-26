@@ -1,4 +1,4 @@
-"""`femtools.dolfin_layout`: a mesh and Functions written compressed, in dolfin's own layout.
+"""`feluga.dolfin_layout`: a mesh and Functions written compressed, in dolfin's own layout.
 
     python3 -m pytest tests/test_dolfin_layout.py
 
@@ -83,7 +83,7 @@ def test_a_mesh_from_arrays_is_dolfins_serial_mesh(dim, tmp_path):
     import h5py
     import numpy as np
     from mpi4py import MPI
-    from femtools.dolfin_layout import write_mesh_arrays
+    from feluga.dolfin_layout import write_mesh_arrays
     mesh = (df.UnitSquareMesh(MPI.COMM_SELF, 3, 2) if dim == 2
             else df.UnitCubeMesh(MPI.COMM_SELF, 2, 2, 1))
     a, b = str(tmp_path / "dolfin.h5"), str(tmp_path / "ours.h5")

@@ -1,4 +1,4 @@
-"""`femtools.dolfinx.xdmf.XDMFSeries`: DOLFINx time series in XDMFFile2's layout.
+"""`feluga.dolfinx.xdmf.XDMFSeries`: DOLFINx time series in XDMFFile2's layout.
 
 DOLFINx writes two steps of a periodic P2 scalar, a P1 scalar and a periodic P2 vector,
 and of the vector and the P1 scalar together on one node set (`write((u, p), t)`), on one
@@ -74,8 +74,8 @@ def test_read_refuses_other_components(tmp_path):
     import basix.ufl
     from dolfinx import fem, mesh as dmesh
     from mpi4py import MPI
-    from femtools.dolfinx.xdmf import XDMFSeries
-    from femtools.dolfinx.xdmf_read import read_nodal
+    from feluga.dolfinx.xdmf import XDMFSeries
+    from feluga.dolfinx.xdmf_read import read_nodal
     msh = dmesh.create_unit_square(MPI.COMM_SELF, 3, 3)
     v = fem.Function(fem.functionspace(msh, ("Lagrange", 2, (2,))), name="v")
     s = fem.Function(fem.functionspace(msh, ("Lagrange", 2)), name="s")

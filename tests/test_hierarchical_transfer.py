@@ -28,10 +28,10 @@ from tests import support  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # set in every mpirun child: a child that spawned again would do so on each rank
-MPI_CHILD = "FEMTOOLS_TEST_MPI_CHILD"
-OWN_SCRATCH = "FEMTOOLS_TEST_SCRATCH" not in os.environ
-SCRATCH = os.environ.get("FEMTOOLS_TEST_SCRATCH") or tempfile.mkdtemp(prefix="htransfer_")
-CHILD = {"FEMTOOLS_TEST_SCRATCH": SCRATCH, MPI_CHILD: "1"}
+MPI_CHILD = "FELUGA_TEST_MPI_CHILD"
+OWN_SCRATCH = "FELUGA_TEST_SCRATCH" not in os.environ
+SCRATCH = os.environ.get("FELUGA_TEST_SCRATCH") or tempfile.mkdtemp(prefix="htransfer_")
+CHILD = {"FELUGA_TEST_SCRATCH": SCRATCH, MPI_CHILD: "1"}
 BOX = np.array([1.0, 1.0, 2.0])
 
 df.set_log_level(40)
@@ -95,8 +95,8 @@ def read_mesh(path):
 def refined_twice(mesh, box, axes):
     """Two periodic-safe passes with different markings; the meshes and the composed
     ancestor map."""
-    from femtools.plaza_periodic import refine_periodic
-    from femtools.hierarchical_transfer import compose
+    from feluga.plaza_periodic import refine_periodic
+    from feluga.hierarchical_transfer import compose
     anc = np.arange(mesh.num_cells(), dtype=np.int64)
     meshes = [mesh]
     for cut in (0.35, 0.6):
@@ -112,8 +112,8 @@ def refined_twice(mesh, box, axes):
 
 def test_p1_exact():
     """transfer_p1_field is exact against df.interpolate"""
-    from femtools.plaza_periodic import refine_periodic
-    from femtools.hierarchical_transfer import transfer_p1_field
+    from feluga.plaza_periodic import refine_periodic
+    from feluga.hierarchical_transfer import transfer_p1_field
     comm = df.MPI.comm_world
     mesh = df.UnitCubeMesh(comm, 6, 6, 6)
     f = df.Function(df.FunctionSpace(mesh, "Lagrange", 1))
@@ -129,7 +129,7 @@ def test_p1_exact():
 
 def test_p2_transfer_exact():
     """every P2 node of a twice-refined mesh, read through DistributedCellSource"""
-    from femtools.hierarchical_transfer import (DistributedCellSource, as_p2_function,
+    from feluga.hierarchical_transfer import (DistributedCellSource, as_p2_function,
                                                 local_to_global_cells, p2_entity_nodes,
                                                 velocity_on_mesh_p2)
     mesh_h5, u_h5 = quadratic_files()
@@ -159,8 +159,8 @@ def test_p2_transfer_exact():
 
 def _write_refined(out_dir):
     """The box refined once on the ranks given and written."""
-    from femtools.refine_periodic import refine_congruent
-    from femtools.hierarchical_transfer import local_to_global_cells
+    from feluga.refine_periodic import refine_congruent
+    from feluga.hierarchical_transfer import local_to_global_cells
     comm = df.MPI.comm_world
     mesh = read_mesh(quadratic_files()[0])
     # marked by global id parity, so the marked set does not depend on the partition
@@ -178,7 +178,7 @@ def _check_refined(out_dir):
     `mesh/cell_indices`, the row holding its four global vertices, and `mesh/coordinates`
     is indexed by global vertex id."""
     import h5py
-    from femtools.hierarchical_transfer import local_to_global_cells
+    from feluga.hierarchical_transfer import local_to_global_cells
     path = os.path.join(out_dir, "refined_mesh.h5")
     mesh = read_mesh(path)
     with h5py.File(path, "r") as handle:
@@ -204,8 +204,8 @@ def test_entity_dofs_are_dolfins(ghost):
     """`entity_dofs` is the dofmap's `entity_dofs` for every entity a regular cell holds
     (P1 and P2, scalar and vector, 2D and 3D); one held by ghost cells alone has dofs
     another rank owns."""
-    from femtools.hierarchical_transfer import entity_dofs
-    from femtools.periodic import connectivity
+    from feluga.hierarchical_transfer import entity_dofs
+    from feluga.periodic import connectivity
     before = df.parameters["ghost_mode"]
     df.parameters["ghost_mode"] = ghost
     try:

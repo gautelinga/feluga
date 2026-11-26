@@ -1,4 +1,4 @@
-"""`femtools.dolfinx.mixed`: components of mixed Functions on DOLFINx; and the backend's
+"""`feluga.dolfinx.mixed`: components of mixed Functions on DOLFINx; and the backend's
 vector Functions put together from scalar ones.
 
     python3 -m pytest tests/test_dolfinx_mixed.py
@@ -13,7 +13,7 @@ import basix.ufl  # noqa: E402
 from dolfinx import fem, mesh  # noqa: E402
 from mpi4py import MPI  # noqa: E402
 
-from femtools.dolfinx.mixed import set_subfunction, subfunction, subspace  # noqa: E402
+from feluga.dolfinx.mixed import set_subfunction, subfunction, subspace  # noqa: E402
 
 
 def _mixed():
@@ -54,7 +54,7 @@ def test_other_spaces_refused():
 
 
 def test_assigned_vector_function():
-    from femtools.backend import dolfinx as B
+    from feluga.backend import dolfinx as B
     msh = mesh.create_unit_square(MPI.COMM_WORLD, 6, 6)
     V = B.FunctionSpace(msh, "CG", 2)
     u0, u1 = B.Function(V), B.Function(V)

@@ -1,9 +1,9 @@
-"""`femtools.shared_amg`: one BoomerAMG for a Stokes operator's velocity components.
+"""`feluga.shared_amg`: one BoomerAMG for a Stokes operator's velocity components.
 
     python3 -m pytest tests/test_shared_amg.py [-m mpi]
 
 On a periodic [P2, P2, P2, P1] space, the operator stored by component
-(femtools.couplings), legacy dolfin and DOLFINx, one rank and three: the component index
+(feluga.couplings), legacy dolfin and DOLFINx, one rank and three: the component index
 sets list every node once (on three ranks too), the block check passes and refuses an operator whose second
 component's Laplacian differs, the same values on two components (in node order) come back
 from the shared AMG the same, and the pressure is divided by diag(M). stokes-beadpack's

@@ -3,11 +3,11 @@
     [mpirun -n k] python3 tests/dolfinx_mesh_worker.py write-dolfin DIR
     [mpirun -n k] python3 tests/dolfinx_mesh_worker.py read-dolfinx DIR out.json
 
-dolfin writes a rectangle and a box (femtools.dolfin_layout.write_mesh; on several
+dolfin writes a rectangle and a box (feluga.dolfin_layout.write_mesh; on several
 ranks, so cell_indices is not the identity) and a P2 field on each. DOLFINx reads the
-mesh (femtools.dolfinx.mesh.read_mesh) and checks every cell against the file -- its
+mesh (feluga.dolfinx.mesh.read_mesh) and checks every cell against the file -- its
 original index names the file's cell with the same vertices, at the same coordinates --
-and reads the field (femtools.dolfinx.checkpoint) against its exact values.
+and reads the field (feluga.dolfinx.checkpoint) against its exact values.
 """
 import json
 import os
@@ -26,7 +26,7 @@ def exact(X, gdim):
 
 def write_dolfin(folder):
     import dolfin as df
-    from femtools.dolfin_layout import write_function, write_mesh
+    from feluga.dolfin_layout import write_function, write_mesh
     meshes = {"rect": df.RectangleMesh(df.Point(0, 0), df.Point(1, 2), 5, 7, "crossed"),
               "box": df.BoxMesh(df.Point(0, 0, 0), df.Point(1, 1, 2), 3, 3, 5)}
     for name, mesh in meshes.items():
@@ -41,9 +41,9 @@ def read_dolfinx(folder, out):
     import h5py
     from dolfinx import fem
     from mpi4py import MPI
-    from femtools.dolfinx.checkpoint import read_function
-    from femtools.dolfinx.mesh import read_mesh
-    from femtools.dolfinx.unique import UniqueDofs
+    from feluga.dolfinx.checkpoint import read_function
+    from feluga.dolfinx.mesh import read_mesh
+    from feluga.dolfinx.unique import UniqueDofs
     comm = MPI.COMM_WORLD
     res = {}
     for name, gdim in CASES.items():
@@ -81,7 +81,7 @@ def write_dolfinx(folder):
     DOLFINx in dolfin's layouts."""
     import dolfinx.mesh as dmesh
     from mpi4py import MPI
-    from femtools.dolfinx.mesh import write_boundary_facets, write_mesh
+    from feluga.dolfinx.mesh import write_boundary_facets, write_mesh
     mesh = dmesh.create_rectangle(MPI.COMM_WORLD, [[0, 0], [1, 2]], [5, 7],
                                   dmesh.CellType.triangle, diagonal=dmesh.DiagonalType.crossed)
     write_mesh(os.path.join(folder, "x_mesh.h5"), mesh)
@@ -99,8 +99,8 @@ def check_dolfin(folder, out):
     """dolfin reads DOLFINx's mesh (the same cells and vertices as its own rectangle),
     and writes the same walls with BoundaryMarkers: the facet files agree."""
     import dolfin as df
-    from femtools import boundaries
-    from femtools.boundary_markers import BoundaryMarkers
+    from feluga import boundaries
+    from feluga.boundary_markers import BoundaryMarkers
     ref = df.RectangleMesh(df.Point(0, 0), df.Point(1, 2), 5, 7, "crossed")
     m = df.Mesh()
     with df.HDF5File(df.MPI.comm_world, os.path.join(folder, "x_mesh.h5"), "r") as h:

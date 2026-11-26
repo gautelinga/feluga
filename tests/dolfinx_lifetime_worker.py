@@ -6,7 +6,7 @@ outside the levels."""
 import gc
 import weakref
 
-from femtools.backend.dolfinx import (Expression, FiniteElement, Function, FunctionSpace,
+from feluga.backend.dolfinx import (Expression, FiniteElement, Function, FunctionSpace,
                                       MixedElement, TestFunction, TrialFunction,
                                       UnitSquareMesh, assemble, assemble_matrix,
                                       collect_garbage, dx, interpolate, nodal_values,
@@ -30,7 +30,7 @@ def level(n):
     subfunction(Function(W), 0)
     nodal_values(f, V)
     # a form assembled again on a live mesh is compiled once: the same entry
-    import femtools.backend.dolfinx as B
+    import feluga.backend.dolfinx as B
     once = B.compiled(a) is B.compiled(a)
     return weakref.ref(mesh), once
 

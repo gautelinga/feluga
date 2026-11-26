@@ -13,10 +13,10 @@ import numpy as np
 backend, folder, stage = sys.argv[1:4]
 # the backend before mpi4py: legacy dolfin imported after it calls MPI at exit, after
 # mpi4py has finalised MPI, and the process aborts
-L = importlib.import_module("femtools.backend." + backend)
+L = importlib.import_module("feluga.backend." + backend)
 from mpi4py import MPI  # noqa: E402
-from femtools import cell_mean, recovery, vertex_field  # noqa: E402
-from femtools.fast_interpolation import p1_to_p2  # noqa: E402
+from feluga import cell_mean, recovery, vertex_field  # noqa: E402
+from feluga.fast_interpolation import p1_to_p2  # noqa: E402
 
 comm = MPI.COMM_WORLD
 mesh = L.read_mesh_file(os.path.join(folder, "mesh.h5"))

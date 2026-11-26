@@ -12,8 +12,8 @@ import dolfin as df
 import numpy as np
 from mpi4py import MPI
 
-from femtools.fast_bc import apply
-from femtools.periodic import PeriodicBox
+from feluga.fast_bc import apply
+from feluga.periodic import PeriodicBox
 
 mesh = df.RectangleMesh(df.Point(0, 0), df.Point(2, 1), 24, 12)
 pb = PeriodicBox([2, 1], periodic=[True, False])
@@ -59,7 +59,7 @@ for step in range(2):
 # the dolfin backend's fixed_dofs: the owned global dofs, condition after condition
 # (each condition's: the owned entries dolfin's own apply changes, which gathers from the
 # ranks that hold the boundary facets; condition after condition)
-from femtools.backend.dolfin import fixed_dofs
+from feluga.backend.dolfin import fixed_dofs
 start = V.dofmap().ownership_range()[0]
 got, want = [], []
 for bc in several:

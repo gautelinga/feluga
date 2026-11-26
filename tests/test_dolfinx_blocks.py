@@ -1,4 +1,4 @@
-"""femtools.dolfinx.assembly's C++ extension packs coefficients a block of cells at a
+"""feluga.dolfinx.assembly's C++ extension packs coefficients a block of cells at a
 time: matrices equal to all cells in one block (exactly on one rank; to round-off on
 three, where PETSc sums the values sent between ranks in arrival order), vectors to
 DOLFINx's assembly exactly, for cell, exterior and interior facet integrals with

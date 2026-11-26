@@ -13,8 +13,8 @@ import sys
 import dolfin as df
 import numpy as np
 
-from femtools.plaza_periodic import refine_periodic
-from femtools.periodic import faces_congruent
+from feluga.plaza_periodic import refine_periodic
+from feluga.periodic import faces_congruent
 
 comm = df.MPI.comm_world
 path = sys.argv[1]

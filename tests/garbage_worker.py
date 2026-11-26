@@ -12,7 +12,7 @@ import sys
 import ufl
 from petsc4py import PETSc
 
-import femtools.backend.dolfinx as B
+import feluga.backend.dolfinx as B
 
 # the PETSc library petsc4py runs on (dlsym searches the module's dependencies)
 _lib = ctypes.CDLL(PETSc.__file__)

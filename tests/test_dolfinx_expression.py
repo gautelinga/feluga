@@ -1,4 +1,4 @@
-"""`femtools.dolfinx.expression.CompiledExpression`: dolfin's Expression compiled from C++.
+"""`feluga.dolfinx.expression.CompiledExpression`: dolfin's Expression compiled from C++.
 
 What dolfin's Expressions mean is what these mean: <cmath>, the conditional operator,
 integer division, near(), std:: names; parameters by name (also ones named like the
@@ -23,7 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 @pytest.fixture(autouse=True)
 def jit_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("FEMTOOLS_JIT_DIR", str(tmp_path / "jit"))
+    monkeypatch.setenv("FELUGA_JIT_DIR", str(tmp_path / "jit"))
     return tmp_path / "jit"
 
 
@@ -33,7 +33,7 @@ def points(n=9):
 
 
 def test_values_and_parameters():
-    from femtools.dolfinx.expression import CompiledExpression
+    from feluga.dolfinx.expression import CompiledExpression
     x = points()
     e = CompiledExpression("tanh((sqrt(pow(x[0]-c, 2) + pow(x[1]-c, 2)) - R)/(sqrt(2)*eps))",
                            c=0.5, R=0.3, eps=0.05)
@@ -48,7 +48,7 @@ def test_values_and_parameters():
 
 
 def test_cpp_semantics():
-    from femtools.dolfinx.expression import CompiledExpression
+    from feluga.dolfinx.expression import CompiledExpression
     x = points()
     assert np.array_equal(CompiledExpression("x[0] > 0.5 ? 1.0 : -1.0")(x),
                           np.where(x[0] > 0.5, 1.0, -1.0))
@@ -60,7 +60,7 @@ def test_cpp_semantics():
 
 
 def test_parameters_named_like_the_generated_code():
-    from femtools.dolfinx.expression import CompiledExpression
+    from feluga.dolfinx.expression import CompiledExpression
     x = points()
     e = CompiledExpression("n*x[0] + i + p + X + out", n=2.0, i=1.0, p=1.0, X=1.0, out=1.0)
     assert np.allclose(e(x), 2 * x[0] + 4)
@@ -69,7 +69,7 @@ def test_parameters_named_like_the_generated_code():
 
 
 def test_vector():
-    from femtools.dolfinx.expression import CompiledExpression
+    from feluga.dolfinx.expression import CompiledExpression
     x = points()
     v = CompiledExpression(("x[1]", "-x[0]", "a"), a=2.0)
     assert v.value_size == 3
@@ -77,7 +77,7 @@ def test_vector():
 
 
 def test_compile_error_and_cache(jit_dir):
-    from femtools.dolfinx.expression import CompiledExpression
+    from feluga.dolfinx.expression import CompiledExpression
     with pytest.raises(ValueError, match="does not compile"):
         CompiledExpression("x[0] +* 2")
     CompiledExpression("x[0] + a", a=1.0)
@@ -90,6 +90,6 @@ def test_compile_error_and_cache(jit_dir):
 def test_three_ranks(tmp_path, jit_dir):
     out = tmp_path / "res.json"
     support.run([sys.executable, os.path.join(HERE, "dolfinx_expression_worker.py"), str(out)],
-                3, env={"FEMTOOLS_JIT_DIR": str(jit_dir)})
+                3, env={"FELUGA_JIT_DIR": str(jit_dir)})
     res = json.loads(out.read_text())
     assert res["ok"] and res["size"] == 3

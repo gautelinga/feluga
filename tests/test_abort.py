@@ -1,4 +1,4 @@
-"""`femtools.abort`: one rank's failure ends an MPI job instead of hanging it.
+"""`feluga.abort`: one rank's failure ends an MPI job instead of hanging it.
 
     python3 -m pytest tests/test_abort.py
 
@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from femtools.abort import CollectiveExit, run
+from feluga.abort import CollectiveExit, run
 from tests import support
 
 
@@ -38,7 +38,7 @@ def test_an_abort_that_never_returns_is_ended_by_the_kernel():
     the kernel ends the process by SIGALRM after ABORT_GRACE, the message printed first."""
     hang = (
         "import time\n"
-        "from femtools import abort\n"
+        "from feluga import abort\n"
         "abort.ABORT_GRACE = 2\n"
         "class Comm:\n"
         "    def Get_rank(self): return 0\n"
@@ -56,7 +56,7 @@ def test_an_abort_that_never_returns_is_ended_by_the_kernel():
 SCRIPT = r"""
 import sys
 from mpi4py import MPI
-from femtools.abort import CollectiveExit, run
+from feluga.abort import CollectiveExit, run
 
 def main(argv):
     comm = MPI.COMM_WORLD

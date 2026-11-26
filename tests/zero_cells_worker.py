@@ -1,11 +1,11 @@
-"""Worker for tests/test_zero_cells.py: femtools' collective data paths on a mesh of two
+"""Worker for tests/test_zero_cells.py: feluga' collective data paths on a mesh of two
 cells, run on more ranks than cells (some ranks hold none). Each step must finish on
 every rank -- no rank-local exception, no hang -- and give the right values.
 
     mpirun -n 4 python3 tests/zero_cells_worker.py dolfinx|dolfin|dolfin-nested DIR out.json
 
 `dolfin-nested` (the nested transfer on dolfin): dolfin cannot refine a mesh with ranks
-that hold no cells (its edge numbering hangs), so femtools.plaza_periodic refuses it,
+that hold no cells (its edge numbering hangs), so feluga.plaza_periodic refuses it,
 on every rank.
 """
 import json
@@ -22,12 +22,12 @@ def f(x):
 def dolfinx_run(folder):
     from mpi4py import MPI
     from dolfinx import fem, mesh as dmesh
-    from femtools.dolfinx.checkpoint import read_function, write_dofs, write_function
-    from femtools.dolfinx.unique import UniqueDofs
-    from femtools.dolfinx.xdmf import XDMFSeries
-    from femtools.dolfinx.xdmf_read import read_nodal
-    from femtools.nested_transfer import Nested, refine_uniformly
-    from femtools.tables import space_tables
+    from feluga.dolfinx.checkpoint import read_function, write_dofs, write_function
+    from feluga.dolfinx.unique import UniqueDofs
+    from feluga.dolfinx.xdmf import XDMFSeries
+    from feluga.dolfinx.xdmf_read import read_nodal
+    from feluga.nested_transfer import Nested, refine_uniformly
+    from feluga.tables import space_tables
     comm = MPI.COMM_WORLD
     msh = dmesh.create_rectangle(comm, [[0, 0], [1, 1]], [1, 1], dmesh.CellType.triangle)
     res = {"cells": comm.allgather(msh.topology.index_map(2).size_local)}
@@ -80,8 +80,8 @@ def dolfinx_run(folder):
 
 def dolfin_run(folder):
     import dolfin as df
-    from femtools.dolfin_layout import read_function, write_function
-    from femtools.tables import space_tables
+    from feluga.dolfin_layout import read_function, write_function
+    from feluga.tables import space_tables
     comm = df.MPI.comm_world
     msh = df.UnitSquareMesh(comm, 1, 1)
     res = {"cells": comm.allgather(msh.num_cells())}
@@ -98,7 +98,7 @@ def dolfin_run(folder):
 
 def dolfin_nested_run(folder):
     import dolfin as df
-    from femtools.nested_transfer import Nested, refine_uniformly
+    from feluga.nested_transfer import Nested, refine_uniformly
     comm = df.MPI.comm_world
     msh = df.UnitSquareMesh(comm, 1, 1)
     res = {"cells": comm.allgather(msh.num_cells())}

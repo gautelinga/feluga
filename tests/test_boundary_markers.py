@@ -1,4 +1,4 @@
-"""`femtools.boundaries.BoundaryMarkers`: a facet MeshFunction written as a boundary facet
+"""`feluga.boundaries.BoundaryMarkers`: a facet MeshFunction written as a boundary facet
 file and read back, on one rank and three; partrac reads the file as its walls.
 
     python3 -m pytest tests/test_boundary_markers.py
@@ -16,15 +16,15 @@ import pytest
 df = pytest.importorskip("dolfin")
 pytestmark = pytest.mark.dolfin
 
-from femtools import boundaries  # noqa: E402
-from femtools.boundaries import BoundaryMarkers  # noqa: E402
+from feluga import boundaries  # noqa: E402
+from feluga.boundaries import BoundaryMarkers  # noqa: E402
 from tests import support  # noqa: E402
 
 PARTRAC = os.environ.get("PARTRAC_BIN", os.path.expanduser("~/git/partrac/build/bin"))
 
 MARK = """
 import dolfin as df
-from femtools.boundaries import BoundaryMarkers
+from feluga.boundaries import BoundaryMarkers
 
 
 def marked(dim, n):
@@ -147,7 +147,7 @@ def test_partrac_reads_the_file_as_its_walls(tmp_path):
 WORKER = MARK + """
 import sys
 import numpy as np
-from femtools import boundaries
+from feluga import boundaries
 one, three = sys.argv[1:3]
 for ghosts in ("none", "shared_vertex"):
     df.parameters["ghost_mode"] = ghosts
@@ -178,7 +178,7 @@ def test_three_ranks_write_and_read_the_one_rank_file(tmp_path):
 FEW = r"""
 import sys
 import dolfin as df
-from femtools.boundaries import BoundaryMarkers
+from feluga.boundaries import BoundaryMarkers
 mesh = df.UnitSquareMesh(df.MPI.comm_world, 8, 8)
 for upto, want in ((0.13, 1), (-1.0, 0)):
     m = BoundaryMarkers(mesh)

@@ -10,7 +10,7 @@ import sys
 import dolfin as df
 import numpy as np
 
-from femtools.nullspace import constant_nullspace
+from feluga.nullspace import constant_nullspace
 
 mesh = df.UnitSquareMesh(12, 12)
 cell = mesh.ufl_cell()

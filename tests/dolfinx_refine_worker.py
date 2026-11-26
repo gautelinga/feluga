@@ -1,4 +1,4 @@
-"""Worker for tests/test_dolfinx_refine.py: femtools.dolfinx.refine.refine_periodic.
+"""Worker for tests/test_dolfinx_refine.py: feluga.dolfinx.refine.refine_periodic.
 
     [mpirun -n k] python3 tests/dolfinx_refine_worker.py dolfinx out.json
     python3 tests/dolfinx_refine_worker.py dolfin out.json     # plaza_periodic, serial
@@ -36,8 +36,8 @@ def run_dolfinx(out):
     from mpi4py import MPI
     import dolfinx.mesh as dm
     from dolfinx import fem
-    from femtools.dolfinx.periodic import periodic_box
-    from femtools.dolfinx.refine import refine_periodic, congruent, TooManyCells
+    from feluga.dolfinx.periodic import periodic_box
+    from feluga.dolfinx.refine import refine_periodic, congruent, TooManyCells
     comm = MPI.COMM_WORLD
 
     def make(dim, n, name=None):
@@ -138,7 +138,7 @@ def run_dolfinx(out):
 def run_dolfin(out):
     import dolfin as df
     from mpi4py import MPI
-    from femtools.plaza_periodic import refine_periodic
+    from feluga.plaza_periodic import refine_periodic
     comm = MPI.COMM_WORLD
 
     def simplices(mesh):

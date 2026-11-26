@@ -1,4 +1,4 @@
-"""femtools.backend's Probes and GradProbes on dolfin and DOLFINx: the values and
+"""feluga.backend's Probes and GradProbes on dolfin and DOLFINx: the values and
 gradients of a P2 scalar (two snapshots), the gradient of a P1 vector, the values of
 a DG0 field and of a mixed P2 x P1 field, at seeded random points inside the unit cube
 and one outside it, on one rank and two. The fields are polynomials the spaces hold

@@ -9,7 +9,7 @@ import sys
 import numpy as np
 from mpi4py import MPI
 
-from femtools.dolfinx.expression import CompiledExpression
+from feluga.dolfinx.expression import CompiledExpression
 
 comm = MPI.COMM_WORLD
 x = np.vstack([np.linspace(0, 1, 7), np.linspace(1, 2, 7), np.zeros(7)])

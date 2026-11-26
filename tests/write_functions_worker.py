@@ -41,7 +41,7 @@ def walk(path):
 
 
 def main(backend, out):
-    L = importlib.import_module("femtools.backend." + backend)
+    L = importlib.import_module("feluga.backend." + backend)
     comm = L.MPI.comm_world
     mesh = L.UnitSquareMesh(6, 5)
     V = L.FunctionSpace(mesh, "CG", 2, constrained_domain=L.PeriodicBox({0: (0., 1.)}))

@@ -1,4 +1,4 @@
-"""`femtools.boundaries`: a boundary facet file written and read back.
+"""`feluga.boundaries`: a boundary facet file written and read back.
 
     python3 -m pytest tests/test_boundaries.py
 
@@ -11,7 +11,7 @@ import pytest
 
 h5py = pytest.importorskip("h5py")
 
-from femtools import boundaries  # noqa: E402
+from feluga import boundaries  # noqa: E402
 from tests import support  # noqa: E402
 
 
@@ -52,8 +52,8 @@ WORKER = """
 import sys
 import numpy as np
 from mpi4py import MPI
-from femtools import boundaries
-from femtools import hdf5_rows
+from feluga import boundaries
+from feluga import hdf5_rows
 comm = MPI.COMM_WORLD
 hdf5_rows.MESSAGE = 4 << 10
 rng = np.random.default_rng(2)
@@ -110,7 +110,7 @@ def test_facets_go_to_every_box_holding_them(dim, ranks):
     holds all the facet's points, ordered by box and facet, as testing every facet
     against every box does: overlapping and nested boxes, empty ones, a box flat along
     an axis, facets outside all of them."""
-    from femtools.boundaries import _in_boxes
+    from feluga.boundaries import _in_boxes
     rng = np.random.default_rng(ranks + dim)
     pts = rng.uniform(-0.2, 1.2, (400, dim, dim))
     pts[:200] = pts[:200, :1] + 0.05 * rng.standard_normal((200, dim, dim))

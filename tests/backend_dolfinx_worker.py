@@ -1,11 +1,11 @@
-"""Worker for tests/test_backend_dolfinx.py: femtools.backend.dolfinx's dolfin semantics,
+"""Worker for tests/test_backend_dolfinx.py: feluga.backend.dolfinx's dolfin semantics,
 results as JSON (rank 0)."""
 import json
 import sys
 
 import numpy as np
 
-import femtools.backend.dolfinx as L
+import feluga.backend.dolfinx as L
 
 
 def main(out):

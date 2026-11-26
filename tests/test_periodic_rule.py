@@ -35,8 +35,8 @@ def _points():
 
 
 def test_classify_is_the_compiled_box():
-    from femtools.periodic import periodic_box
-    from femtools.periodic_core import classify
+    from feluga.periodic import periodic_box
+    from feluga.periodic_core import classify
     box = periodic_box(UPPER, TOL, PERIODIC, lower=LOWER)
     x = _points()
     on_lower, on_upper, image = classify(x, LOWER, UPPER, PERIODIC, TOL)

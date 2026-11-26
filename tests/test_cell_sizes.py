@@ -14,7 +14,7 @@ from tests import support
 SCRIPT = r"""
 import importlib, sys
 from mpi4py import MPI
-B = importlib.import_module("femtools.backend." + sys.argv[1])
+B = importlib.import_module("feluga.backend." + sys.argv[1])
 comm = MPI.COMM_WORLD
 if sys.argv[1] == "dolfin":
     import dolfin as df

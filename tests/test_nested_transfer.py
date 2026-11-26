@@ -1,4 +1,4 @@
-"""`femtools.nested_transfer`: transfers between a mesh and its uniform refinement on
+"""`feluga.nested_transfer`: transfers between a mesh and its uniform refinement on
 dolfin and DOLFINx (tests/nested_transfer_worker.py).
 
 On a rectangle (crossed diagonals, once and twice refined) and a box, periodic in x: the
@@ -60,7 +60,7 @@ def test_indices_beyond_petsc_integers_raise():
     petsc4py.init()
     import numpy as np
     from petsc4py import PETSc
-    from femtools.nested_transfer import _petsc_ints
+    from feluga.nested_transfer import _petsc_ints
     top = int(np.iinfo(PETSc.IntType).max)
     assert _petsc_ints(None, [3, top], top + 1, "columns").dtype == PETSc.IntType
     with pytest.raises(OverflowError, match="64-bit indices"):

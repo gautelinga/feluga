@@ -16,8 +16,8 @@ from dolfinx.fem import petsc
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from femtools.dolfinx.assembly import _inserter, assemble_matrix, create_matrix
-from femtools.dolfinx.unique import UniqueDofs
+from feluga.dolfinx.assembly import _inserter, assemble_matrix, create_matrix
+from feluga.dolfinx.unique import UniqueDofs
 
 comm = MPI.COMM_WORLD
 msh = mesh.create_unit_cube(comm, 4, 4, 4)

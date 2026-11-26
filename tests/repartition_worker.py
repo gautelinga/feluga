@@ -9,8 +9,8 @@ import dolfin as df
 import numpy as np
 from mpi4py import MPI
 
-from femtools import periodic_partition as pp
-from femtools.periodic import periodic_box
+from feluga import periodic_partition as pp
+from feluga.periodic import periodic_box
 
 comm = MPI.COMM_WORLD
 L = np.array([1.0, 1.0, 1.0])

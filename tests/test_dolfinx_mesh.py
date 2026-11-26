@@ -1,9 +1,9 @@
-"""`femtools.dolfinx.mesh.read_mesh`: meshes dolfin writes, read on DOLFINx.
+"""`feluga.dolfinx.mesh.read_mesh`: meshes dolfin writes, read on DOLFINx.
 
 dolfin writes a rectangle and a box on three ranks (so the file's cell_indices are not
 the identity) and a P2 field on each; DOLFINx reads them on one rank and on three. Every
 cell's original index names the file's cell with its vertices, at their coordinates, and
-the field reads back (femtools.dolfinx.checkpoint, tetrahedra included) to round-off.
+the field reads back (feluga.dolfinx.checkpoint, tetrahedra included) to round-off.
 
     python3 -m pytest tests/test_dolfinx_mesh.py -m "dolfinx and dolfin and mpi"
 """

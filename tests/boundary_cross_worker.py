@@ -56,7 +56,7 @@ def dolfinx_mesh(dim):
 
 def dolfinx_exterior(mesh):
     import dolfinx.mesh as dm
-    from femtools.dolfinx.boundary_markers import local_facets
+    from feluga.dolfinx.boundary_markers import local_facets
     n, exterior = local_facets(mesh)
     mid = dm.compute_midpoints(mesh, mesh.topology.dim - 1, np.arange(n, dtype=np.int32))
     on = np.zeros(n, bool)
@@ -66,9 +66,9 @@ def dolfinx_exterior(mesh):
 
 def markers_of(backend):
     if backend == "dolfin":
-        from femtools.boundary_markers import BoundaryMarkers
+        from feluga.boundary_markers import BoundaryMarkers
         return BoundaryMarkers, dolfin_mesh, dolfin_exterior
-    from femtools.backend.dolfinx import BoundaryMarkers
+    from feluga.backend.dolfinx import BoundaryMarkers
     return BoundaryMarkers, dolfinx_mesh, dolfinx_exterior
 
 

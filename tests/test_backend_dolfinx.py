@@ -1,4 +1,4 @@
-"""`femtools.backend.dolfinx`: dolfin's object API on DOLFINx. A Function's DOLFINx writes
+"""`feluga.backend.dolfinx`: dolfin's object API on DOLFINx. A Function's DOLFINx writes
 (also on a component view, and by interpolation) reach its compact vector, sync copies
 only after a change, facets marked after a measure was made count, a Dirichlet
 condition on periodic slaves constrains their masters on any number of ranks, and a

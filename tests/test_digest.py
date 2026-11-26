@@ -1,4 +1,4 @@
-"""`femtools.digest`: what a stored mesh or Function is, as a SHA-256.
+"""`feluga.digest`: what a stored mesh or Function is, as a SHA-256.
 
     python3 -m pytest tests/test_digest.py
 
@@ -14,7 +14,7 @@ import pytest
 
 h5py = pytest.importorskip("h5py")
 
-from femtools.digest import function_digest, mesh_digest  # noqa: E402
+from feluga.digest import function_digest, mesh_digest  # noqa: E402
 
 
 def write_mesh(path, shift=0.0):

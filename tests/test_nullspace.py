@@ -1,4 +1,4 @@
-"""`femtools.nullspace.constant_nullspace`: the constants on a space, or on one
+"""`feluga.nullspace.constant_nullspace`: the constants on a space, or on one
 component of a mixed space, attached to a matrix, on one rank and on three.
 
     python3 -m pytest tests/test_nullspace.py

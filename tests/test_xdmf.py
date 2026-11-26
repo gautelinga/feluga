@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""What `femtools/xdmf.py` promises, checked against dolfin itself.
+"""What `feluga/xdmf.py` promises, checked against dolfin itself.
 
     python3 -m pytest tests/test_xdmf.py
 
@@ -34,8 +34,8 @@ import numpy as np
 
 
 import dolfin as df                                            
-from femtools import xdmf as export_p2_xdmf
-from femtools.xdmf import (                             
+from feluga import xdmf as export_p2_xdmf
+from feluga.xdmf import (                             
     XDMFFile2, XDMFParameters, XDMF_EDGES, XDMF_ORDER, QUADRATIC,
     _scan, _read_grid_geometry, _read_grid_attribute)
 from tests import support
@@ -614,7 +614,7 @@ The way twoasis writes its series, and the way it reads them back.
     """
     import h5py
     from scipy.spatial import cKDTree
-    from femtools.xdmf import grids as xdmf_grids
+    from feluga.xdmf import grids as xdmf_grids
     mesh = unit_mesh(4, 'triangle')
     V = df.VectorFunctionSpace(mesh, 'CG', 2, constrained_domain=periodic_x())
     P = df.FunctionSpace(mesh, 'CG', 1, constrained_domain=periodic_x())
@@ -695,9 +695,9 @@ The way twoasis writes its series, and the way it reads them back.
 
 def _no_transfers(monkeypatch):
     """Every way the writer could reach an unconstrained space or a transfer onto it,
-    made to raise: femtools' own helpers and dolfin's transfer matrix underneath them,
+    made to raise: feluga' own helpers and dolfin's transfer matrix underneath them,
     whose point-search trees are what the write must not build."""
-    from femtools import fast_interpolation
+    from feluga import fast_interpolation
 
     def refuse(*args, **kwargs):
         raise AssertionError('the write built an unconstrained space or a transfer')
@@ -766,7 +766,7 @@ def test_node_dofs_columns_are_components():
     """an entity's dofs in a vector, tensor or mixed-component dofmap come component by
     component, so `_node_dofs` reads the components off the space's own dofmap -- the
     columns are what each `V.sub(c).dofmap()` gives, without building those spaces"""
-    from femtools.xdmf import _entity_dofs
+    from feluga.xdmf import _entity_dofs
     mesh = unit_mesh(3)
     mesh.init(1)
     V = df.VectorFunctionSpace(mesh, 'CG', 2, constrained_domain=periodic_x())
@@ -821,7 +821,7 @@ def test_periodic_write_lets_go_on_close():
     them into the next solves, and at 224 M dofs that took the job past its node's memory
     (stokes-beadpack, 2026-11-12).
     """
-    from femtools import fast_interpolation
+    from feluga import fast_interpolation
     mesh = unit_mesh(4, 'triangle')
     V = df.VectorFunctionSpace(mesh, 'CG', 2, constrained_domain=periodic_x())
     u, v = df.Function(V), df.Function(V)
@@ -886,8 +886,8 @@ DIRECT_SCRIPT = """
 import sys
 import numpy as np, dolfin as df
 from petsc4py import PETSc
-from femtools import fast_interpolation, xdmf
-from femtools.xdmf import XDMFFile2
+from feluga import fast_interpolation, xdmf
+from feluga.xdmf import XDMFFile2
 df.set_log_level(40)
 C = df.MPI.comm_world
 
@@ -959,7 +959,7 @@ A master dof is another rank's as often as not, so its value comes from the vect
     script = os.path.join(TMP, 'direct.py')
     with open(script, 'w') as handle:
         handle.write(DIRECT_SCRIPT)
-    # this checkout's femtools in the children, not whichever one is installed
+    # this checkout's feluga in the children, not whichever one is installed
     proc = support.run([sys.executable, script, tmp('direct3')], 3, timeout=600)
     assert 'OK' in proc.stdout, proc.stdout[-400:]
     for tag in ('stale', 'ghostless'):
@@ -1229,7 +1229,7 @@ def test_released_steps_changed_on_disk_are_refused():
 CHANGED_SCRIPT = """
 import sys
 import dolfin as df
-from femtools.xdmf import XDMFFile2
+from feluga.xdmf import XDMFFile2
 mesh = df.UnitCubeMesh(2, 2, 2)
 u = df.interpolate(df.Expression("x[0]", degree=2), df.FunctionSpace(mesh, "CG", 2))
 path = sys.argv[1]
@@ -1304,7 +1304,7 @@ def test_checkpoint_on_three_ranks():
     script = '''
 import sys
 import h5py, numpy as np, dolfin as df
-from femtools.xdmf import XDMFFile2
+from feluga.xdmf import XDMFFile2
 mesh = df.UnitCubeMesh(16, 16, 16)   # past WORTH_BYTES, so compressed
 V = df.FunctionSpace(mesh, 'CG', 2)
 us = [df.interpolate(df.Expression('x[0]*x[1] + %d*x[2]' % k, degree=2), V) for k in range(2)]
@@ -1341,7 +1341,7 @@ def test_quadratic_grid_read_back_on_three_ranks():
     script = '''
 import sys
 import numpy as np, dolfin as df
-from femtools.xdmf import XDMFFile2
+from feluga.xdmf import XDMFFile2
 C = df.MPI.comm_world
 mesh = df.UnitCubeMesh(5, 5, 5)
 V = df.VectorFunctionSpace(mesh, 'CG', 2)
@@ -1382,9 +1382,9 @@ if df.MPI.rank(C) == 0:
 READ_PERIODIC = """
 import sys
 import numpy as np, dolfin as df
-from femtools import xdmf
-from femtools.xdmf import XDMFFile2
-from femtools.periodic import periodic_box_from_bounds
+from feluga import xdmf
+from feluga.xdmf import XDMFFile2
+from feluga.periodic import periodic_box_from_bounds
 df.set_log_level(40)
 C = df.MPI.comm_world
 mesh = df.UnitCubeMesh(C, 4, 3, 5)
@@ -1570,7 +1570,7 @@ Support was removed: the arrays always go to HDF5. The string, any casing
 @CELLS
 def test_writer_agreement(cell):
     """write_quadratic and XDMFFile2 write the same layout"""
-    from femtools.xdmf import write_quadratic
+    from feluga.xdmf import write_quadratic
     mesh = unit_mesh(2, cell)
     u = quadratic_field(mesh)
     with XDMFFile2(df.MPI.comm_world, tmp('cls.xdmf')) as f:
@@ -1936,7 +1936,7 @@ Every value type was force-cast to uint64: a double collection's 1.5 came
 PARALLEL_SCRIPT = """
 import os, sys
 import numpy as np, dolfin as df
-from femtools.xdmf import XDMFFile2
+from feluga.xdmf import XDMFFile2
 df.set_log_level(40)
 df.parameters['ghost_mode'] = os.environ.get('GHOST_MODE', 'none')
 C = df.MPI.comm_world; R = df.MPI.rank(C)
@@ -2055,7 +2055,7 @@ def _content_equal(a, b):
 EMPTY_RANK_SCRIPT = """
 import sys
 import numpy as np, dolfin as df
-from femtools.xdmf import XDMFFile2
+from feluga.xdmf import XDMFFile2
 df.set_log_level(40)
 C = df.MPI.comm_world; R = df.MPI.rank(C); N = df.MPI.size(C)
 
@@ -2094,7 +2094,7 @@ if R == 0:
 TRIANGLE_SCRIPT = """
 import os, sys
 import numpy as np, dolfin as df
-from femtools.xdmf import XDMFFile2
+from feluga.xdmf import XDMFFile2
 df.set_log_level(40)
 C = df.MPI.comm_world
 out = sys.argv[1]
@@ -2360,7 +2360,7 @@ QUADRATIC_BLOCKS = """
 import sys
 import numpy as np
 from mpi4py import MPI
-from femtools.xdmf import write_quadratic, write_quadratic_blocks
+from feluga.xdmf import write_quadratic, write_quadratic_blocks
 C = MPI.COMM_WORLD
 rng = np.random.default_rng(4)
 n_nodes, n_cells = 300, 80

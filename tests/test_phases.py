@@ -1,4 +1,4 @@
-"""`femtools.phases`: a line a phase, on rank zero only.
+"""`feluga.phases`: a line a phase, on rank zero only.
 
     python3 -m pytest tests/test_phases.py
 
@@ -15,7 +15,7 @@ from tests import support
 LINE = re.compile(r"phase (\w+): [\d.]+ s \(total [\d.]+ s\), peak RSS ([\d.]+) GB max a rank, "
                   r"([\d.]+) GB summed; now ([\d.]+) GB max a rank, ([\d.]+) GB summed")
 SCRIPT = r"""
-from femtools.phases import Phases, mpi_print
+from feluga.phases import Phases, mpi_print
 phase = Phases()
 x = bytearray(50 << 20)
 phase("alloc")

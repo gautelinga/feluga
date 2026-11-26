@@ -1,4 +1,4 @@
-"""`femtools.facets`: a facet file cut to the selected markers keeps exactly those
+"""`feluga.facets`: a facet file cut to the selected markers keeps exactly those
 facets, renumbers them onto the points they use, and carries their markers."""
 import itertools
 import os
@@ -8,8 +8,8 @@ import pytest
 
 h5py = pytest.importorskip("h5py")
 
-from femtools.facets import cut, main, read, selector  # noqa: E402
-from femtools.xdmf import XdmfDocument  # noqa: E402
+from feluga.facets import cut, main, read, selector  # noqa: E402
+from feluga.xdmf import XdmfDocument  # noqa: E402
 
 
 def cube_facets():

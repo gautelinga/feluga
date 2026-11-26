@@ -1,4 +1,4 @@
-"""femtools.garbage: petsc4py keeps a dropped PETSc object on a parallel communicator
+"""feluga.garbage: petsc4py keeps a dropped PETSc object on a parallel communicator
 until PETSc.garbage_cleanup; the DOLFINx backend destroys dropped matrices before it
 makes another, and collect_garbage destroys the rest. On one rank and on two; the
 dropped vectors are asserted kept on two alone (petsc4py 3.25 destroys an object on one

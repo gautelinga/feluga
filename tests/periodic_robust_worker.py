@@ -9,14 +9,14 @@ MODE:
                            as the owned ones do; indices outside the local cells raise
                            on every rank
   jit                      a build failing on rank 0 raises on every rank, the generic
-                           helper's and the DOLFINx extension's (FEMTOOLS_JIT_DIR fresh)
+                           helper's and the DOLFINx extension's (FELUGA_JIT_DIR fresh)
   pairing                  DOLFINx's periodic_box on faces that do not match raises on
                            every rank; on a periodic unit square every slave pairs
   taylor_hood              periodic_box on a Taylor-Hood space: every slave's master is
                            the dof of the same component at its image
   zero_cells_dolfin        plaza_periodic on dolfin with ranks holding no cells raises on
                            every rank (dolfin's refinement hangs there)
-  zero_cells_dolfinx       femtools.dolfinx.refine there: refines, pairs, congruent
+  zero_cells_dolfinx       feluga.dolfinx.refine there: refines, pairs, congruent
 Each rank writes its part; rank 0 merges them into out.json.
 """
 import json
@@ -38,7 +38,7 @@ def _raised(f):
 
 def far_dolfinx():
     import dolfinx.mesh as dm
-    from femtools.dolfinx.refine import congruent, refine_periodic
+    from feluga.dolfinx.refine import congruent, refine_periodic
     x0 = 1e6
     lo, hi = [x0, 0.0], [x0 + 0.3, 0.7]
     mesh = dm.create_rectangle(COMM, [lo, hi], [3, 7], dm.CellType.triangle)
@@ -53,8 +53,8 @@ def far_dolfinx():
 
 def far_dolfin():
     import dolfin as df
-    from femtools.periodic import faces_congruent
-    from femtools.plaza_periodic import refine_periodic
+    from feluga.periodic import faces_congruent
+    from feluga.plaza_periodic import refine_periodic
     x0 = 1e6
     lo, hi = [x0, 0.0], [x0 + 0.3, 0.7]
     mesh = df.RectangleMesh(COMM, df.Point(*lo), df.Point(*hi), 3, 7)
@@ -71,7 +71,7 @@ def far_dolfin():
 
 def ghost():
     import dolfinx.mesh as dm
-    from femtools.dolfinx.refine import refine_periodic
+    from feluga.dolfinx.refine import refine_periodic
     mesh = dm.create_unit_square(COMM, 8, 8, ghost_mode=dm.GhostMode.shared_facet)
     im = mesh.topology.index_map(2)
     cells = dm.locate_entities(mesh, 2, lambda x: x[0] > 0.8)
@@ -96,8 +96,8 @@ def ghost():
 def jit():
     import subprocess
 
-    import femtools.dolfinx.refine as refine
-    from femtools.jit import on_rank0
+    import feluga.dolfinx.refine as refine
+    from feluga.jit import on_rank0
 
     def build():
         raise FileNotFoundError("no compiler here")
@@ -113,7 +113,7 @@ def jit():
 def pairing():
     import dolfinx.fem as fem
     import dolfinx.mesh as dm
-    from femtools.dolfinx.periodic import periodic_box
+    from feluga.dolfinx.periodic import periodic_box
     mesh = dm.create_unit_square(COMM, 6, 6)
     V = fem.functionspace(mesh, ("Lagrange", 2))
     slaves, masters = periodic_box(V, upper=(1, 1), periodic=(True, True))
@@ -129,7 +129,7 @@ def taylor_hood():
     import basix.ufl
     import dolfinx.fem as fem
     import dolfinx.mesh as dm
-    from femtools.dolfinx.periodic import flat_collapse_map, periodic_box
+    from feluga.dolfinx.periodic import flat_collapse_map, periodic_box
 
     def leaves(V):
         n = V.element.num_sub_elements
@@ -172,8 +172,8 @@ def taylor_hood():
 
 def zero_cells_dolfin():
     import dolfin as df
-    from femtools.plaza_periodic import refine_periodic
-    from femtools.refine_periodic import refine_congruent
+    from feluga.plaza_periodic import refine_periodic
+    from feluga.refine_periodic import refine_congruent
     mesh = df.UnitSquareMesh(COMM, 1, 1)
     m = df.MeshFunction("bool", mesh, 2, True)
     return {"cells": mesh.num_cells(),
@@ -183,7 +183,7 @@ def zero_cells_dolfin():
 
 def zero_cells_dolfinx():
     import dolfinx.mesh as dm
-    from femtools.dolfinx.refine import congruent, refine_congruent, refine_periodic
+    from feluga.dolfinx.refine import congruent, refine_congruent, refine_periodic
     mesh = dm.create_rectangle(COMM, [[0, 0], [1, 1]], [1, 1], dm.CellType.triangle)
     out = {"cells": int(mesh.topology.index_map(2).size_local)}
     new, npair, parent = refine_periodic(mesh, None, [1.0, 1.0], [0, 1], redistribute=False)

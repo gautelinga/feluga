@@ -8,7 +8,7 @@ import sys
 import numpy as np
 from mpi4py import MPI
 
-from femtools import compress, hdf5_rows
+from feluga import compress, hdf5_rows
 
 comm = MPI.COMM_WORLD
 n = 2 * compress.chunk_rows((1 << 21,))           # two chunks: a block a rank

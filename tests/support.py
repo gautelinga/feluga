@@ -3,7 +3,7 @@ import os
 import shutil
 import subprocess
 
-# the tree whose femtools the children import
+# the tree whose feluga the children import
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -16,7 +16,7 @@ def clean_env():
 
 
 def pythonpath(env=None):
-    """A child's PYTHONPATH: the tree's femtools first, never an installed copy, then the
+    """A child's PYTHONPATH: the tree's feluga first, never an installed copy, then the
     PYTHONPATH of `env` (a caller's) and the inherited one, joined rather than replaced."""
     paths = []
     for value in ((env or {}).get("PYTHONPATH", ""), os.environ.get("PYTHONPATH", "")):
@@ -27,12 +27,12 @@ def pythonpath(env=None):
 def run(argv, ranks=1, env=None, timeout=900, check=True, cwd=None, text=True):
     """`argv` in a child (its PYTHONPATH `pythonpath(env)`, `env` otherwise over the
     inherited environment), under `mpirun -n ranks` when `ranks` > 1 (skipped where there
-    is no mpirun, failed instead with FEMTOOLS_REQUIRE_MPI set, as CI sets it), one OpenMP
+    is no mpirun, failed instead with FELUGA_REQUIRE_MPI set, as CI sets it), one OpenMP
     thread a rank; raises with the output's tails on failure."""
     if ranks > 1 and shutil.which("mpirun") is None:
         import pytest
-        if os.environ.get("FEMTOOLS_REQUIRE_MPI"):
-            pytest.fail("no mpirun on this machine, and FEMTOOLS_REQUIRE_MPI is set")
+        if os.environ.get("FELUGA_REQUIRE_MPI"):
+            pytest.fail("no mpirun on this machine, and FELUGA_REQUIRE_MPI is set")
         pytest.skip("no mpirun on this machine")
     full = clean_env()
     full["OMP_NUM_THREADS"] = "1"

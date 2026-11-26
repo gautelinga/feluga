@@ -1,4 +1,4 @@
-"""femtools.backend's cell tools on dolfin and DOLFINx, on one rank and two:
+"""feluga.backend's cell tools on dolfin and DOLFINx, on one rank and two:
 `cell_values` gives a DG0 field's value on each owned cell, once per cell over the ranks,
 and a vector one's as (cells, components); `refine_cells` refuses markers of the wrong
 length on every rank, and refines the cells so marked into the same cells on both

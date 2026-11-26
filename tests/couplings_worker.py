@@ -9,7 +9,7 @@ import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
 
-L = importlib.import_module("femtools.backend." + sys.argv[1])
+L = importlib.import_module("feluga.backend." + sys.argv[1])
 comm = MPI.COMM_WORLD
 mesh = L.BoxMesh(L.Point(0, 0, 0), L.Point(1, 1, 1), 3, 3, 3)
 cell = mesh.ufl_cell()
@@ -59,7 +59,7 @@ L.assemble(a, tensor=B)                   # again, the matrix's own conditions
 Bm = L.as_backend_type(B).mat()
 fixed = np.unique(np.concatenate([np.asarray(L.fixed_dofs(W, [bc]), dtype=PETSc.IntType)
                                   for bc in bcs])).astype(PETSc.IntType)
-from femtools.tables import space_tables
+from feluga.tables import space_tables
 cells = Bm.createVecLeft()
 d = space_tables(W).dofs.astype(PETSc.IntType).ravel()
 cells.setValues(d, np.ones(len(d)), addv=PETSc.InsertMode.ADD_VALUES)

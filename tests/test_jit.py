@@ -1,4 +1,4 @@
-"""`femtools.jit`: dolfin's compile_cpp_code on a communicator smaller than MPI's world,
+"""`feluga.jit`: dolfin's compile_cpp_code on a communicator smaller than MPI's world,
 built on its rank 0 and loaded on every rank of it, and a build that fails raising on
 every rank of it (dolfin's own waits for the whole world, and hangs there).
 
@@ -15,7 +15,7 @@ pytestmark = [pytest.mark.dolfin]
 SUBSET = r"""
 import os
 from mpi4py import MPI
-from femtools.jit import dolfin_module
+from feluga.jit import dolfin_module
 comm = MPI.COMM_WORLD
 sub = comm.Split(int(comm.rank < 2), comm.rank)
 CODE = '''

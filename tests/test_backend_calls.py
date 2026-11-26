@@ -1,7 +1,7 @@
-"""The same calls on both backends do the same thing (femtools.backend): MixedElement one by
+"""The same calls on both backends do the same thing (feluga.backend): MixedElement one by
 one or as a list, Function.split(deepcopy=True) (copies), norm(..., mesh=), the Krylov
 solver's solve(A, x, b), set_operator and set_operators with solve(x, b), write_mesh_h5's
-name and mode, and XDMFFile keeping a P2 field's midside nodes (on dolfin femtools'
+name and mode, and XDMFFile keeping a P2 field's midside nodes (on dolfin feluga'
 XDMFFile2: dolfin's own interpolates them away) and writing facet markers. On one rank and
 two.
 

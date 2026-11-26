@@ -1,4 +1,4 @@
-"""`femtools.layout_reader`: a mesh and functions dolfin wrote, read with numpy and h5py.
+"""`feluga.layout_reader`: a mesh and functions dolfin wrote, read with numpy and h5py.
 
     python3 -m pytest tests/test_layout_reader.py
 
@@ -22,7 +22,7 @@ from tests import support
 
 h5py = pytest.importorskip("h5py")
 
-from femtools.layout_reader import LayoutReader  # noqa: E402
+from feluga.layout_reader import LayoutReader  # noqa: E402
 
 
 U = ("0.1 + 0.5*x[0] - 0.25*x[1] + x[0]*x[0] - 0.5*x[1]*x[2]",

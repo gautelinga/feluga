@@ -1,5 +1,5 @@
 """Worker for tests/test_dg0_xdmf.py: a P1 field and DG0 ones written through
-femtools.backend's XDMFFile, on dolfin or DOLFINx.
+feluga.backend's XDMFFile, on dolfin or DOLFINx.
 
     [mpirun -n k] python3 tests/dg0_xdmf_worker.py BACKEND DIR
 
@@ -14,9 +14,9 @@ import sys
 
 BACKEND, FOLDER = sys.argv[1], sys.argv[2]
 if BACKEND == "dolfinx":
-    from femtools.backend import dolfinx as be
+    from feluga.backend import dolfinx as be
 else:
-    from femtools.backend import dolfin as be
+    from feluga.backend import dolfin as be
 
 
 def main():

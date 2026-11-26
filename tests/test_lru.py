@@ -1,4 +1,4 @@
-from femtools.lru import LRU
+from feluga.lru import LRU
 
 
 def test_keeps_the_most_recently_used():

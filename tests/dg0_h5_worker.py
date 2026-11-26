@@ -1,5 +1,5 @@
 """Worker for tests/test_dg0_h5.py: a DG0 Function in dolfin's HDF5 layout through
-femtools.backend, written or read back.
+feluga.backend, written or read back.
 
     [mpirun -n k] python3 tests/dg0_h5_worker.py BACKEND PATH w|r
 
@@ -10,7 +10,7 @@ import sys
 
 import numpy as np
 
-from femtools.backend import load
+from feluga.backend import load
 
 
 def main(backend, path, mode):

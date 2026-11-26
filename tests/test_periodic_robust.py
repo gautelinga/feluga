@@ -2,7 +2,7 @@
 
 - Far from the origin: a box at x = 1e6 whose upper face's nodes lie one ulp off (1.2e-10
   there, beyond an absolute 1e-10) keeps its pairs on both backends, the tolerances being
-  relative to the box (`femtools.periodic_core.box_scale`).
+  relative to the box (`feluga.periodic_core.box_scale`).
 - Ghost cells among DOLFINx markers (`locate_entities` returns them) are dropped, their
   owners marking them; indices outside the local cells raise on every rank.
 - A build failing on rank 0 raises on every rank instead of leaving the others waiting.
@@ -66,7 +66,7 @@ def test_ghost_markers(tmp_path):
 @pytest.mark.mpi
 def test_failed_build_raises_everywhere(tmp_path):
     pytest.importorskip("dolfinx")
-    rs = _run("jit", tmp_path, 2, env={"FEMTOOLS_JIT_DIR": str(tmp_path / "cache")})
+    rs = _run("jit", tmp_path, 2, env={"FELUGA_JIT_DIR": str(tmp_path / "cache")})
     assert rs == [{"generic": "FileNotFoundError", "refine": "FileNotFoundError"}] * 2, rs
 
 
@@ -85,7 +85,7 @@ def test_pairing_is_not_quadratic_along_x():
     """A strip whose periodic face along x has n edges against one along y: the two
     take about the same time (the x one took 75 times longer at n = 80000)."""
     df = pytest.importorskip("dolfin")
-    from femtools.plaza_periodic import refine_periodic
+    from feluga.plaza_periodic import refine_periodic
     n = 80000
     times = []
     for axis in (0, 1):
@@ -105,7 +105,7 @@ def test_congruence_across_a_rounding_boundary():
     """Partners one ulp apart on either side of a rounding boundary of the check's keys
     (x / tol at k + 1/2) are partners."""
     from mpi4py import MPI
-    from femtools.periodic_core import faces_congruent_arrays
+    from feluga.periodic_core import faces_congruent_arrays
     tol = 1e-9
     # a y whose y / tol rounds one way, and the next double the other way
     y = None

@@ -1,4 +1,4 @@
-"""Worker for tests/test_nested_transfer.py: femtools.nested_transfer on one backend.
+"""Worker for tests/test_nested_transfer.py: feluga.nested_transfer on one backend.
 
     [mpirun -n k] python3 tests/nested_transfer_worker.py dolfin|dolfinx out.json h5dir [read_from]
 
@@ -39,7 +39,7 @@ class Dolfin:
         return df.BoxMesh(df.Point(0, 0, 0), df.Point(1, 1, 1), n, n, n)
 
     def space(self, mesh, degree, mixed=False):
-        from femtools.periodic import periodic_box
+        from feluga.periodic import periodic_box
         df = self.df
         d = mesh.topology().dim()
         box = periodic_box([1.0] * d, periodic=[True] + [False] * (d - 1))
@@ -76,8 +76,8 @@ class Dolfinx:
     def space(self, mesh, degree, mixed=False):
         import basix.ufl
         from dolfinx import fem
-        from femtools.dolfinx.periodic import periodic_box
-        from femtools.dolfinx.unique import UniqueDofs
+        from feluga.dolfinx.periodic import periodic_box
+        from feluga.dolfinx.unique import UniqueDofs
         d = mesh.topology.dim
         el = basix.ufl.element("Lagrange", mesh.basix_cell(), degree)
         V = fem.functionspace(mesh, basix.ufl.mixed_element([el, el]) if mixed else el)
@@ -102,7 +102,7 @@ class Dolfinx:
 
 
 def run(backend, out, h5dir, read_from=None):
-    from femtools.nested_transfer import Nested, refine_uniformly
+    from feluga.nested_transfer import Nested, refine_uniformly
     B = Dolfin() if backend == "dolfin" else Dolfinx()
     comm = B.comm
     res = {}
@@ -160,7 +160,7 @@ def _csr(A):
 def _blockwise_differs(B, nest, Vc, Vf, P, R):
     """1.0 when P, R or the lattice of Vf differ when built from blocks of 5 fine cells,
     on any rank; else 0.0."""
-    from femtools import hierarchical_transfer
+    from feluga import hierarchical_transfer
     chunk = hierarchical_transfer.EVAL_CHUNK
     lat = nest.lattice(Vf)
     hierarchical_transfer.EVAL_CHUNK = 5

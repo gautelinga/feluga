@@ -4,7 +4,7 @@
 
 Under `mpirun -n 3` (needs mpi4py and mpirun): rows of several arrays
 and dtypes reach the ranks they name, grouped by source, and answers come back aligned
-with the rows asked -- in one round and forced into many (FEMTOOLS_ROUND), the
+with the rows asked -- in one round and forced into many (FELUGA_ROUND), the
 same bits; a rank with no rows may pass an empty array of another dtype; ranks passing
 rows of different dtypes, and a destination outside the ranks, are refused on every rank
 (the job ends with the message rather than hanging).
@@ -22,7 +22,7 @@ WORKER = r"""
 import sys
 import numpy as np
 from mpi4py import MPI
-from femtools.hdf5_rows import reply, route, to_owners, block_edges
+from feluga.hdf5_rows import reply, route, to_owners, block_edges
 
 def main(argv):
     comm = MPI.COMM_WORLD
@@ -96,7 +96,7 @@ def results(proc):
 def test_rows_reach_their_ranks_and_answers_come_back(tmp_path):
     one = mpirun(tmp_path, "ok")
     assert one.returncode == 0, one.stdout + one.stderr
-    many = mpirun(tmp_path, "ok", {"FEMTOOLS_ROUND": "7"})   # hundreds of rounds
+    many = mpirun(tmp_path, "ok", {"FELUGA_ROUND": "7"})   # hundreds of rounds
     assert many.returncode == 0, many.stdout + many.stderr
     assert results(one) == results(many) and len(results(one)) == 3
 
@@ -113,7 +113,7 @@ def test_no_communicator_is_one_rank():
     """route, reply and lookup with comm None: the rows stay, answers come back aligned,
     a lookup is an index into the block (and refuses a row outside it)."""
     import numpy as np
-    from femtools.hdf5_rows import lookup, reply, route
+    from feluga.hdf5_rows import lookup, reply, route
     a = np.arange(12.0).reshape(6, 2)
     r = route(None, np.zeros(6, np.int64), a)
     assert np.array_equal(r.received[0], a)

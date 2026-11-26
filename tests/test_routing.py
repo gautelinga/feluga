@@ -8,7 +8,7 @@ numpy only.
 """
 import numpy as np
 
-from femtools.hdf5_rows import rank_of
+from feluga.hdf5_rows import rank_of
 
 
 def test_rows_of_any_size_meet_at_one_rank_each_spread_evenly():
@@ -32,7 +32,7 @@ def test_rows_of_any_size_meet_at_one_rank_each_spread_evenly():
 def test_rank_order_is_the_stable_argsort():
     """`rank_order` sorts by 16-bit ranks where they fit: the permutation of the 64-bit
     stable argsort, at one rank, a few, a node's and the 16-bit edge, and past it."""
-    from femtools.hdf5_rows import rank_order
+    from feluga.hdf5_rows import rank_order
     rng = np.random.default_rng(1)
     for size in (1, 3, 256, 32768, 40000):
         dest = rng.integers(0, size, 20000)
@@ -44,7 +44,7 @@ def test_unique_rows_is_numpys():
     """`hdf5_rows.unique_rows` is `np.unique(axis=0)`, the same rows in the same order,
     on rows that pack into one key (vertex numbers, -1 for no second end, ranks) and on
     rows whose ranges do not."""
-    from femtools.hdf5_rows import unique_rows as _unique_rows
+    from feluga.hdf5_rows import unique_rows as _unique_rows
     rng = np.random.default_rng(2)
     for top in (5, 1 << 20, 1 << 40):
         rows = np.stack([rng.integers(0, 2, 5000), rng.integers(0, top, 5000),
@@ -58,7 +58,7 @@ def test_sorted_unique_is_numpys():
     """`hdf5_rows.sorted_unique` is a plain `np.unique` of ints: the same values, sorted,
     of the same type, for few and many distinct values, int32 and int64, a 2-D array
     (flattened), one value and none."""
-    from femtools.hdf5_rows import sorted_unique
+    from feluga.hdf5_rows import sorted_unique
     rng = np.random.default_rng(3)
     for top in (3, 1 << 20, 1 << 40):
         for dtype in (np.int32, np.int64):

@@ -1,8 +1,8 @@
-"""`femtools.periodic_core.dorfler_threshold_values`: the bulk-chasing threshold on arrays,
+"""`feluga.periodic_core.dorfler_threshold_values`: the bulk-chasing threshold on arrays,
 one rank."""
 import numpy as np
 
-from femtools.periodic_core import dorfler_threshold_values
+from feluga.periodic_core import dorfler_threshold_values
 
 
 def test_threshold_marks_the_smallest_bulk():

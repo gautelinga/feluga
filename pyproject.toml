@@ -3,7 +3,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "femtools"
+name = "feluga"
 version = "2026.2.4"
 description = "Tools for legacy-dolfin and DOLFINx solvers: one backend API, periodic spaces and refinement, assembly, transfers, XDMF and HDF5 I/O"
 requires-python = ">=3.10"
@@ -14,25 +14,25 @@ classifiers = ["License :: OSI Approved :: GNU Lesser General Public License v3 
 dependencies = ["numpy", "h5py"]
 
 [project.optional-dependencies]
-# under MPI, reading a quadratic grid back, and femtools.probes and femtools.gradient
+# under MPI, reading a quadratic grid back, and feluga.probes and feluga.gradient
 dolfin = ["mpi4py", "scipy", "cppimport", "pybind11", "petsc4py"]
-# femtools.dolfinx's C++ (refinement, assembly) is built with CMake and nanobind
+# feluga.dolfinx's C++ (refinement, assembly) is built with CMake and nanobind
 dolfinx = ["mpi4py", "scipy", "petsc4py", "nanobind", "cmake"]
 test = ["pytest", "pytest-xdist"]
 
 [project.scripts]
-femtools-cut-facets = "femtools.facets:main"
-femtools-build-dof-reorder = "femtools.dof_reorder:main"
+feluga-cut-facets = "feluga.facets:main"
+feluga-build-dof-reorder = "feluga.dof_reorder:main"
 
 [tool.setuptools.packages.find]
-include = ["femtools*"]
+include = ["feluga*"]
 
 [tool.setuptools.package-data]
-# compiled by cppimport on import of femtools.probes or femtools.gradient, not before;
-# cpp/dof_reorder_star.cpp by femtools-build-dof-reorder
-femtools = ["cpp/*.cpp", "cpp/*.h"]
-# built with CMake on first use of femtools.dolfinx.refine
-"femtools.dolfinx" = ["cpp/*.cpp", "cpp/CMakeLists.txt"]
+# compiled by cppimport on import of feluga.probes or feluga.gradient, not before;
+# cpp/dof_reorder_star.cpp by feluga-build-dof-reorder
+feluga = ["cpp/*.cpp", "cpp/*.h"]
+# built with CMake on first use of feluga.dolfinx.refine
+"feluga.dolfinx" = ["cpp/*.cpp", "cpp/CMakeLists.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

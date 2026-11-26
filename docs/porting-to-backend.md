@@ -1,11 +1,11 @@
-# Porting dolfin code to femtools.backend (and so to DOLFINx)
+# Porting dolfin code to feluga.backend (and so to DOLFINx)
 
 This guide is for code written against legacy dolfin (`import dolfin as df`) that should run
 on both dolfin and DOLFINx without being written twice. The route is to replace every
-dolfin name with the matching name from `femtools.backend`. That module has dolfin's
+dolfin name with the matching name from `feluga.backend`. That module has dolfin's
 object API (`FunctionSpace(mesh, "CG", 1)`, `u.vector()`, `DirichletBC(V, g, markers, 1)`,
 `assemble`) on both backends, so most of a port is mechanical. The rest, a dozen dolfin
-features DOLFINx lacks, each have a femtools replacement (section 5).
+features DOLFINx lacks, each have a feluga replacement (section 5).
 
 Port to the backend on dolfin first, then switch to DOLFINx. On dolfin, the ported code
 should give the same numbers as the original to round-off. Once it does, every difference
@@ -18,22 +18,22 @@ this way, and is the worked example below.
 ## 1. One import module
 
 Give the project one module that every script imports its finite-element names from,
-and let `femtools.backend.load` pick the backend:
+and let `feluga.backend.load` pick the backend:
 
 ```python
 # myproject/backend.py
 import os
 
-import femtools.backend
+import feluga.backend
 
 name = os.environ.get("MYPROJECT_BACKEND", "dolfin")
-B = femtools.backend.load(name)                      # femtools.backend.dolfin or .dolfinx
+B = feluga.backend.load(name)                      # feluga.backend.dolfin or .dolfinx
 globals().update({n: getattr(B, n) for n in B.NAMES})
 __all__ = list(B.NAMES) + ["name", "B"]
 ```
 
 Scripts then use the bare names (`from myproject.backend import *`) or `B.FunctionSpace`.
-Code that receives a mesh or Function from elsewhere can ask `femtools.backend.of(obj)` for
+Code that receives a mesh or Function from elsewhere can ask `feluga.backend.of(obj)` for
 its backend instead.
 
 A command-line switch (`--backend dolfinx`) can set the variable before the first import
@@ -47,7 +47,7 @@ work ("MPI_Comm_get_attr() was called after MPI_FINALIZE").
 
 ## 2. The mechanical part: `df.X` becomes `X`
 
-These names are on both backends with dolfin's meaning (see `femtools.backend.NAMES`):
+These names are on both backends with dolfin's meaning (see `feluga.backend.NAMES`):
 
 - **UFL:** `inner`, `grad`, `div`, `dot`, `dx`, `Measure`, `FacetNormal`,
   `SpatialCoordinate`, `TrialFunction(s)`, `TestFunction(s)`, `sqrt`, `conditional`, and
@@ -69,7 +69,7 @@ These names are on both backends with dolfin's meaning (see `femtools.backend.NA
 dolfin's `V.mesh()` is DOLFINx's `V.mesh`, and so on. Code meant for both calls the
 neutral helpers instead:
 
-| dolfin | femtools.backend |
+| dolfin | feluga.backend |
 |---|---|
 | `u.function_space()` | `function_space(u)` |
 | `V.mesh()` | `space_mesh(V)` |
@@ -84,7 +84,7 @@ The quickest way to find them is to run the port on DOLFINx: each one fails with
 
 ## 4. Files
 
-| dolfin | femtools.backend |
+| dolfin | feluga.backend |
 |---|---|
 | `HDF5File(...).read(mesh, "mesh", False)` | `mesh = read_mesh_file(path)` |
 | `HDF5File(...).write(mesh, "mesh")` | `write_mesh_h5(path, mesh, "mesh")` |
@@ -111,7 +111,7 @@ by reading the files directly has to go through it, or match by position.
 
 ## 5. What DOLFINx does not have
 
-| dolfin | femtools.backend |
+| dolfin | feluga.backend |
 |---|---|
 | `MeshFunction("size_t", mesh, tdim - 1)` (facet markers) | `BoundaryMarkers(mesh)`, then `SubDomain.mark(markers, 1)`, `set_all`, `rename`, `DirichletBC(V, g, markers, 1)`, `Measure("ds", subdomain_data=markers)` |
 | `MeshFunction("bool", mesh, tdim)` + `refine(mesh, markers)` | `refine_cells(mesh, cell_values(indicator) > tol)`: the same cells on both backends and on any number of ranks |
@@ -120,9 +120,9 @@ by reading the files directly has to go through it, or match by position.
 | `assemble_system(a, L, bcs)` | `A = assemble(a, couplings="form", bcs=bcs)` (conditions applied symmetrically) and `b = assemble(L)`, then `bc.apply(b)` for each condition (homogeneous conditions) |
 | `LinearVariationalSolver` | `A = assemble(a); b = assemble(L); apply_bc(bcs, A, b)`, then `PETScKrylovSolver(method, pc).solve(A, u.vector(), b)` |
 | `project(expr, V)` | a mass-matrix solve (below) |
-| `KrylovSolver("minres", "hypre_amg")` on Stokes | `femtools.saddle`: MINRES with the block-diagonal preconditioner (`block_preconditioner`, `pressure_mass_diagonal`, `solve_checked`) |
-| `fenicstools` / `femtools.probes` `Probes`, `GradProbes` | `Probes`, `GradProbes` from the backend: the same calls (`probes(u)`, `grad(u)`, `array`, `array_grad`, `dump`) |
-| `vertex_to_dof_map` for one value per vertex | `femtools.vertex_field` (`read_function`, `is_vertex_layout`) |
+| `KrylovSolver("minres", "hypre_amg")` on Stokes | `feluga.saddle`: MINRES with the block-diagonal preconditioner (`block_preconditioner`, `pressure_mass_diagonal`, `solve_checked`) |
+| `fenicstools` / `feluga.probes` `Probes`, `GradProbes` | `Probes`, `GradProbes` from the backend: the same calls (`probes(u)`, `grad(u)`, `array`, `array_grad`, `dump`) |
+| `vertex_to_dof_map` for one value per vertex | `feluga.vertex_field` (`read_function`, `is_vertex_layout`) |
 
 **Compiled C++ expressions** (`compile_cpp_code`, `CompiledExpression`) that compute
 per-cell quantities have no counterpart. Replace them with exact cell means, assembled:
@@ -141,7 +141,7 @@ For a P1 field `a`, `cell_mean(a, DG0)` is the cell's mean value and
 `cell_mean(sqrt(inner(grad(a), grad(a))), DG0)` its |grad a|. Both are exact, and they
 equal what addictif's C++ helpers computed to round-off.
 `cell_mean(ufl.MaxCellEdgeLength(mesh.ufl_domain()), DG0)` is dolfin's `Cell.h()`. For
-|cell mean of a vector|, use `femtools.cell_mean.cell_mean_norm`. A gradient component as
+|cell mean of a vector|, use `feluga.cell_mean.cell_mean_norm`. A gradient component as
 DG0 is `cell_mean(a.dx(i), DG0)`.
 
 `project(expr, V)` is the L2 projection, a solve with V's mass matrix:

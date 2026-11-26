@@ -1,8 +1,8 @@
 """tests/test_dolfinx_sync.py's worker: a backend Function's two layouts kept consistent
-(femtools.backend.dolfinx), whatever writes them; one JSON line a rank."""
+(feluga.backend.dolfinx), whatever writes them; one JSON line a rank."""
 import json
 
-from femtools.backend.dolfinx import (MPI, FiniteElement, Function, FunctionSpace,
+from feluga.backend.dolfinx import (MPI, FiniteElement, Function, FunctionSpace,
                                       MixedElement, PeriodicBox, UnitSquareMesh, assemble,
                                       dx, split)
 

@@ -1,4 +1,4 @@
-"""femtools' collective data paths on more ranks than cells (tests/zero_cells_worker.py):
+"""feluga' collective data paths on more ranks than cells (tests/zero_cells_worker.py):
 the dof tables, a checkpoint written and read, an XDMF series written and read, the
 nested transfer's prolongation, injection and lattice -- on a mesh of two cells over four
 ranks, two of which hold none. Every step must finish on every rank, with the right

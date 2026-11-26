@@ -15,7 +15,7 @@ import h5py
 import numpy as np
 from mpi4py import MPI
 
-from femtools import hdf5_rows
+from feluga import hdf5_rows
 
 
 def main(out):

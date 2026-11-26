@@ -1,8 +1,8 @@
 """tests/test_backend_stokes.py's worker: one periodic Taylor-Hood Stokes solve written once
-against femtools.backend, on backend argv[1]. Plane Poiseuille: the unit cube, periodic in x
+against feluga.backend, on backend argv[1]. Plane Poiseuille: the unit cube, periodic in x
 and z, no-slip on y = 0 and y = 1, driven along x by a unit body force; P2 holds the parabola
 exactly, so k = mean(u_x) / f = 1/12 to the solver's tolerance. MINRES with
-femtools.saddle's block preconditioner, kind argv[2] ("fieldsplit" or "shared"), on the
+feluga.saddle's block preconditioner, kind argv[2] ("fieldsplit" or "shared"), on the
 Taylor-Hood layout argv[3] ("vector": [P2^3, P1], one no-slip condition on the velocity;
 "scalars": [P2, P2, P2, P1], one a component). Also the global counts (global_dim,
 global_num_cells, global_num_vertices, marker_counts, fixed_dofs), and the solution split
@@ -14,13 +14,13 @@ import importlib
 import json
 import sys
 
-L = importlib.import_module("femtools.backend." + sys.argv[1])  # before mpi4py (dolfin)
+L = importlib.import_module("feluga.backend." + sys.argv[1])  # before mpi4py (dolfin)
 import numpy as np  # noqa: E402
 from mpi4py import MPI  # noqa: E402
 from petsc4py import PETSc  # noqa: E402
 
-from femtools.couplings import num_sub_spaces  # noqa: E402
-from femtools.saddle import block_preconditioner, pressure_mass_diagonal, solve_checked  # noqa: E402,E501
+from feluga.couplings import num_sub_spaces  # noqa: E402
+from feluga.saddle import block_preconditioner, pressure_mass_diagonal, solve_checked  # noqa: E402,E501
 
 
 N = 4

@@ -1,4 +1,4 @@
-"""femtools.backend.dolfinx: the backend's caches (compiled forms, constant matrices,
+"""feluga.backend.dolfinx: the backend's caches (compiled forms, constant matrices,
 linear solvers, components of mixed spaces, nodal values) are kept on the meshes and
 spaces they are built on, so a mesh the caller drops is freed (a refinement ladder does not
 keep every level), while a form assembled again on a live mesh is compiled once.

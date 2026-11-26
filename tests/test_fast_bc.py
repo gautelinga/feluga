@@ -1,4 +1,4 @@
-"""`femtools.fast_bc`: apply gives DirichletBC.apply's vector for a Constant, a vector
+"""`feluga.fast_bc`: apply gives DirichletBC.apply's vector for a Constant, a vector
 Constant and a Function value, follows changes to the value, leaves an Expression and
 a component to dolfin, sets a matrix as dolfin does, applies a list of conditions in
 its order, and agrees on three ranks, ghost values included. The dolfin backend's
@@ -12,8 +12,8 @@ import pytest
 df = pytest.importorskip("dolfin")
 pytestmark = [pytest.mark.dolfin]
 
-from femtools import fast_bc  # noqa: E402
-from femtools.periodic import PeriodicBox  # noqa: E402
+from feluga import fast_bc  # noqa: E402
+from feluga.periodic import PeriodicBox  # noqa: E402
 from tests import support  # noqa: E402
 
 WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fast_bc_worker.py")
@@ -143,7 +143,7 @@ def fixed_reference(V, bcs):
 def test_fixed_dofs(periodic):
     """The dolfin backend's `fixed_dofs`: the owned global dofs of the conditions, sorted
     and each once, as PETSc's integers (as on DOLFINx); none for no conditions."""
-    from femtools.backend.dolfin import fixed_dofs
+    from feluga.backend.dolfin import fixed_dofs
     V = space(periodic)
     bcs = overlapping(V)
     got = fixed_dofs(V, bcs)

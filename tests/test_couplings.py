@@ -1,4 +1,4 @@
-"""`femtools.couplings`: a bilinear form's coupled components, and matrices storing only
+"""`feluga.couplings`: a bilinear form's coupled components, and matrices storing only
 those blocks, on both backends.
 
     python3 -m pytest tests/test_couplings.py [-m mpi]
@@ -74,7 +74,7 @@ def test_a_mask_of_the_wrong_shape_is_refused():
     np = pytest.importorskip("numpy")
     ufl = pytest.importorskip("ufl")
     basix = pytest.importorskip("basix.ufl")
-    from femtools.couplings import resolve
+    from feluga.couplings import resolve
     cell = basix.element("P", "tetrahedron", 1).cell_type.name
     mesh = ufl.Mesh(basix.element("P", cell, 1, shape=(3,)))
     V = ufl.FunctionSpace(mesh, basix.mixed_element([basix.element("P", cell, 1)] * 2))

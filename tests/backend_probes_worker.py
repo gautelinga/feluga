@@ -1,4 +1,4 @@
-"""Worker for tests/test_backend_probes.py: femtools.backend's Probes and GradProbes on
+"""Worker for tests/test_backend_probes.py: feluga.backend's Probes and GradProbes on
 dolfin or DOLFINx.
 
     [mpirun -n k] python3 tests/backend_probes_worker.py BACKEND OUT.npz
@@ -22,9 +22,9 @@ U = ("x[0] + 2*x[1]", "3*x[2] - x[0]", "x[1]")
 
 def main(backend, out_path):
     if backend == "dolfinx":
-        from femtools.backend import dolfinx as be
+        from feluga.backend import dolfinx as be
     else:
-        from femtools.backend import dolfin as be
+        from feluga.backend import dolfin as be
     mesh = be.BoxMesh(be.Point(0, 0, 0), be.Point(1, 1, 1), 4, 4, 4)
     P2 = be.FunctionSpace(mesh, "Lagrange", 2)
     V1 = be.FunctionSpace(mesh, be.VectorElement("Lagrange", mesh.ufl_cell(), 1))
@@ -61,7 +61,7 @@ def main(backend, out_path):
     g.dump(out_path[:-4] + "_f")
     be.mesh_comm(mesh).barrier()
     if be.mesh_comm(mesh).rank == 0:
-        from femtools.probes import read_dump
+        from feluga.probes import read_dump
         dumped = read_dump(out_path[:-4] + "_f")
         out["dump_ids"] = np.array(sorted(dumped))
         out["dump_f"] = np.array([dumped[i][1][:, 0] for i in sorted(dumped)])

@@ -1,4 +1,4 @@
-"""`femtools-build-dof-reorder` against the dolfin installed here: the copied function
+"""`feluga-build-dof-reorder` against the dolfin installed here: the copied function
 compiles against its headers and exports exactly the symbol libdolfin exports, and the build
 either passes its PLT check or refuses with that reason; a failed compile is refused."""
 import shutil
@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("dolfin")
 pytestmark = [pytest.mark.dolfin]
 
-from femtools import dof_reorder  # noqa: E402
+from feluga import dof_reorder  # noqa: E402
 
 
 @pytest.mark.skipif(not (shutil.which('c++') and shutil.which('pkg-config')

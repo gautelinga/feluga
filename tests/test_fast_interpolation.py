@@ -1,4 +1,4 @@
-"""`femtools.fast_interpolation`: interpolate and values give dolfin.interpolate's
+"""`feluga.fast_interpolation`: interpolate and values give dolfin.interpolate's
 values between Lagrange spaces of any degrees, scalar and vector, from a component of
 a mixed or a vector Function, on a periodic space and on three ranks; refuse what they
 cannot do; build the transfer once per pair of spaces, and hold no more than its
@@ -12,8 +12,8 @@ import pytest
 df = pytest.importorskip("dolfin")
 pytestmark = [pytest.mark.dolfin]
 
-from femtools import fast_interpolation as fi  # noqa: E402
-from femtools.periodic import PeriodicBox  # noqa: E402
+from feluga import fast_interpolation as fi  # noqa: E402
+from feluga.periodic import PeriodicBox  # noqa: E402
 from tests import support  # noqa: E402
 
 WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fast_interpolation_worker.py")
@@ -102,7 +102,7 @@ HELD = r"""
 import ctypes
 import dolfin as df
 from petsc4py import PETSc
-from femtools import fast_interpolation as fi
+from feluga import fast_interpolation as fi
 
 _lib = ctypes.CDLL(PETSc.__file__)
 

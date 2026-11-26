@@ -1,4 +1,4 @@
-"""`femtools.periodic`: the periodic box, as a Python SubDomain and compiled, and the
+"""`feluga.periodic`: the periodic box, as a Python SubDomain and compiled, and the
 compiled bulk accessors.
 
     python3 -m pytest tests/test_periodic.py
@@ -14,7 +14,7 @@ import pytest
 df = pytest.importorskip("dolfin")
 pytestmark = [pytest.mark.dolfin]
 
-from femtools.periodic import PeriodicBox, cell_dofs, connectivity, periodic_box  # noqa: E402
+from feluga.periodic import PeriodicBox, cell_dofs, connectivity, periodic_box  # noqa: E402
 
 
 @pytest.mark.parametrize("make", [PeriodicBox, periodic_box])
@@ -123,14 +123,14 @@ def test_connectivity_of_listed_entities_is_those_rows():
 @pytest.mark.parametrize("n", [4, 5, 6])
 def test_faces_congruent_on_a_2d_mesh(n):
     """2D coordinates are padded, not reshaped as 3D rows."""
-    from femtools.periodic import faces_congruent
+    from feluga.periodic import faces_congruent
     assert faces_congruent(df.UnitSquareMesh(n, n), [1.0, 1.0], [0, 1], edges=True)[0]
 
 
 def test_a_box_off_the_origin_needs_its_lower_corner():
     """A centred box is compared at its own faces with `lower`, and refused without it
     rather than compared with the plane through its middle."""
-    from femtools.periodic import faces_congruent
+    from feluga.periodic import faces_congruent
     mesh = df.BoxMesh(df.Point(-.5, -1, -.5), df.Point(.5, 1, .5), 3, 4, 3)
     with pytest.raises(ValueError, match="lower corner"):
         faces_congruent(mesh, [.5, 1, .5], [0, 1, 2])
@@ -145,7 +145,7 @@ def test_a_box_off_the_origin_needs_its_lower_corner():
 def test_refining_a_centred_box_keeps_its_faces_paired(dim):
     """Cells marked near one face only of a centred box: its partner face is bisected
     alike, and the guard compares the box's own faces."""
-    from femtools.refine_periodic import refine_congruent
+    from feluga.refine_periodic import refine_congruent
     if dim == 2:
         mesh = df.RectangleMesh(df.Point(-.5, -.5), df.Point(.5, .5), 6, 6)
     else:

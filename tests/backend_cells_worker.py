@@ -1,4 +1,4 @@
-"""Worker for tests/test_backend_cells.py: femtools.backend's cell_values, refine_cells,
+"""Worker for tests/test_backend_cells.py: feluga.backend's cell_values, refine_cells,
 interpolate across meshes and Expressions off the default mesh, on dolfin or DOLFINx.
 
     [mpirun -n k] python3 tests/backend_cells_worker.py BACKEND OUT.json
@@ -20,9 +20,9 @@ import numpy as np
 
 def main(backend, out_path):
     if backend == "dolfinx":
-        from femtools.backend import dolfinx as be
+        from feluga.backend import dolfinx as be
     else:
-        from femtools.backend import dolfin as be
+        from feluga.backend import dolfin as be
     from mpi4py import MPI
     mesh = be.BoxMesh(be.Point(0, 0, 0), be.Point(1, 1, 1), 4, 4, 4)
     comm = be.mesh_comm(mesh)
@@ -62,7 +62,7 @@ def main(backend, out_path):
     # the quadratic is in P2: its nodal values integrate to the exact integral, 8/3 * 1
     integral = be.assemble(h * be.dx)
 
-    from femtools.tables import space_tables
+    from feluga.tables import space_tables
     t = space_tables(be.FunctionSpace(fine, "Lagrange", 1))
     # a cell as its vertex positions, sorted: the same on either backend's numbering
     cells = [tuple(sorted(map(tuple, np.round(c, 9).tolist()))) for c in t.x]

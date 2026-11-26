@@ -1,4 +1,4 @@
-"""`femtools.mixed`: a component of a mixed Function read and set through its
+"""`feluga.mixed`: a component of a mixed Function read and set through its
 collapsed space, built once; a vector Function put together from scalar ones.
 
     python3 -m pytest tests/test_mixed.py
@@ -9,9 +9,9 @@ import pytest
 df = pytest.importorskip("dolfin")
 pytestmark = [pytest.mark.dolfin]
 
-from femtools.mixed import (  # noqa: E402
+from feluga.mixed import (  # noqa: E402
     AssignedVectorFunction, set_subfunction, subfunction, subspace)
-from femtools.periodic import periodic_box  # noqa: E402
+from feluga.periodic import periodic_box  # noqa: E402
 
 
 def mixed():

@@ -1,6 +1,6 @@
-"""One periodic Taylor-Hood Stokes solve written once against femtools.backend, run on both
+"""One periodic Taylor-Hood Stokes solve written once against feluga.backend, run on both
 backends, one rank and two: plane Poiseuille (periodic in x and z, no-slip on y = 0 and 1,
-unit force along x), which P2 holds exactly, so k = 1/12, with femtools.saddle's block
+unit force along x), which P2 holds exactly, so k = 1/12, with feluga.saddle's block
 preconditioner of either kind, on either Taylor-Hood layout ([P2^3, P1] and
 [P2, P2, P2, P1]); and the counts the solve reports
 (global_dim, global_num_cells, global_num_vertices, marker_counts, fixed_dofs) by hand; the
